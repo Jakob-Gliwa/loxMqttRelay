@@ -1,6 +1,9 @@
 # MQTT Relay for Loxone
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+![Docker Pulls](https://img.shields.io/docker/pulls/acidcliff/loxmqttrelay)
+![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/jakob-gliwa/loxMqttRelay/main.yml)
+[![Static Badge](https://img.shields.io/badge/get_it-on_Docker_Hub-blue)](https://hub.docker.com/r/acidcliff/loxmqttrelay)
 
 This MQTT Relay enables seamless communication between your MQTT devices/services and Loxone Miniserver.
 It is heavily insipred and based upon the extraordinary work of [Loxberry](https://github.com/mschlenstedt/Loxberry) - especially the MQTT Gateway.
