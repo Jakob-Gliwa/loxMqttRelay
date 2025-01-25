@@ -32,7 +32,32 @@ The general mindset is to use MQTT Relay for Loxone in conjunctin with other too
 
 ### Run with docker (recommended)
 ```bash
+# Create a configuration directory and copy the default config
+mkdir -p config
+curl -o config/config.toml https://raw.githubusercontent.com/Jakob-Gliwa/loxMqttRelay/main/config/default_config.toml
+
+# Edit the config file with your settings
+# nano config/config.toml
+
+# Run the container
+docker run -d \
+  --name loxmqttrelay \
+  --restart unless-stopped \
+  -v $(pwd)/config:/app/config \
+  -p 11884:11884/udp \
+  -p 8501:8501 \
+  acidcliff/loxmqttrelay
+
+# For headless mode (recommended for production):
+docker run -d \
+  --name loxmqttrelay \
+  --restart unless-stopped \
+  -v $(pwd)/config:/app/config \
+  -p 11884:11884/udp \
+  -e HEADLESS=true \
+  acidcliff/loxmqttrelay
 ```
+
 ### Local installation
 ```bash
   1. Clone the repository:
