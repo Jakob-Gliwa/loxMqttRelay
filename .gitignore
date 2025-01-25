@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.installed.cfg
+MANIFEST
+
+# Virtual Environment
+.env
+.venv
+venv/
+ENV/
+
+# Testing
+.coverage
+.coverage.*
+coverage.xml
+.pytest_cache/
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Project specific
+Temp/
+uv.lock
+
+# Logs
+*.log
+logs/
+config/config.toml
+src/loxwebsocket/cython_modules/extractor.c

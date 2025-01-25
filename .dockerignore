@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Test files
+tests/
+pytest.ini
+coverage.xml
+
+# Development files
+.git/
+.gitignore
+.gitlab-ci.yml
+.env
+.env.*
+.python-version
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Project specific
+Temp/
+LoxoneSupport/
+logs/
+*.log
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Cython build files
+src/loxmqttrelay/cython_modules/*.c
+src/loxmqttrelay/cython_modules/benchmark.py
+src/loxmqttrelay/cython_modules/bechmark_expand_json.py 

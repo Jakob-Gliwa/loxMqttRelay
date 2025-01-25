@@ -1,0 +1,40 @@
+[general]
+log_level = "INFO"
+base_topic = "test/"
+cache_size = 100000
+
+[broker]
+host = "test.mosquitto.org"
+port = 1884
+user = ""  # null becomes empty string in TOML
+password = ""  # null becomes empty string in TOML
+client_id = "loxmqttrelay"
+
+[miniserver]
+miniserver_ip = "127.0.0.1"
+miniserver_port = 80
+miniserver_user = ""
+miniserver_pass = ""
+miniserver_max_parallel_connections = 5
+sync_with_miniserver = false
+use_websocket = true
+
+[topics]
+subscriptions = ["topic3"]
+subscription_filters = []
+topic_whitelist = []
+do_not_forward = []
+
+[processing]
+expand_json = false
+convert_booleans = false
+
+[udp]
+udp_in_port = 11884
+
+[debug]
+publish_processed_topics = false
+publish_forwarded_topics = false
+mock_ip = ""
+enable_mock = false
+
