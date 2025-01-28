@@ -1,7 +1,7 @@
 from functools import lru_cache
 import logging
 import re
-from typing import Dict, Any, List, Pattern, Optional, Callable, Awaitable
+from typing import Dict, Any, List, Pattern, Optional, Callable, Awaitable, Set
 import orjson
 from loxmqttrelay.config import global_config
 
@@ -66,9 +66,10 @@ class MiniserverDataProcessor:
         logger.debug(f"Updating subscription filters: {filters}")
         self.compiled_subscription_filter = self._compile_filters(filters)
 
-    def update_topic_whitelist(self, whitelist: List[str]) -> None:
+    def update_topic_whitelist(self, whitelist: Set[str]) -> None:
         logger.debug(f"Updating topic whitelist: {whitelist}")
         self.topic_whitelist = whitelist
+        self.is_in_whitelist.cache_clear()
 
     def update_do_not_forward(self, filters: List[str]) -> None:
         logger.debug(f"Updating do_not_forward filters: {filters}")
@@ -104,8 +105,6 @@ class MiniserverDataProcessor:
         logger.debug(f"Flattening dictionary with parent_key='{parent_key}', separator='{sep}'")
         items = []
 
-
-
         if isinstance(d, list):
             d = {str(i): v for i, v in enumerate(d)}
         for k, v in d.items():
@@ -137,30 +136,12 @@ class MiniserverDataProcessor:
             logger.debug(f"Failed to parse JSON: {e}")
             logger.debug("Returning original topic-value pair")
             return [(topic, val)]
-    
-    def transform_data(self, topic: str, message: str) -> List[tuple[str, Any]]:
-        """Transform data according to specified options"""
-        logger.debug(f"Transforming data with expand_json={global_config.processing.expand_json}, convert_booleans={global_config.processing.convert_booleans}")
-        logger.debug(f"Input data - Topic {topic}, message {message}")
-        
-        # JSON expansion
-        if global_config.processing.expand_json:
-            logger.debug("Performing JSON expansion")
-            processed_data = self.expand_json(topic, message)
-        else:
-            logger.debug("Skipping JSON expansion")
-            processed_data = [(topic, message)]
 
-        # Boolean conversion
-        if global_config.processing.convert_booleans:
-            logger.debug("Performing boolean conversion")
-            processed_data = [
-                (t, self._convert_boolean(val) if val != "" else val)
-                for t, val in processed_data
-            ]
-
-        logger.debug(f"Final transformed data: {processed_data}")
-        return processed_data
+    @lru_cache(maxsize=global_config.general.cache_size)
+    def is_in_whitelist(self, topic: str) -> bool:
+        """Check if the topic is in the whitelist"""
+        normalized = self.normalize_topic(topic)
+        return normalized in self.topic_whitelist
 
     async def process_data(
         self,
@@ -175,9 +156,14 @@ class MiniserverDataProcessor:
         if self.compiled_subscription_filter and self.compiled_subscription_filter.search(topic):
             return []
 
-        # 2) Flatten & transform booleans
-        processed_tuples = self.transform_data(topic, message)
-        logger.debug(f"Data after transformation: {processed_tuples}")
+        # 2) Flatten data
+        logger.debug(f"Transforming data with expand_json={global_config.processing.expand_json}")
+        if global_config.processing.expand_json:
+            processed_tuples = self.expand_json(topic, message)
+        else:
+            logger.debug("Skipping JSON expansion")
+            processed_tuples = [(topic, message)]
+        logger.debug(f"Data after flattening: {processed_tuples}")
 
         # Optionales Debug-Publish der bereits verarbeiteten Topics
         if global_config.debug.publish_processed_topics and mqtt_publish_callback:
@@ -192,25 +178,24 @@ class MiniserverDataProcessor:
         for topic, value in processed_tuples:
             logger.debug(f"Final filtering for topic: {topic}")
 
+            # Whitelist
+            if self.topic_whitelist and not self.is_in_whitelist(topic): 
+                logger.debug(f"Topic '{topic}' not in whitelist")
+                continue
+
             # Subscription-Filter (zweiter Durchlauf)
             if self.compiled_subscription_filter and \
                self.compiled_subscription_filter.search(topic):
                 logger.debug(f"Topic '{topic}' filtered by second pass (subscription_filter)")
                 continue
 
-            # Whitelist
-            if self.topic_whitelist: 
-                normalized = self.normalize_topic(topic)
-                if normalized not in self.topic_whitelist:
-                    logger.debug(f"Topic '{topic}' not in whitelist")
-                    continue
             # do_not_forward
             elif self.do_not_forward_patterns and \
                 self.do_not_forward_patterns.search(topic):
                     logger.debug(f"Topic '{topic}' filtered by do_not_forward")
                     continue
 
-            final_data.append((topic, value))
+            final_data.append((topic, self._convert_boolean(value)))
             logger.debug(f"Topic '{topic}' passed all filters")
 
         logger.debug(f"Final processed data: {final_data}")

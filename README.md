@@ -420,7 +420,7 @@ Set will ceompletely overwrite the current settings with the given keys.
 ```json
 {
     "subscriptions": ["new/topic1", "new/topic2"],
-    "topic_whitelist": ["new/whitelist/topic"]
+    "topic_whitelist": ["new_whitelist_topic"]
 }
 ```
 
@@ -432,7 +432,7 @@ Add is just available for lists and will add the given elements to the list of t
 ```json
 {
     "subscriptions": ["additional/topic"],
-    "topic_whitelist": ["new/allowed/topic"]
+    "topic_whitelist": ["new_allowed_topic"]
 }
 ```
 
@@ -444,7 +444,7 @@ Remove is just available for lists and will remove the given elements to the lis
 ```json
 {
     "subscriptions": ["topic/to/remove"],
-    "topic_whitelist": ["topic/to/unallow"]
+    "topic_whitelist": ["topic_to_unallow"]
 }
 ```
 

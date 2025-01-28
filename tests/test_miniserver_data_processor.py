@@ -120,40 +120,6 @@ def test_expand_json(processor):
     result = processor.expand_json("test", "normal_value")
     assert result == [("test", "normal_value")]
 
-@pytest.mark.asyncio
-async def test_transform_data(processor, monkeypatch):
-    topic = "topic1"
-    json_data = '{"key1": "val1", "key2": {"nested": "val2"}}'
-    
-    # Test with no transformations
-    monkeypatch.setattr(global_config.processing, 'expand_json', False)
-    monkeypatch.setattr(global_config.processing, 'convert_booleans', False)
-    result = processor.transform_data(topic, json_data)
-    assert result == [(topic, json_data)]
-
-    # Test with JSON expansion
-    monkeypatch.setattr(global_config.processing, 'expand_json', True)
-    monkeypatch.setattr(global_config.processing, 'convert_booleans', False)
-    result = processor.transform_data(topic, json_data)
-    assert result == [
-        ("topic1/key1", "val1"),
-        ("topic1/key2/nested", "val2")
-    ]
-
-    # Test with boolean conversion
-    monkeypatch.setattr(global_config.processing, 'expand_json', False)
-    monkeypatch.setattr(global_config.processing, 'convert_booleans', True)
-    result = processor.transform_data("topic2", "true")
-    assert result == [("topic2", "1")]
-
-    # Test with both transformations
-    monkeypatch.setattr(global_config.processing, 'expand_json', True)
-    monkeypatch.setattr(global_config.processing, 'convert_booleans', True)
-    result = processor.transform_data("topic1", json_data)
-    assert result == [
-        ("topic1/key1", "val1"),
-        ("topic1/key2/nested", "val2")
-    ]
 
 def test_cache_behavior(processor):
     # Test that cache is working for normalize_topic

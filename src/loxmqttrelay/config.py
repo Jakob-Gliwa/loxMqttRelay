@@ -2,7 +2,7 @@ import os
 import logging
 from dataclasses import dataclass, field, asdict, replace
 import threading
-from typing import Dict, Any, List, Optional, Union, Literal, get_type_hints
+from typing import Dict, Any, List, Optional, Union, Literal, get_type_hints, Set
 import tomlkit
 from enum import Enum
 
@@ -45,7 +45,7 @@ class MiniserverConfig:
 class TopicsConfig:
     subscriptions: List[str] = field(default_factory=list)
     subscription_filters: List[str] = field(default_factory=list)
-    topic_whitelist: List[str] = field(default_factory=list)
+    topic_whitelist: Set[str] = field(default_factory=set)
     do_not_forward: List[str] = field(default_factory=list)
 
 @dataclass
@@ -152,13 +152,21 @@ class Config:
         section, field_type = self._get_field_info(field_name)
         current_value = getattr(getattr(self._config, section.value), field_name)
 
-        if isinstance(current_value, list):
-            if list_mode == "set":
-                new_value = list(value) if isinstance(value, list) else [value]
-            elif list_mode == "add":
-                new_value = list(set(current_value + (value if isinstance(value, list) else [value])))
-            elif list_mode == "remove":
-                new_value = [item for item in current_value if item not in (value if isinstance(value, list) else [value])]
+        if isinstance(current_value, (list, set)):
+            if isinstance(current_value, set):
+                if list_mode == "set":
+                    new_value = set(value) if isinstance(value, (list, set)) else {value}
+                elif list_mode == "add":
+                    new_value = current_value | (set(value) if isinstance(value, (list, set)) else {value})
+                elif list_mode == "remove":
+                    new_value = current_value - (set(value) if isinstance(value, (list, set)) else {value})
+            else:  # list type
+                if list_mode == "set":
+                    new_value = list(value) if isinstance(value, list) else [value]
+                elif list_mode == "add":
+                    new_value = list(set(current_value + (value if isinstance(value, list) else [value])))
+                elif list_mode == "remove":
+                    new_value = [item for item in current_value if item not in (value if isinstance(value, list) else [value])]
             value = new_value
 
         setattr(getattr(self._config, section.value), field_name, value)
@@ -172,13 +180,21 @@ class Config:
         section_config = getattr(self._config, section.value)
         for field_name, value in updates.items():
             current_value = getattr(section_config, field_name)
-            if isinstance(current_value, list):
-                if list_mode == "set":
-                    new_value = list(value) if isinstance(value, list) else [value]
-                elif list_mode == "add":
-                    new_value = list(set(current_value + (value if isinstance(value, list) else [value])))
-                elif list_mode == "remove":
-                    new_value = [item for item in current_value if item not in (value if isinstance(value, list) else [value])]
+            if isinstance(current_value, (list, set)):
+                if isinstance(current_value, set):
+                    if list_mode == "set":
+                        new_value = set(value) if isinstance(value, (list, set)) else {value}
+                    elif list_mode == "add":
+                        new_value = current_value | (set(value) if isinstance(value, (list, set)) else {value})
+                    elif list_mode == "remove":
+                        new_value = current_value - (set(value) if isinstance(value, (list, set)) else {value})
+                else:  # list type
+                    if list_mode == "set":
+                        new_value = list(value) if isinstance(value, list) else [value]
+                    elif list_mode == "add":
+                        new_value = list(set(current_value + (value if isinstance(value, list) else [value])))
+                    elif list_mode == "remove":
+                        new_value = [item for item in current_value if item not in (value if isinstance(value, list) else [value])]
                 updates[field_name] = new_value
         setattr(self._config, section.value, replace(section_config, **updates))
         self.save_config()
