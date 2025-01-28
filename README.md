@@ -56,6 +56,8 @@ docker run -d \
   -p 11884:11884/udp \
   -e HEADLESS=true \
   acidcliff/loxmqttrelay
+
+Optionally set -e LOG_LEVEL=DEBUG for more detailed logging
 ```
 
 ### Local installation
