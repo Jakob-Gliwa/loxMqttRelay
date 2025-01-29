@@ -99,43 +99,50 @@ class MiniserverDataProcessor:
         logger.debug(f"Normalized topic '{topic}' to '{normalized}'")
         return normalized
 
+    @staticmethod
+    def flatten_dict(d: dict, parent_key: str = '') -> set:
+        items = set()
+        MiniserverDataProcessor._flatten(d, parent_key, items)
+        return items
 
-    def flatten_dict(self, d: Any, parent_key: str = '', sep: str = '/') -> Dict[str, Any]:
-        """Flatten a nested dictionary or list into a single level dictionary with path-like keys"""
-        logger.debug(f"Flattening dictionary with parent_key='{parent_key}', separator='{sep}'")
-        items = []
+    @staticmethod
+    def _flatten(obj, prefix: str, items: set) -> None:
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                new_key = "%s/%s" % (prefix, k) if prefix else k
+                if isinstance(v, (dict, list)):
+                    MiniserverDataProcessor._flatten(v, new_key, items)
+                else:
+                    items.add((new_key, v))
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                new_key = "%s/%s" % (prefix, i)
+                if isinstance(item, (dict, list)):
+                    MiniserverDataProcessor._flatten(item, new_key, items)
+                else:
+                    items.add((new_key, item))
 
-        if isinstance(d, list):
-            d = {str(i): v for i, v in enumerate(d)}
-        for k, v in d.items():
-            new_key = f"{parent_key}{sep}{k}" if parent_key else k
-            if isinstance(v, dict):
-                items.extend(self.flatten_dict(v, new_key, sep=sep).items())
-            elif isinstance(v, list):
-                arr_dict = {str(i): vv for i, vv in enumerate(v)}
-                items.extend(self.flatten_dict(arr_dict, new_key, sep=sep).items())
-            else:
-                items.append((new_key, v))
-        result = dict(items)
-        logger.debug(f"Flattened result: {result}")
-        return result
-
-    def expand_json(self, topic: str, val: Any) -> List[tuple[str, Any]]:
-        """Expand JSON string into flattened list of tuples if possible"""
-        logger.debug(f"Attempting to expand JSON for topic '{topic}' with value: {val}")
+    def expand_json(self, topic: str, val: str) -> frozenset:
+        """Optimized JSON expansion for string input, returning a frozenset of tuples."""
+        """
+        Takes a topic and JSON string as bytes.
+        Returns a frozenset of (topic/key, value) tuples.
+        Uses caching and early short-circuit for non-JSON input.
+        """
+        # 1) Short-circuit for non-JSON cases
+        if not val or val[0] not in '{[':
+            return frozenset({(topic, val)})
         try:
             obj = orjson.loads(val)
-            if isinstance(obj, dict):
-                logger.debug("Successfully parsed JSON, flattening structure")
-                flat = self.flatten_dict(obj)
-                result = [(f"{topic}/{subkey}", subval) for subkey, subval in flat.items()]
-                logger.debug(f"Expanded JSON result: {result}")
-                return result
-            return [(topic, val)]
-        except (ValueError, TypeError, orjson.JSONDecodeError) as e:
-            logger.debug(f"Failed to parse JSON: {e}")
-            logger.debug("Returning original topic-value pair")
-            return [(topic, val)]
+            if not isinstance(obj, dict):
+                return frozenset({(topic, val)})
+            
+            # Get flattened key-value pairs
+            flat = self.flatten_dict(obj)
+            # Add topic prefix to all keys
+            return frozenset({(f"{topic}/{key}", value) for key, value in flat})
+        except (ValueError, TypeError, orjson.JSONDecodeError):
+            return frozenset({(topic, val)})
 
     @lru_cache(maxsize=global_config.general.cache_size)
     def is_in_whitelist(self, topic: str) -> bool:
@@ -183,7 +190,7 @@ class MiniserverDataProcessor:
                 logger.debug(f"Topic '{topic}' not in whitelist")
                 continue
 
-            # Subscription-Filter (zweiter Durchlauf)
+            # Subscription-Filter (2nd pass)
             if self.compiled_subscription_filter and \
                self.compiled_subscription_filter.search(topic):
                 logger.debug(f"Topic '{topic}' filtered by second pass (subscription_filter)")

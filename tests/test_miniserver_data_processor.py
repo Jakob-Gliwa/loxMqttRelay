@@ -91,12 +91,12 @@ def test_flatten_dict(processor):
         "f": [1, 2, 3]
     }
     expected = {
-        "a": 1,
-        "b/c": 2,
-        "b/d/e": 3,
-        "f/0": 1,
-        "f/1": 2,
-        "f/2": 3
+        ("a", 1),
+        ("b/c", 2),
+        ("b/d/e", 3),
+        ("f/0", 1),
+        ("f/1", 2),
+        ("f/2", 3)
     }
     assert processor.flatten_dict(input_dict) == expected
 
@@ -110,15 +110,15 @@ def test_normalize_topic(processor):
 
 def test_expand_json(processor):
     result = processor.expand_json("test", '{"key1": "val1", "key2": {"nested": "val2"}}')
-    expected = [
+    expected = {
         ("test/key1", "val1"),
         ("test/key2/nested", "val2")
-    ]
+    }
     assert result == expected
 
     # Test with non-JSON value
     result = processor.expand_json("test", "normal_value")
-    assert result == [("test", "normal_value")]
+    assert result == {("test", "normal_value")}
 
 
 def test_cache_behavior(processor):
