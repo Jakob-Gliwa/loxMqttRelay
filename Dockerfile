@@ -12,10 +12,10 @@ RUN apk add --no-cache --virtual .build-deps \
  && python setup.py build_ext --inplace \
  && cd /app \
  && uv pip uninstall --system $(uv pip freeze | grep -v "^-e" | cut -d= -f1) \
- && apk del .build-deps
  && apk add --no-cache \
     py3-pyarrow \
  && uv pip install --system . \
+ && apk del .build-deps \
  && rm -rf /var/cache/apk/*
 
 # Set PYTHONPATH to include the src directory
