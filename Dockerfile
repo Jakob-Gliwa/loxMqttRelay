@@ -11,7 +11,7 @@ RUN apk add --no-cache --virtual .build-deps \
  && cd src/loxwebsocket/cython_modules \
  && python setup.py build_ext --inplace \
  && cd /app \
- && uv pip uninstall --system $(uv pip freeze | grep -v "^-e" | cut -d= -f1) \
+ && uv pip freeze | grep -v "^-e" | cut -d= -f1 | xargs -r uv pip uninstall --system -y \
  && apk add --no-cache \
     py3-pyarrow \
  && uv pip install --system . \
