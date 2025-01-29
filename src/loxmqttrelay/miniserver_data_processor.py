@@ -1,9 +1,10 @@
 from functools import lru_cache
 import logging
 import re
-from typing import Dict, Any, List, Pattern, Optional, Callable, Awaitable, Set, AsyncGenerator
+from typing import Dict, Any, List, Pattern, Optional, Callable, Awaitable, Set, Generator
 import orjson
 from loxmqttrelay.config import global_config
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -150,12 +151,12 @@ class MiniserverDataProcessor:
         normalized = self.normalize_topic(topic)
         return normalized in self.topic_whitelist
 
-    async def process_data(
+    def process_data(
         self,
         topic: str,
         message: str,
         mqtt_publish_callback: Optional[Callable[[str, str, bool], Awaitable[None]]] = None,
-    ) -> AsyncGenerator[tuple[str, Any], None]:
+    ) -> Generator[tuple[str, Any], None]:
         """Process data through filters and transformations."""
         logger.debug(f"Processing data - topic {topic}, message {message}")
 
@@ -179,7 +180,7 @@ class MiniserverDataProcessor:
             for topic, val in processed_tuples:
                 dbg_topic = f"{global_config.general.base_topic}processedtopics/{self.normalize_topic(topic)}"
                 logger.debug(f"Publishing debug topic: {dbg_topic} = {val}")
-                await mqtt_publish_callback(dbg_topic, str(val), False)
+                asyncio.create_task(mqtt_publish_callback(dbg_topic, str(val), False))
 
         # 3) Final filtering
         for topic, value in processed_tuples:

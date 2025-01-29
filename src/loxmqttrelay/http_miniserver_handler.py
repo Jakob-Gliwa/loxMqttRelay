@@ -138,10 +138,10 @@ class HttpMiniserverHandler:
         if global_config.debug.publish_forwarded_topics and mqtt_publish_callback:
             # Ensure code is int for publish_forwarded_topic
             http_code = response_code if isinstance(response_code, int) else 0
-            await miniserver_data_processor.publish_forwarded_topic(
+            asyncio.create_task(miniserver_data_processor.publish_forwarded_topic(
                 topic, value, http_code,
                 mqtt_publish_callback
-            )
+            ))
 
         return response_code
 

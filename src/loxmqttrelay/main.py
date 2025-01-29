@@ -172,7 +172,7 @@ class MQTTRelay:
                 # Process message and send to miniserver if needed
                 try:
                     #Process Data
-                    async for topic, value in miniserver_data_processor.process_data(
+                    for topic, value in miniserver_data_processor.process_data(
                         topic_str,
                         message,
                         mqtt_publish_callback=mqtt_client.publish
