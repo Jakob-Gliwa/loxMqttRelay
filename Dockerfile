@@ -13,10 +13,10 @@ RUN apk add --no-cache --virtual .build-deps \
  && cd /app \
  && uv pip uninstall --system $(uv pip freeze | grep -v "^-e" | cut -d= -f1) \
  && apk del .build-deps
- && apk add \
+ && apk add --no-cache \
     py3-pyarrow \
  && uv pip install --system . \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/cache/apk/*
 
 # Set PYTHONPATH to include the src directory
 ENV PYTHONPATH=/app/src
