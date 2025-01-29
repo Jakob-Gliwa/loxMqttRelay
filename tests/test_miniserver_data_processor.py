@@ -157,15 +157,18 @@ async def test_update_do_not_forward(processor):
 async def test_process_data_single_filter_pass(processor, filters, topic, message, should_stay):
     """Test if subscription filter works correctly in first pass."""
     processor.update_subscription_filters(filters)
-    result = await processor.process_data(topic, message)
+    
+    results = []
+    async for result in processor.process_data(topic, message):
+        results.append(result)
     
     if should_stay:
-        assert isinstance(result, list) and len(result) > 0, f"Topic '{topic}' should remain after filtering"
-        assert isinstance(result[0], tuple) and len(result[0]) == 2, "Result should be a list of topic-value tuples"
-        topic_result, _ = result[0]
+        assert len(results) > 0, f"Topic '{topic}' should remain after filtering"
+        assert isinstance(results[0], tuple) and len(results[0]) == 2, "Result should be a topic-value tuple"
+        topic_result, _ = results[0]
         assert topic_result == topic
     else:
-        assert not result or len(result) == 0, f"Topic '{topic}' should be filtered out"
+        assert len(results) == 0, f"Topic '{topic}' should be filtered out"
 
 @pytest.mark.asyncio
 async def test_process_data_filter_second_pass_after_flatten(processor, monkeypatch):
@@ -176,8 +179,11 @@ async def test_process_data_filter_second_pass_after_flatten(processor, monkeypa
     processor.update_subscription_filters([r"ignore\/.*"])
     monkeypatch.setattr(global_config.processing, 'expand_json', True)
 
-    result = await processor.process_data(topic, message)
-    result_topics = [t for t, _ in result]
+    results = []
+    async for result in processor.process_data(topic, message):
+        results.append(result)
+
+    result_topics = [t for t, _ in results]
 
     assert "original/topic/ignore/nested" not in result_topics
     assert "original/topic/key1" in result_topics
@@ -191,15 +197,18 @@ async def test_process_data_filter_second_pass_after_flatten(processor, monkeypa
 async def test_process_data_with_whitelist(processor, whitelist, topic, message, should_stay):
     """Test whitelist functionality."""
     processor.update_topic_whitelist(whitelist)
-    result = await processor.process_data(topic, message)
+    
+    results = []
+    async for result in processor.process_data(topic, message):
+        results.append(result)
 
     if should_stay:
-        assert isinstance(result, list) and len(result) > 0, f"Topic '{topic}' should remain in whitelist"
-        assert isinstance(result[0], tuple) and len(result[0]) == 2, "Result should be a list of topic-value tuples"
-        topic_result, _ = result[0]
+        assert len(results) > 0, f"Topic '{topic}' should remain in whitelist"
+        assert isinstance(results[0], tuple) and len(results[0]) == 2, "Result should be a topic-value tuple"
+        topic_result, _ = results[0]
         assert topic_result == topic
     else:
-        assert not result or len(result) == 0, f"Topic '{topic}' should be filtered by whitelist"
+        assert len(results) == 0, f"Topic '{topic}' should be filtered by whitelist"
 
 @pytest.mark.parametrize("dnf_filter,topic,message,should_stay", [
     ([r"^debug\/.*"], "debug/sensor", "value", False),
@@ -210,15 +219,18 @@ async def test_process_data_with_whitelist(processor, whitelist, topic, message,
 @pytest.mark.asyncio
 async def test_process_data_with_do_not_forward(processor, dnf_filter, topic, message, should_stay):
     processor.update_do_not_forward(dnf_filter)
-    result = await processor.process_data(topic, message)
+    
+    results = []
+    async for result in processor.process_data(topic, message):
+        results.append(result)
 
     if should_stay:
-        assert isinstance(result, list) and len(result) > 0, f"Topic '{topic}' should not be filtered"
-        assert isinstance(result[0], tuple) and len(result[0]) == 2, "Result should be a list of topic-value tuples"
-        topic_result, _ = result[0]
+        assert len(results) > 0, f"Topic '{topic}' should not be filtered"
+        assert isinstance(results[0], tuple) and len(results[0]) == 2, "Result should be a topic-value tuple"
+        topic_result, _ = results[0]
         assert topic_result == topic
     else:
-        assert not result or len(result) == 0, f"Topic '{topic}' should be filtered by do_not_forward"
+        assert len(results) == 0, f"Topic '{topic}' should be filtered by do_not_forward"
 
 @pytest.mark.asyncio
 async def test_process_data_order_of_filters(processor, monkeypatch):
@@ -238,9 +250,8 @@ async def test_process_data_order_of_filters(processor, monkeypatch):
 
     results = []
     for topic, message in topic_messages:
-        result = await processor.process_data(topic, message)
-        if result:
-            results.extend(result)
+        async for result in processor.process_data(topic, message):
+            results.append(result)
 
     result_topics = [t for t, _ in results]
 
@@ -266,9 +277,8 @@ async def test_process_data_with_debug_publish(processor, monkeypatch):
 
     results = []
     for topic, message in topic_messages:
-        result = await processor.process_data(topic, message, mqtt_publish_callback=mock_publish)
-        if result:
-            results.extend(result)
+        async for result in processor.process_data(topic, message, mqtt_publish_callback=mock_publish):
+            results.append(result)
 
     result_topics = [t for t, _ in results]
     assert "topic/one" in result_topics

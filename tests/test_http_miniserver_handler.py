@@ -102,7 +102,8 @@ async def test_http_authentication(
     handler.ms_pass = "testpass"
     handler.ms_ip = "192.168.1.1"
     
-    await handler.send_to_miniserver_via_http(test_data)
+    for topic, value in test_data:
+        await handler.send_to_miniserver_via_http(topic, value)
 
     mock_session.assert_called_with(
         auth=aiohttp.BasicAuth("testuser", "testpass"),
@@ -118,7 +119,8 @@ async def test_http_topic_normalization(
     """Test topic normalization in HTTP mode"""
     test_data = [("a/complex/topic/path", "value")]
 
-    await handler.send_to_miniserver_via_http(test_data)
+    for topic, value in test_data:
+        await handler.send_to_miniserver_via_http(topic, value)
 
     mock_data_processor.normalize_topic.assert_called_once_with("a/complex/topic/path")
     
@@ -139,7 +141,8 @@ async def test_http_value_conversion(
         ("topic3", 45.67)
     ]
 
-    await handler.send_to_miniserver_via_http(test_data)
+    for topic, value in test_data:
+        await handler.send_to_miniserver_via_http(topic, value)
 
     assert mock_data_processor.normalize_topic.call_count == 3
     
@@ -160,7 +163,8 @@ async def test_http_parallel_connections(mock_session: MagicMock, handler: HttpM
     ]
     
     handler.connection_semaphore = asyncio.Semaphore(5)
-    await handler.send_to_miniserver_via_http(test_data)
+    for topic, value in test_data:
+        await handler.send_to_miniserver_via_http(topic, value)
     
     assert mock_session.return_value.__aenter__.return_value.get.call_count == 10
 
@@ -177,7 +181,8 @@ async def test_mock_server_http(
     handler.mock_ms_ip = "192.168.1.2"
     handler.target_ip = handler.mock_ms_ip
     
-    await handler.send_to_miniserver_via_http(test_data)
+    for topic, value in test_data:
+        await handler.send_to_miniserver_via_http(topic, value)
 
     # Verify all topics are normalized
     for topic, _ in test_data:
@@ -208,6 +213,7 @@ async def test_forwarded_topics_publishing(
         session_instance.get = AsyncMock()
         mock_session.return_value = session_instance
         
-        await handler.send_to_miniserver(test_data, mqtt_publish_callback=mock_publish)
+        for topic, value in test_data:
+            await handler.send_to_miniserver(topic, value, mqtt_publish_callback=mock_publish)
         
         assert mock_publish.call_count == len(test_data)

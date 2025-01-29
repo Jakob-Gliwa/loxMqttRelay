@@ -172,16 +172,15 @@ class MQTTRelay:
                 # Process message and send to miniserver if needed
                 try:
                     #Process Data
-                    processed_data = await miniserver_data_processor.process_data(
+                    async for topic, value in miniserver_data_processor.process_data(
                         topic_str,
                         message,
                         mqtt_publish_callback=mqtt_client.publish
-                    )
-                    response_codes = await http_miniserver_handler.send_to_miniserver(
-                        processed_data,
-                        mqtt_publish_callback=mqtt_client.publish
-                    )           
-                    logger.debug(f"HTTP Response codes: {response_codes}")
+                    ):  
+                        asyncio.create_task(http_miniserver_handler.send_to_miniserver(
+                            topic, value,
+                            mqtt_publish_callback=mqtt_client.publish
+                        ))           
                 except Exception as e:
                     logger.error(f"Error processing and sending to Miniserver: {e}")
 

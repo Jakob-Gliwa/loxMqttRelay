@@ -1,7 +1,7 @@
 from functools import lru_cache
 import logging
 import re
-from typing import Dict, Any, List, Pattern, Optional, Callable, Awaitable, Set
+from typing import Dict, Any, List, Pattern, Optional, Callable, Awaitable, Set, AsyncGenerator
 import orjson
 from loxmqttrelay.config import global_config
 
@@ -148,14 +148,15 @@ class MiniserverDataProcessor:
         topic: str,
         message: str,
         mqtt_publish_callback: Optional[Callable[[str, str, bool], Awaitable[None]]] = None,
-    ) -> List[tuple[str, Any]]:
+    ) -> AsyncGenerator[tuple[str, Any], None]:
         """Process data through filters and transformations."""
         logger.debug(f"Processing data - topic {topic}, message {message}")
 
         # 1) First pass subscription filter
         if self.compiled_subscription_filter and self.compiled_subscription_filter.search(topic):
-            return []
-
+            return
+            # Let the generator end without yielding anything
+        
         # 2) Flatten data
         logger.debug(f"Transforming data with expand_json={global_config.processing.expand_json}")
         if global_config.processing.expand_json:
@@ -174,7 +175,6 @@ class MiniserverDataProcessor:
                 await mqtt_publish_callback(dbg_topic, str(val), False)
 
         # 3) Final filtering
-        final_data = []
         for topic, value in processed_tuples:
             logger.debug(f"Final filtering for topic: {topic}")
 
@@ -195,11 +195,8 @@ class MiniserverDataProcessor:
                     logger.debug(f"Topic '{topic}' filtered by do_not_forward")
                     continue
 
-            final_data.append((topic, self._convert_boolean(value)))
             logger.debug(f"Topic '{topic}' passed all filters")
-
-        logger.debug(f"Final processed data: {final_data}")
-        return final_data
+            yield (topic, self._convert_boolean(value))
 
     async def publish_forwarded_topic(
         self,
