@@ -212,7 +212,7 @@ docker run -d \
 version: '3'
 services:
   mqttrelay:
-    build: .
+    image: acidcliff/loxmqttrelay
     volumes:
       - ./config:/app/config
     environment:
