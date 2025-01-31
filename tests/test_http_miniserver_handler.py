@@ -215,5 +215,7 @@ async def test_forwarded_topics_publishing(
         
         for topic, value in test_data:
             await handler.send_to_miniserver(topic, value, mqtt_publish_callback=mock_publish)
+
+        await asyncio.sleep(1)
         
         assert mock_publish.call_count == len(test_data)

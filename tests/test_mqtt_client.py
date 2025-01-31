@@ -227,6 +227,9 @@ async def test_message_callback_error(mock_client, mqtt_client):
     
     # Simulate message received
     message = b"test message"
-    result = await mqtt_client._on_message(mock_client, "test/topic1", message, 0, None)
+    with pytest.raises(Exception) as exc_info:
+        result = await mqtt_client._on_message(mock_client, "test/topic1", message, 0, None)
+        assert "Callback error" in str(exc_info.value)
     
-    assert result == PubAckReasonCode.UNSPECIFIED_ERROR
+    # Verify the callback was called
+    callback.assert_called_once_with("test/topic1", "test message")

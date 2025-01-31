@@ -159,7 +159,7 @@ async def test_process_data_single_filter_pass(processor, filters, topic, messag
     processor.update_subscription_filters(filters)
     
     results = []
-    async for result in processor.process_data(topic, message):
+    for result in processor.process_data(topic, message):
         results.append(result)
     
     if should_stay:
@@ -180,7 +180,7 @@ async def test_process_data_filter_second_pass_after_flatten(processor, monkeypa
     monkeypatch.setattr(global_config.processing, 'expand_json', True)
 
     results = []
-    async for result in processor.process_data(topic, message):
+    for result in processor.process_data(topic, message):
         results.append(result)
 
     result_topics = [t for t, _ in results]
@@ -199,7 +199,7 @@ async def test_process_data_with_whitelist(processor, whitelist, topic, message,
     processor.update_topic_whitelist(whitelist)
     
     results = []
-    async for result in processor.process_data(topic, message):
+    for result in processor.process_data(topic, message):
         results.append(result)
 
     if should_stay:
@@ -221,7 +221,7 @@ async def test_process_data_with_do_not_forward(processor, dnf_filter, topic, me
     processor.update_do_not_forward(dnf_filter)
     
     results = []
-    async for result in processor.process_data(topic, message):
+    for result in processor.process_data(topic, message):
         results.append(result)
 
     if should_stay:
@@ -250,7 +250,7 @@ async def test_process_data_order_of_filters(processor, monkeypatch):
 
     results = []
     for topic, message in topic_messages:
-        async for result in processor.process_data(topic, message):
+        for result in processor.process_data(topic, message):
             results.append(result)
 
     result_topics = [t for t, _ in results]
@@ -277,7 +277,7 @@ async def test_process_data_with_debug_publish(processor, monkeypatch):
 
     results = []
     for topic, message in topic_messages:
-        async for result in processor.process_data(topic, message, mqtt_publish_callback=mock_publish):
+        for result in processor.process_data(topic, message, mqtt_publish_callback=mock_publish):
             results.append(result)
 
     result_topics = [t for t, _ in results]
