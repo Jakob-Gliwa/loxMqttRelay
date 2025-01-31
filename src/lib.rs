@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyFrozenSet, PyTuple};
+use pyo3::types::{PyFrozenSet, PyTuple, IntoPyDict};
 use regex::Regex;
 
 use std::collections::{HashMap, HashSet};
@@ -13,12 +13,9 @@ use std::num::NonZeroUsize;
 use serde_json::Value;
 
 // For logging
-use log::{debug, error};
+use log::{debug, error, info};
 
-/// A struct representing some global config values mentioned in Python code.
-///
-/// In your real setup, you'd likely load this from a file or pass it in from Python.
-/// Shown here for completeness.
+/// A struct representing some global config values
 #[pyclass]
 #[derive(Clone)]
 pub struct GeneralConfig {
@@ -114,8 +111,24 @@ impl GlobalConfig {
     }
 }
 
-/// A dictionary mapping known true/false strings to "1" or "0".
-/// We use a match approach for speed, but you could also do a HashMap lookup.
+/// A small struct to store all relevant MQTT topics in Rust, so we don't fetch them repeatedly
+#[derive(Clone, Debug)]
+struct MqttTopics {
+    start_ui_topic: String,
+    stop_ui_topic: String,
+    miniserver_startup_topic: String,
+    config_get_topic: String,
+    config_response_topic: String,
+    config_set_topic: String,
+    config_add_topic: String,
+    config_remove_topic: String,
+    config_update_topic: String,
+    config_restart_topic: String,
+    /// Whether miniserver sync is enabled (fetched once from Python)
+    miniserver_sync_enabled: bool,
+}
+
+/// Convert a known boolean string to "1"/"0", or None if unrecognized.
 fn convert_boolean_str(input: &str) -> Option<&'static str> {
     match input {
         "true" | "yes" | "on" | "enabled" | "enable" | "1"
@@ -125,8 +138,7 @@ fn convert_boolean_str(input: &str) -> Option<&'static str> {
     }
 }
 
-/// Flatten a serde_json `Value` into a set of `(key, value)` tuples,
-/// using `'/'` to separate nested keys (like the Python version).
+/// Flatten a serde_json `Value` into `key/value` pairs using '/' as separator.
 fn flatten_json(obj: &Value, prefix: &str, acc: &mut Vec<(String, String)>) {
     match obj {
         Value::Object(map) => {
@@ -140,7 +152,6 @@ fn flatten_json(obj: &Value, prefix: &str, acc: &mut Vec<(String, String)>) {
                     Value::Object(_) | Value::Array(_) => {
                         flatten_json(v, &new_key, acc);
                     }
-                    // Flatten scalars
                     Value::String(s) => {
                         acc.push((new_key, s.clone()));
                     }
@@ -182,46 +193,78 @@ fn flatten_json(obj: &Value, prefix: &str, acc: &mut Vec<(String, String)>) {
                 }
             }
         }
-        _ => {
-            // No-op for direct scalars; we normally don't call flatten_json on top-level scalars
-        }
+        _ => {}
     }
 }
 
-/// Our main data processor struct, analogous to the Python `MiniserverDataProcessor`.
 #[pyclass]
 pub struct MiniserverDataProcessor {
     #[pyo3(get, set)]
     pub global_config: GlobalConfig,
 
-    // Remove pyo3 visibility for these fields
     compiled_subscription_filter: Option<String>,
     do_not_forward_patterns: Option<String>,
     topic_whitelist: HashSet<String>,
     convert_bool_cache: Mutex<LruCache<String, String>>,
     normalize_topic_cache: Mutex<LruCache<String, String>>,
+
+    relay_main_obj: PyObject,
+    mqtt_client_obj: PyObject,
+    http_handler_obj: PyObject,
+    orjson_obj: PyObject,
+    // New: Store the topics once, so we skip repeated Python lookups
+    mqtt_topics: Option<MqttTopics>,
 }
 
 #[pymethods]
 impl MiniserverDataProcessor {
-    /// Constructor
     #[new]
-    fn new(global_config: GlobalConfig) -> PyResult<Self> {
+    fn new(py: Python, global_config: GlobalConfig, topic_ns: PyObject, global_config_py: PyObject, relay_main_obj: PyObject, mqtt_client_obj: PyObject, http_handler_obj: PyObject, orjson_obj: PyObject) -> PyResult<Self> {
         debug!(
             "Initializing MiniserverDataProcessor with cache_size={}",
             global_config.general.cache_size
         );
 
-        // Compile initial subscription filters
         let compiled = Self::compile_filters(global_config.topics.subscription_filters.clone());
-
-        // Create caches with user-defined size
         let cache_size = if global_config.general.cache_size == 0 {
-            64 // default something if 0 is passed
+            64
         } else {
             global_config.general.cache_size
         };
         let lru_size = NonZeroUsize::new(cache_size).unwrap();
+
+        let start_ui_topic: String = topic_ns.getattr(py, "START_UI")?.extract(py)?;
+        let stop_ui_topic: String = topic_ns.getattr(py, "STOP_UI")?.extract(py)?;
+        let miniserver_startup_topic: String = topic_ns.getattr(py, "MINISERVER_STARTUP_EVENT")?.extract(py)?;
+        let config_get_topic: String = topic_ns.getattr(py, "CONFIG_GET")?.extract(py)?;
+        let config_response_topic: String = topic_ns.getattr(py, "CONFIG_RESPONSE")?.extract(py)?;
+        let config_set_topic: String = topic_ns.getattr(py, "CONFIG_SET")?.extract(py)?;
+        let config_add_topic: String = topic_ns.getattr(py, "CONFIG_ADD")?.extract(py)?;
+        let config_remove_topic: String = topic_ns.getattr(py, "CONFIG_REMOVE")?.extract(py)?;
+        let config_update_topic: String = topic_ns.getattr(py, "CONFIG_UPDATE")?.extract(py)?;
+        let config_restart_topic: String = topic_ns.getattr(py, "CONFIG_RESTART")?.extract(py)?;
+
+        // Also check if miniserver sync is enabled
+        let miniserver_sync_enabled: bool = global_config_py
+        .getattr(py, "miniserver")?
+        .getattr(py, "sync_with_miniserver")?
+        .extract(py)?;
+
+        let topics = MqttTopics {
+            start_ui_topic,
+            stop_ui_topic,
+            miniserver_startup_topic,
+            config_get_topic,
+            config_response_topic,
+            config_set_topic,
+            config_add_topic,
+            config_remove_topic,
+            config_update_topic,
+            config_restart_topic,
+            miniserver_sync_enabled,
+        };
+        // processor.mqtt_topics = Some(topics);
+
 
         let processor = MiniserverDataProcessor {
             compiled_subscription_filter: compiled,
@@ -230,13 +273,18 @@ impl MiniserverDataProcessor {
             convert_bool_cache: Mutex::new(LruCache::new(lru_size)),
             normalize_topic_cache: Mutex::new(LruCache::new(lru_size)),
             global_config,
+            mqtt_topics: Some(topics),
+            relay_main_obj,
+            mqtt_client_obj,
+            http_handler_obj,
+            orjson_obj,
         };
 
+  
         debug!("MiniserverDataProcessor initialization complete");
         Ok(processor)
     }
 
-    /// Internal method to compile a list of regex filters into one pattern.
     #[staticmethod]
     fn compile_filters(filters: Vec<String>) -> Option<String> {
         if filters.is_empty() {
@@ -245,10 +293,10 @@ impl MiniserverDataProcessor {
         }
         let mut valid_filters = Vec::new();
         for flt in filters {
-            match Regex::new(flt.as_str()) {
+            match Regex::new(&flt) {
                 Ok(_) => {
                     debug!("Filter '{}' is valid", flt);
-                    valid_filters.push(flt.clone());
+                    valid_filters.push(flt);
                 }
                 Err(e) => {
                     error!("Invalid filter '{}': {}", flt, e);
@@ -259,39 +307,29 @@ impl MiniserverDataProcessor {
             debug!("No valid filters found.");
             return None;
         }
-        // Create a single big pattern, e.g. (flt1|flt2|...)
         let pattern = format!("({})", valid_filters.join("|"));
         Some(pattern)
     }
 
-    /// Updates the subscription filters
     #[pyo3(text_signature = "(self, filters)")]
     fn update_subscription_filters(&mut self, filters: Vec<String>) {
         debug!("Updating subscription filters: {:?}", filters);
         self.compiled_subscription_filter = Self::compile_filters(filters);
     }
 
-    /// Updates the topic whitelist, clearing the cache for is_in_whitelist
     #[pyo3(text_signature = "(self, whitelist)")]
     fn update_topic_whitelist(&mut self, whitelist: Vec<String>) {
         let set: HashSet<String> = whitelist.into_iter().collect();
         debug!("Updating topic whitelist: {:?}", set);
         self.topic_whitelist = set;
-        // No separate cache for is_in_whitelist in this version,
-        // but if you had one, you'd clear it here.
     }
 
-    /// Updates the do_not_forward filters
     #[pyo3(text_signature = "(self, filters)")]
     fn update_do_not_forward(&mut self, filters: Vec<String>) {
         debug!("Updating do_not_forward filters: {:?}", filters);
         self.do_not_forward_patterns = Self::compile_filters(filters);
     }
 
-    /// Convert a value to "1" or "0" based on known boolean strings.
-    /// Returns the original value if no mapping is found.
-    ///
-    /// This is cached by an LRU. For maximum performance, we do direct matching.
     #[pyo3(text_signature = "(self, val)")]
     fn _convert_boolean(&self, val: &str) -> PyResult<Option<String>> {
         let mut cache = self.convert_bool_cache.lock().unwrap();
@@ -306,16 +344,11 @@ impl MiniserverDataProcessor {
             cache.put(val.to_string(), mapped.to_string());
             Ok(Some(mapped.to_string()))
         } else {
-            // Return original
             cache.put(val.to_string(), val.to_string());
             Ok(Some(val.to_string()))
         }
     }
 
-    /// Normalize a topic by replacing '/' and '%' with '_'.
-    /// Returns the same string if no replacements are needed.
-    ///
-    /// This is cached by an LRU.
     #[pyo3(text_signature = "(self, topic)")]
     fn normalize_topic(&self, topic: &str) -> PyResult<String> {
         let mut cache = self.normalize_topic_cache.lock().unwrap();
@@ -323,7 +356,6 @@ impl MiniserverDataProcessor {
             return Ok(cached.clone());
         }
         if !topic.contains('/') && !topic.contains('%') {
-            // Save it as-is in cache
             cache.put(topic.to_string(), topic.to_string());
             return Ok(topic.to_string());
         }
@@ -332,12 +364,9 @@ impl MiniserverDataProcessor {
         Ok(normalized)
     }
 
-    /// Expands a JSON string, returning a frozenset of `(topic/key, value)` pairs.
-    /// Short-circuits for non-JSON or invalid JSON.
     #[pyo3(text_signature = "(self, topic, val)")]
     fn expand_json<'py>(&self, py: Python<'py>, topic: &str, val: &str) -> PyResult<&'py PyFrozenSet> {
-        // If it doesn't begin with '{' or '[', short-circuit
-        if val.is_empty() || (!val.starts_with('{') && !val.starts_with('[')) {
+        if val.is_empty() || ((!val.starts_with('{')) && (!val.starts_with('['))) {
             let tuple = (topic.to_string(), val.to_string());
             let set = PyFrozenSet::new(py, &[tuple])?;
             return Ok(set);
@@ -345,14 +374,12 @@ impl MiniserverDataProcessor {
         match serde_json::from_str::<Value>(val) {
             Ok(json_val) => {
                 if !json_val.is_object() {
-                    // If top-level is not an object, short-circuit
                     let tuple = (topic.to_string(), val.to_string());
                     let set = PyFrozenSet::new(py, &[tuple])?;
                     return Ok(set);
                 }
                 let mut flattened = Vec::new();
                 flatten_json(&json_val, "", &mut flattened);
-                // Build a new set with (topic/key, value)
                 let results: Vec<(String, String)> = flattened
                     .into_iter()
                     .map(|(k, v)| (format!("{}/{}", topic, k), v))
@@ -361,7 +388,6 @@ impl MiniserverDataProcessor {
                 Ok(set)
             }
             Err(_) => {
-                // Invalid JSON
                 let tuple = (topic.to_string(), val.to_string());
                 let set = PyFrozenSet::new(py, &[tuple])?;
                 Ok(set)
@@ -369,23 +395,13 @@ impl MiniserverDataProcessor {
         }
     }
 
-    /// Checks if the topic is in the whitelist
     #[pyo3(text_signature = "(self, topic)")]
     fn is_in_whitelist(&self, topic: &str) -> PyResult<bool> {
         let normalized = self.normalize_topic(topic)?;
         Ok(self.topic_whitelist.contains(&normalized))
     }
 
-    /// Process data through filters and transformations.
-    /// This method returns a list of (final_topic, final_value) pairs (instead of a generator).
-    ///
-    /// If `debug.publish_processed_topics` is set, calls the `mqtt_publish_callback` (if provided)
-    /// with debug topics for each processed tuple. The callback is optional.
-    ///
-    /// In Python, this was a generator. For simplicity and performance, we return a Vec here.
-    /// If you need a lazy generator, you can wrap this logic in a streaming iterator.
     #[pyo3(text_signature = "(self, topic, message, mqtt_publish_callback)")]
-    #[allow(clippy::type_complexity)]
     fn process_data(
         &self,
         py: Python,
@@ -395,48 +411,37 @@ impl MiniserverDataProcessor {
     ) -> PyResult<Vec<(String, Option<String>)>> {
         debug!("Processing data - topic: {}, message: {}", topic, message);
 
-        // 1) First pass subscription filter
+        // subscription filter
         if let Some(ref pattern) = self.compiled_subscription_filter {
-            let regex = Regex::new(pattern.as_str()).unwrap();
+            let regex = Regex::new(pattern).unwrap();
             if regex.is_match(topic) {
-                // Filtered out => returns empty list
+                // Filtered => no data
                 return Ok(vec![]);
             }
         }
 
-        // 2) Flatten data if configured
         let expand = self.global_config.processing.expand_json;
         debug!("Transforming data with expand_json={}", expand);
 
         let flattened: Vec<(String, String)> = if expand {
-            // Reuse expand_json logic in native form
             match serde_json::from_str::<Value>(message) {
                 Ok(json_val) => {
-                    // Must check if object
                     if !json_val.is_object() {
-                        // Not an object => single pair
                         vec![(topic.to_string(), message.to_string())]
                     } else {
                         let mut flat_vec = Vec::new();
                         flatten_json(&json_val, "", &mut flat_vec);
-                        flat_vec
-                            .into_iter()
-                            .map(|(k, v)| (format!("{}/{}", topic, k), v))
-                            .collect()
+                        flat_vec.into_iter().map(|(k, v)| (format!("{}/{}", topic, k), v)).collect()
                     }
                 }
-                Err(_) => {
-                    // Not valid JSON => single pair
-                    vec![(topic.to_string(), message.to_string())]
-                }
+                Err(_) => vec![(topic.to_string(), message.to_string())],
             }
         } else {
-            // No expansion
             vec![(topic.to_string(), message.to_string())]
         };
         debug!("Data after flattening: {:?}", flattened);
 
-        // 2a) Optional debug-publish
+        // debug publish
         if self.global_config.debug.publish_processed_topics {
             if let Some(ref callback) = mqtt_publish_callback {
                 for (dbg_topic, val) in &flattened {
@@ -445,35 +450,36 @@ impl MiniserverDataProcessor {
                         "{}/processedtopics/{}",
                         self.global_config.general.base_topic, normalized_dbg_topic
                     );
-                    // We'll just do a direct call, synchronous style
-                    // If you need real async, use pyo3-asyncio to spawn a future
-                    let args = PyTuple::new(py, &[final_dbg_topic.clone(), val.clone(), false.to_string()]);
+                    // Synchronously call the Python publish callback
+                    let args = PyTuple::new(py, &[
+                        final_dbg_topic.into_py(py),
+                        val.clone().into_py(py),
+                        false.to_string().into_py(py),
+                    ]);
                     let _ = callback.call1(py, args);
                 }
             }
         }
 
-        // 3) Final filtering
         let mut results = Vec::new();
         for (t, v) in flattened {
-            // Whitelist check
             if !self.topic_whitelist.is_empty() {
                 if !self.is_in_whitelist(&t)? {
                     debug!("Topic '{}' not in whitelist", t);
                     continue;
                 }
             }
-            // Subscription filter (2nd pass)
+            // second pass subscription filter
             if let Some(ref pattern) = self.compiled_subscription_filter {
-                let regex = Regex::new(pattern.as_str()).unwrap();
+                let regex = Regex::new(pattern).unwrap();
                 if regex.is_match(&t) {
-                    debug!("Topic '{}' filtered by second pass (subscription_filter)", t);
+                    debug!("Topic '{}' filtered by second pass", t);
                     continue;
                 }
             }
             // do_not_forward
             if let Some(ref pattern) = self.do_not_forward_patterns {
-                let regex = Regex::new(pattern.as_str()).unwrap();
+                let regex = Regex::new(pattern).unwrap();
                 if regex.is_match(&t) {
                     debug!("Topic '{}' filtered by do_not_forward", t);
                     continue;
@@ -481,7 +487,6 @@ impl MiniserverDataProcessor {
             }
             debug!("Topic '{}' passed all filters", t);
 
-            // Convert boolean
             let converted = self._convert_boolean(&v)?;
             results.push((t, converted));
         }
@@ -489,10 +494,6 @@ impl MiniserverDataProcessor {
         Ok(results)
     }
 
-    /// Publishes a forwarded topic with value and HTTP code to MQTT.
-    /// The callback is an async Python function that we can `.call` or `.await`.
-    ///
-    /// For production, use `pyo3-asyncio` to properly `await` the Python function in Rust.
     #[pyo3(text_signature = "(self, topic, value, http_code, mqtt_publish_callback)")]
     fn publish_forwarded_topic(
         &self,
@@ -506,7 +507,6 @@ impl MiniserverDataProcessor {
             "Publishing forwarded topic: {} with value={}, http_code={}",
             topic, value, http_code
         );
-        // If no callback is provided in your real code, you'd handle that scenario.
         let normalized = self.normalize_topic(topic)?;
         let mqtt_topic = format!(
             "{}/forwardedtopics/{}",
@@ -520,24 +520,142 @@ impl MiniserverDataProcessor {
 
         debug!("Publishing to MQTT topic '{}' => {}", mqtt_topic, payload_str);
 
-        let args = PyTuple::new(py, &[mqtt_topic, payload_str, false.to_string()]);
-        let _ = mqtt_publish_callback.call1(py, args)?;
+        let args = PyTuple::new(py, &[
+            mqtt_topic.into_py(py),
+            payload_str.into_py(py),
+            false.to_string().into_py(py),
+        ]);
+        mqtt_publish_callback.call1(py, args)?;
         Ok(())
     }
+
+    /// Equivalent of the old `received_mqtt_message`, but now inside MiniserverDataProcessor.
+    /// Because we already stored all topic strings in `mqtt_topics`, we do not repeatedly
+    /// fetch them from Python on every call. Much more efficient.
+    ///
+    /// Called in Python via partial:
+    ///    callback = partial(
+    ///       self.miniserver_data_processor.handle_mqtt_message,
+    ///       self,  # MQTTRelay instance
+    ///       mqtt_client,
+    ///       http_handler_obj,
+    ///       orjson,
+    ///    )
+    ///    ...
+    ///    asyncio.create_task(callback(topic, message))
+    #[pyo3(text_signature = "(self,topic, message)")]
+    #[allow(clippy::too_many_arguments)]
+    fn handle_mqtt_message(
+        &self,
+        py: Python<'_>,
+        topic: String,
+        message: String
+    ) -> PyResult<()> {
+        debug!("(Rust) handle_mqtt_message: {} => {}", topic, message);
+
+        let Some(ref topics) = self.mqtt_topics else {
+            // If for some reason it's never set, we fail early
+            error!("mqtt_topics was never initialized! Call initialize_topics_from_python first.");
+            return Ok(()); 
+        };
+
+        // Match the topic to whichever action it needs
+        if topic == topics.start_ui_topic {
+            let _ = self.relay_main_obj.call_method0(py, "start_ui");
+        }
+        else if topic == topics.stop_ui_topic {
+            let _ = self.relay_main_obj.call_method0(py, "stop_ui");
+        }
+        else if topic == topics.miniserver_startup_topic {
+            if topics.miniserver_sync_enabled {
+                info!("Miniserver startup detected, resyncing whitelist (from Rust MDP).");
+                let _ = self.relay_main_obj.call_method0(py, "handle_miniserver_sync");
+            }
+        }
+        else if topic == topics.config_get_topic {
+            // global_config.get_safe_config -> orjson.dumps -> publish
+            let global_config_py = self.relay_main_obj.getattr(py, "miniserver_data_processor")?
+                .getattr(py, "global_config")?;
+            let safe_cfg = global_config_py.call_method0(py, "get_safe_config")?;
+            let serialized = self.orjson_obj.call_method1(py, "dumps", (safe_cfg,))?;
+            let publish_fn = self.mqtt_client_obj.getattr(py, "publish")?;
+            let _ = publish_fn.call(py, (topics.config_response_topic.clone(), serialized), None);
+        }
+        else if topic == topics.config_set_topic || topic == topics.config_add_topic || topic == topics.config_remove_topic {
+            let update_mode = if topic == topics.config_set_topic {
+                "set"
+            } else if topic == topics.config_add_topic {
+                "add"
+            } else {
+                "remove"
+            };
+            let load_res = self.orjson_obj.call_method1(py, "loads", (message.as_str(),));
+            match load_res {
+                Ok(py_obj) => {
+                    let global_config_py = self.relay_main_obj.getattr(py, "miniserver_data_processor")?
+                        .getattr(py, "global_config")?;
+                    let update_res = global_config_py.call_method(py, "update_fields", (py_obj, update_mode), None);
+                    if let Err(e) = update_res {
+                        error!("Error updating configuration: {:?}", e);
+                    } else {
+                        info!("Configuration updated via MQTT. Restarting program (from Rust).");
+                        let _ = self.relay_main_obj.call_method0(py, "restart_relay_incl_ui");
+                    }
+                },
+                Err(e) => {
+                    error!("Invalid JSON format in MQTT message: {:?}", e);
+                }
+            }
+        }
+        else if topic == topics.config_update_topic || topic == topics.config_restart_topic {
+            info!("Reloading configuration. Restarting program (from Rust).");
+            let _ = self.relay_main_obj.call_method0(py, "restart_relay_incl_ui");
+        }
+        else {
+            // The "normal" data path => process_data => forward to miniserver
+            let debug_publish_callback = {
+                let dbg_flag: bool = self.global_config.debug.publish_processed_topics;
+                if dbg_flag {
+                    Some(self.mqtt_client_obj.getattr(py, "publish")?)
+                } else {
+                    None
+                }
+            };
+
+            // process_data(...) returns Vec<(String, Option<String>)>
+            let result = self.process_data(
+                py,
+                &topic,
+                &message,
+                debug_publish_callback
+            )?;
+
+            // For each, call send_to_miniserver
+            for (t, maybe_val) in result {
+                if let Some(value) = maybe_val {
+                    // Synchronous call to Python's send_to_miniserver
+                    let kwargs = vec![
+                        ("mqtt_publish_callback", self.mqtt_client_obj.getattr(py, "publish")?)
+                    ].into_py_dict(py);
+
+                    let _ = self.http_handler_obj.call_method(py, "send_to_miniserver", (t, value), Some(kwargs));
+                }
+            }
+        }
+
+        Ok(())
+    }   
+
 }
 
-/// A convenience function to initialize the logger if you want logs displayed.
-///
-/// In real usage, you might do this in your Python environment or main().
+/// Initialize the Rust logger
 #[pyfunction]
 fn init_rust_logger() {
     let _ = env_logger::try_init();
 }
 
-/// PyO3 module definition
 #[pymodule]
 fn _loxmqttrelay(py: Python, m: &PyModule) -> PyResult<()> {
-    // Register your classes and functions here
     m.add_class::<MiniserverDataProcessor>()?;
     m.add_class::<GlobalConfig>()?;
     m.add_class::<GeneralConfig>()?;

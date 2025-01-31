@@ -75,7 +75,7 @@ class MQTTRelay:
         )
         
         # Initialize Rust data processor
-        self.miniserver_data_processor = MiniserverDataProcessor(rust_config)
+        self.miniserver_data_processor = MiniserverDataProcessor(rust_config, self, mqtt_client, http_miniserver_handler, orjson)
 
     async def main(self):
 
