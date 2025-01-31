@@ -8,11 +8,6 @@ __version__ = "0.1.0"
 from loxmqttrelay.config import global_config
 from loxmqttrelay._loxmqttrelay import (
     MiniserverDataProcessor,
-    GlobalConfig,
-    GeneralConfig,
-    TopicsConfig,
-    ProcessingConfig,
-    DebugConfig,
     init_rust_logger
 )
 from .utils import setup_logging
@@ -26,10 +21,5 @@ setup_logging()
 __all__ = [
     'global_config',
     'MiniserverDataProcessor',
-    'GlobalConfig',
-    'GeneralConfig',
-    'TopicsConfig',
-    'ProcessingConfig',
-    'DebugConfig',
     'init_rust_logger'
 ]

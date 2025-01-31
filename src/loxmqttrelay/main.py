@@ -15,13 +15,8 @@ from loxmqttrelay.udp_handler import start_udp_server
 from loxmqttrelay.miniserver_sync import sync_miniserver_whitelist
 from loxmqttrelay.http_miniserver_handler import http_miniserver_handler
 import loxmqttrelay.utils as utils
-from loxmqttrelay import (
-    MiniserverDataProcessor, 
-    GlobalConfig,
-    GeneralConfig, 
-    TopicsConfig,
-    ProcessingConfig,
-    DebugConfig,
+from loxmqttrelay._loxmqttrelay import (
+    MiniserverDataProcessor,
     init_rust_logger
 )
 
@@ -47,35 +42,7 @@ init_rust_logger()
 class MQTTRelay:
     def __init__(self):
         self.ui_process: Optional[subprocess.Popen] = None
-        
-        # Initialize Rust configs
-        general_config = GeneralConfig(
-            cache_size=global_config.general.cache_size,
-            base_topic=global_config.general.base_topic
-        )
-        
-        topics_config = TopicsConfig(
-            subscription_filters=global_config.topics.subscription_filters,
-            topic_whitelist=set(global_config.topics.topic_whitelist)
-        )
-        
-        processing_config = ProcessingConfig(
-            expand_json=global_config.processing.expand_json
-        )
-        
-        debug_config = DebugConfig(
-            publish_processed_topics=global_config.debug.publish_processed_topics
-        )
-        
-        rust_config = GlobalConfig(
-            general=general_config,
-            topics=topics_config,
-            processing=processing_config,
-            debug=debug_config
-        )
-        
-        # Initialize Rust data processor
-        self.miniserver_data_processor = MiniserverDataProcessor(rust_config, self, mqtt_client, http_miniserver_handler, orjson)
+        self.miniserver_data_processor = MiniserverDataProcessor(TOPIC, global_config, self, mqtt_client, http_miniserver_handler, orjson)
 
     async def main(self):
 
@@ -128,7 +95,7 @@ class MQTTRelay:
         
         try:
             # Connect with all required subscriptions
-            await mqtt_client.connect(all_topics, self.received_mqtt_message)
+            await mqtt_client.connect(all_topics, self.miniserver_data_processor.handle_mqtt_message)
         except Exception as e:
             logger.error(f"Failed to connect to MQTT broker: {e}")
             raise ConfigError(f"MQTT connection failed: {e}")
@@ -180,6 +147,7 @@ class MQTTRelay:
             logger.info("UI is not running")
             await mqtt_client.publish(TOPIC.UI_STATUS, "UI is not running")
 
+    """
     async def received_mqtt_message(self, topic: str, message: str):
         topic_str = str(topic)
 
@@ -227,7 +195,7 @@ class MQTTRelay:
                             ))
                 except Exception as e:
                     logger.error(f"Error processing and sending to Miniserver: {e}")
-
+    """
     def restart_relay_incl_ui(self):
         if self.ui_process:
             self.ui_process.terminate()
