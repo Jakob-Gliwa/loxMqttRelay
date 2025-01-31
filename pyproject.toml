@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=42.0", "wheel", "Cython>=3.0.0"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
 
 [project]
 name = "loxmqttrelay"
@@ -16,8 +16,6 @@ dependencies = [
     "gmqtt>=0.7.0",
     "construct>=2.10.70",
     "tomlkit>=0.13.0",
-    "Cython>=3.0.0",
-    "construct>=2.10.70",
 ]
 
 [project.optional-dependencies]
@@ -51,3 +49,8 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-v --cov=. --cov-report=term-missing"
 asyncio_mode = "strict"
+
+[tool.maturin]
+python-source = "src"
+module-name = "loxmqttrelay._loxmqttrelay"
+features = ["pyo3/extension-module"]

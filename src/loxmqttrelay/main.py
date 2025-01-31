@@ -13,9 +13,17 @@ from loxmqttrelay.config import ConfigError, ConfigSection, global_config
 from loxmqttrelay.mqtt_client import mqtt_client
 from loxmqttrelay.udp_handler import start_udp_server
 from loxmqttrelay.miniserver_sync import sync_miniserver_whitelist
-from loxmqttrelay.miniserver_data_processor import miniserver_data_processor
 from loxmqttrelay.http_miniserver_handler import http_miniserver_handler
 import loxmqttrelay.utils as utils
+from loxmqttrelay import (
+    MiniserverDataProcessor, 
+    GlobalConfig,
+    GeneralConfig, 
+    TopicsConfig,
+    ProcessingConfig,
+    DebugConfig,
+    init_rust_logger
+)
 
 TOPIC = types.SimpleNamespace(
     CONFIG_SET = f"{global_config.general.base_topic}config/set",
@@ -33,9 +41,41 @@ TOPIC = types.SimpleNamespace(
 
 logger = logging.getLogger(__name__)
 
+# Initialize Rust logger
+init_rust_logger()
+
 class MQTTRelay:
     def __init__(self):
         self.ui_process: Optional[subprocess.Popen] = None
+        
+        # Initialize Rust configs
+        general_config = GeneralConfig(
+            cache_size=global_config.general.cache_size,
+            base_topic=global_config.general.base_topic
+        )
+        
+        topics_config = TopicsConfig(
+            subscription_filters=global_config.topics.subscription_filters,
+            topic_whitelist=set(global_config.topics.topic_whitelist)
+        )
+        
+        processing_config = ProcessingConfig(
+            expand_json=global_config.processing.expand_json
+        )
+        
+        debug_config = DebugConfig(
+            publish_processed_topics=global_config.debug.publish_processed_topics
+        )
+        
+        rust_config = GlobalConfig(
+            general=general_config,
+            topics=topics_config,
+            processing=processing_config,
+            debug=debug_config
+        )
+        
+        # Initialize Rust data processor
+        self.miniserver_data_processor = MiniserverDataProcessor(rust_config)
 
     async def main(self):
 
@@ -61,14 +101,14 @@ class MQTTRelay:
             inputs = sync_miniserver_whitelist()
             #TODO: Update config with new whitelist
             global_config.update_config(ConfigSection.TOPICS, {'topic_whitelist': inputs})
-            miniserver_data_processor.update_topic_whitelist(inputs)
+            self.miniserver_data_processor.update_topic_whitelist(list(inputs))
             logger.info("Whitelist updated from miniserver configuration")
         except Exception as e:
             logger.error(f"Failed to sync with miniserver: {str(e)}")
             logger.info("Keeping whitelist from config")
             # Restore original whitelist on failure
             global_config.update_config(ConfigSection.TOPICS, {'topic_whitelist': initial_whitelist})
-            miniserver_data_processor.update_topic_whitelist(initial_whitelist)
+            self.miniserver_data_processor.update_topic_whitelist(list(initial_whitelist))
         
 
     async def connect_and_subscribe_mqtt(self):
@@ -171,16 +211,20 @@ class MQTTRelay:
             case _:
                 # Process message and send to miniserver if needed
                 try:
-                    #Process Data
-                    for topic, value in miniserver_data_processor.process_data(
+                    # Process data using Rust implementation
+                    processed_data = self.miniserver_data_processor.process_data(
                         topic_str,
                         message,
-                        mqtt_publish_callback=mqtt_client.publish
-                    ):  
-                        asyncio.create_task(http_miniserver_handler.send_to_miniserver(
-                            topic, value,
-                            mqtt_publish_callback=mqtt_client.publish
-                        ))           
+                        mqtt_client.publish if global_config.debug.publish_processed_topics else None
+                    )
+                    
+                    # Send processed data to miniserver
+                    for topic, value in processed_data:
+                        if value is not None:  # Rust may return None for filtered values
+                            asyncio.create_task(http_miniserver_handler.send_to_miniserver(
+                                topic, value,
+                                mqtt_publish_callback=mqtt_client.publish
+                            ))
                 except Exception as e:
                     logger.error(f"Error processing and sending to Miniserver: {e}")
 

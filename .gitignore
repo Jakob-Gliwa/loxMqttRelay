@@ -40,3 +40,7 @@ uv.lock
 logs/
 config/config.toml
 src/loxwebsocket/cython_modules/extractor.c
+target/
+benchmark.py
+lib.rs
+Cargo.lock
