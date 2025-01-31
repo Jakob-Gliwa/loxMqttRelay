@@ -38,7 +38,7 @@ jobs:
           pytest tests/ --cov=loxmqttrelay --cov-report=xml --cov-report=term
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: coverage.xml
           path: coverage.xml
