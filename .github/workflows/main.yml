@@ -50,10 +50,25 @@ jobs:
     strategy:
       matrix:
         include:
+          # AMD64 builds
           - platform: "linux/amd64"
             optimization: "-O3 -march=native -ffast-math"
             suffix: "optimized"
           - platform: "linux/amd64"
+            optimization: "-O2 -mtune=generic"
+            suffix: "compatible"
+          # ARM64 builds (for Raspberry Pi 4, newer ARM servers, etc.)
+          - platform: "linux/arm64"
+            optimization: "-O3 -mcpu=native -ffast-math"
+            suffix: "optimized"
+          - platform: "linux/arm64"
+            optimization: "-O2 -mtune=generic"
+            suffix: "compatible"
+          # ARMv7 builds (for Raspberry Pi 3 and older, other 32-bit ARM devices)
+          - platform: "linux/arm/v7"
+            optimization: "-O3 -mcpu=cortex-a7 -ffast-math"
+            suffix: "optimized"
+          - platform: "linux/arm/v7"
             optimization: "-O2 -mtune=generic"
             suffix: "compatible"
 
@@ -90,10 +105,10 @@ jobs:
           provenance: true
           sbom: true
 
-      # Optional: Add a final step to tag the compatible version as default "latest"
-      - name: Tag compatible version as latest
-        if: matrix.suffix == 'compatible' && github.event_name != 'pull_request'
+      # Tag AMD64 optimized version as latest
+      - name: Tag AMD64 optimized version as latest
+        if: matrix.platform == 'linux/amd64' && matrix.suffix == 'optimized' && github.event_name != 'pull_request'
         run: |
-          docker pull ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }}-compatible
-          docker tag ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }}-compatible ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest
+          docker pull ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }}-optimized
+          docker tag ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }}-optimized ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest
           docker push ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest

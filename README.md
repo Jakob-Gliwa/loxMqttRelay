@@ -224,6 +224,59 @@ services:
     restart: unless-stopped
 ```
 
+## Docker Image Variants
+
+The MQTT Relay is available in different variants optimized for different CPU architectures and performance levels:
+
+#### Available Architectures
+- AMD64 (x86_64)
+- ARM64 (AArch64) - for Raspberry Pi 4, newer ARM servers
+- ARMv7 - for Raspberry Pi 3 and older 32-bit ARM devices
+
+#### Image Tags
+- `latest`: Points to the optimized AMD64 build
+- `latest-optimized`: Optimized build for each architecture
+- `latest-compatible`: Compatible build for each architecture
+- `<commit-sha>-optimized`: Specific version of optimized build
+- `<commit-sha>-compatible`: Specific version of compatible build
+
+#### Choosing the Right Image
+
+1. For modern x86_64 systems:
+   ```bash
+   docker pull acidcliff/loxmqttrelay:latest  # or latest-optimized
+   ```
+
+2. For older x86_64 systems (e.g., Intel Atom, J3355):
+   ```bash
+   docker pull acidcliff/loxmqttrelay:latest-compatible
+   ```
+
+3. For Raspberry Pi 4 or newer ARM servers:
+   ```bash
+   # Docker will automatically select ARM64 variant
+   docker pull acidcliff/loxmqttrelay:latest-optimized  # for best performance
+   docker pull acidcliff/loxmqttrelay:latest-compatible # for better compatibility
+   ```
+
+4. For Raspberry Pi 3 or older ARM devices:
+   ```bash
+   # Docker will automatically select ARMv7 variant
+   docker pull acidcliff/loxmqttrelay:latest-optimized  # for best performance
+   docker pull acidcliff/loxmqttrelay:latest-compatible # for better compatibility
+   ```
+
+When using docker-compose, you can specify the image tag in your `docker-compose.yml`:
+
+```yaml
+services:
+  mqttrelay:
+    image: acidcliff/loxmqttrelay:latest-compatible  # for compatibility
+    # or
+    image: acidcliff/loxmqttrelay:latest-optimized   # for performance
+    # ... rest of your configuration
+```
+
 ## Configuration
 
 The MQTT Relay can be configured through a `config.toml` file or using the web-based configuration UI. A default configuration file (`default_config.toml`) is provided as a starting point with sensible defaults.
