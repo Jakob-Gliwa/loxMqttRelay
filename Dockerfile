@@ -1,4 +1,5 @@
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+ARG OPTIMIZATION_FLAGS="-O3 -march=native -ffast-math"
 WORKDIR /app
 COPY . .
 # Install build dependencies, Python dependencies, and clean up in a single layer
@@ -9,7 +10,7 @@ RUN apt-get update \
     && uv pip install --system . \
     && uv pip install --system -e ".[dev]" \
     && cd src/loxwebsocket/cython_modules \
-    && python setup.py build_ext --inplace \
+    && CFLAGS="$OPTIMIZATION_FLAGS" python setup.py build_ext --inplace \
     && cd /app \
     && uv pip uninstall --system $(uv pip freeze | grep -v "^-e" | cut -d= -f1) \
     && uv pip install --system . \

@@ -1,14 +1,18 @@
 # setup.py
 
+import os
 from setuptools import setup
 from Cython.Build import cythonize
 from setuptools.extension import Extension
+
+# Get optimization flags from environment or use default
+optimization_flags = os.environ.get('CFLAGS', '-O3 -march=native -ffast-math').split()
 
 extensions = [
     Extension(
         "extractor",
         ["extractor.pyx"],
-        extra_compile_args=["-O3", "-march=native", "-ffast-math"],  # Maximum optimization
+        extra_compile_args=optimization_flags,
         extra_link_args=["-O3"]
     )
 ]
