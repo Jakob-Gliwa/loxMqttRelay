@@ -127,7 +127,7 @@ class HttpMiniserverHandler:
         Returns:
             Dictionary mapping topics to their HTTP response codes
         """
-        
+        logger.debug(f"Sending {topic}={value} to Miniserver")
         # Send to Miniserver using WebSocket or HTTP based on config
         if global_config.miniserver.use_websocket:
             response_code = await self.send_to_minisever_via_websocket(topic, value)
@@ -144,5 +144,14 @@ class HttpMiniserverHandler:
             ))
 
         return response_code
+    
+
+    def send_to_miniserver_sync(
+        self,
+        topic: str,
+        value: Any,
+        mqtt_publish_callback: Optional[Callable[[str, str, bool], Awaitable[None]]] = None
+    ) -> Dict[str, Union[int, str]]:
+        return asyncio.create_task(self.send_to_miniserver(topic, value, mqtt_publish_callback))
 
 http_miniserver_handler = HttpMiniserverHandler()

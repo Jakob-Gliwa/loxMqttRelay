@@ -318,7 +318,7 @@ impl MiniserverDataProcessor {
         topic: &str,
         message: &str,
         mqtt_publish_callback: Option<PyObject>,
-    ) -> PyResult<Vec<(String, Option<String>)>> {
+    ) -> PyResult<()> {
         debug!("Processing data - topic: {}, message: {}", topic, message);
 
         // subscription filter
@@ -326,7 +326,7 @@ impl MiniserverDataProcessor {
             let regex = Regex::new(pattern).unwrap();
             if regex.is_match(topic) {
                 // Filtered => no data
-                return Ok(vec![]);
+                return Ok(());
             }
         }
 
@@ -371,7 +371,6 @@ impl MiniserverDataProcessor {
             }
         }
 
-        let mut results = Vec::new();
         for (t, v) in flattened {
             if !self.topic_whitelist.is_empty() {
                 if !self.is_in_whitelist(&t)? {
@@ -398,10 +397,10 @@ impl MiniserverDataProcessor {
             debug!("Topic '{}' passed all filters", t);
 
             let converted = self._convert_boolean(&v)?;
-            results.push((t, converted));
+            let _ = self.http_handler_obj.call_method(py, "send_to_miniserver_sync", (t, converted, mqtt_publish_callback.clone()), None);
         }
 
-        Ok(results)
+        Ok(())
     }
 
     #[pyo3(text_signature = "(self, topic, value, http_code, mqtt_publish_callback)")]
@@ -464,23 +463,22 @@ impl MiniserverDataProcessor {
         debug!("(Rust) handle_mqtt_message: {} => {}", topic, message);
 
         let Some(ref topics) = self.mqtt_topics else {
-            // If for some reason it's never set, we fail early
-            error!("mqtt_topics was never initialized! Call initialize_topics_from_python first.");
+            error!("mqtt_topics was never initialized!");
             return Ok(()); 
         };
 
         // Match the topic to whichever action it needs
-        if topic == topics.start_ui_topic {
-            let _ = self.relay_main_obj.call_method0(py, "start_ui");
-        }
-        else if topic == topics.stop_ui_topic {
-            let _ = self.relay_main_obj.call_method0(py, "stop_ui");
-        }
-        else if topic == topics.miniserver_startup_topic {
+        if topic == topics.miniserver_startup_topic {
             if pyget!(self.global_config, py, "miniserver", "sync_with_miniserver").extract::<bool>(py)? {
                 info!("Miniserver startup detected, resyncing whitelist (from Rust MDP).");
                 let _ = self.relay_main_obj.call_method0(py, "handle_miniserver_sync");
             }
+        }
+        else if topic == topics.start_ui_topic {
+            let _ = self.relay_main_obj.call_method0(py, "start_ui");
+        }
+        else if topic == topics.stop_ui_topic {
+            let _ = self.relay_main_obj.call_method0(py, "stop_ui");
         }
         else if topic == topics.config_get_topic {
             // global_config.get_safe_config -> orjson.dumps -> publish
@@ -533,24 +531,14 @@ impl MiniserverDataProcessor {
             };
 
             // process_data(...) returns Vec<(String, Option<String>)>
-            let result = self.process_data(
+            self.process_data(
                 py,
                 &topic,
                 &message,
                 debug_publish_callback
-            )?;
+            );
 
-            // For each, call send_to_miniserver
-            for (t, maybe_val) in result {
-                if let Some(value) = maybe_val {
-                    // Synchronous call to Python's send_to_miniserver
-                    let kwargs = vec![
-                        ("mqtt_publish_callback", self.mqtt_client_obj.getattr(py, "publish")?)
-                    ].into_py_dict(py);
-
-                    let _ = self.http_handler_obj.call_method(py, "send_to_miniserver", (t, value), Some(kwargs));
-                }
-            }
+            
         }
 
         Ok(())
