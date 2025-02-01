@@ -215,6 +215,9 @@ async def test_message_callback(mock_client, mqtt_client):
     message = b"test message"
     await mqtt_client._on_message(mock_client, "test/topic1", message, 0, None)
     
+    # Add logging to check if the callback is being called
+    await asyncio.sleep(0.1)
+    
     callback.assert_called_once_with("test/topic1", "test message")
 
 @pytest.mark.asyncio
@@ -228,5 +231,5 @@ async def test_message_callback_error(mock_client, mqtt_client):
     # Simulate message received
     message = b"test message"
     result = await mqtt_client._on_message(mock_client, "test/topic1", message, 0, None)
-    
+    await asyncio.sleep(0.1)
     assert result == PubAckReasonCode.UNSPECIFIED_ERROR

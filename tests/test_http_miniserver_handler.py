@@ -205,15 +205,20 @@ async def test_forwarded_topics_publishing(
     """Test forwarded topics publishing"""
     config_instance._config.debug.publish_forwarded_topics = True
     mock_publish = AsyncMock()
-    
+
     with patch('aiohttp.ClientSession') as mock_session:
         session_instance = AsyncMock()
         session_instance.__aenter__.return_value = session_instance
         session_instance.__aexit__.return_value = None
         session_instance.get = AsyncMock()
         mock_session.return_value = session_instance
-        
-        for topic, value in test_data:
-            await handler.send_to_miniserver(topic, value, mqtt_publish_callback=mock_publish)
-        
+
+        # Create a task group for handling multiple async operations
+        async with asyncio.TaskGroup() as tg:
+            for topic, value in test_data:
+                tg.create_task(handler.send_to_miniserver(topic, value, mqtt_publish_callback=mock_publish))
+
+        # Add a small delay to allow async operations to complete
+        await asyncio.sleep(0.1)
+
         assert mock_publish.call_count == len(test_data)

@@ -1,7 +1,6 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyFrozenSet, PyTuple, IntoPyDict, PyBool};
+use pyo3::types::{PyFrozenSet, PyTuple, IntoPyDict};
 use regex::Regex;
-use pyo3::intern;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -16,6 +15,84 @@ use serde_json::Value;
 // For logging
 use log::{debug, error, info};
 
+/// A struct representing some global config values
+#[pyclass]
+#[derive(Clone)]
+pub struct GeneralConfig {
+    #[pyo3(get, set)]
+    pub cache_size: usize,
+    #[pyo3(get, set)]
+    pub base_topic: String,
+}
+
+#[pymethods]
+impl GeneralConfig {
+    #[new]
+    fn new(cache_size: usize, base_topic: String) -> Self {
+        GeneralConfig { cache_size, base_topic }
+    }
+}
+
+#[pyclass]
+#[derive(Clone)]
+pub struct TopicsConfig {
+    #[pyo3(get, set)]
+    pub subscription_filters: Vec<String>,
+    #[pyo3(get, set)]
+    pub topic_whitelist: HashSet<String>,
+}
+
+#[pymethods]
+impl TopicsConfig {
+    #[new]
+    fn new(subscription_filters: Vec<String>, topic_whitelist: HashSet<String>) -> Self {
+        TopicsConfig { subscription_filters, topic_whitelist }
+    }
+}
+
+#[pyclass]
+#[derive(Clone)]
+pub struct ProcessingConfig {
+    #[pyo3(get, set)]
+    pub expand_json: bool,
+}
+
+#[pymethods]
+impl ProcessingConfig {
+    #[new]
+    fn new(expand_json: bool) -> Self {
+        ProcessingConfig { expand_json }
+    }
+}
+
+#[pyclass]
+#[derive(Clone)]
+pub struct DebugConfig {
+    #[pyo3(get, set)]
+    pub publish_processed_topics: bool,
+}
+
+#[pymethods]
+impl DebugConfig {
+    #[new]
+    fn new(publish_processed_topics: bool) -> Self {
+        DebugConfig { publish_processed_topics }
+    }
+}
+
+#[pyclass]
+#[derive(Clone)]
+pub struct GlobalConfig {
+    #[pyo3(get, set)]
+    pub general: GeneralConfig,
+    #[pyo3(get, set)]
+    pub topics: TopicsConfig,
+    #[pyo3(get, set)]
+    pub processing: ProcessingConfig,
+    #[pyo3(get, set)]
+    pub debug: DebugConfig,
+}
+
 /// A small struct to store all relevant MQTT topics in Rust, so we don't fetch them repeatedly
 #[derive(Clone, Debug)]
 struct MqttTopics {
@@ -29,19 +106,11 @@ struct MqttTopics {
     config_remove_topic: String,
     config_update_topic: String,
     config_restart_topic: String,
+    /// Whether miniserver sync is enabled (fetched once from Python)
+    miniserver_sync_enabled: bool,
 }
 
-/// Convert a known boolean string to "1"/"0", or None if unrecognized.
-fn convert_boolean_str(input: &str) -> Option<&'static str> {
-    match input {
-        "true" | "yes" | "on" | "enabled" | "enable" | "1"
-        | "check" | "checked" | "select" | "selected" => Some("1"),
-        "false" | "no" | "off" | "disabled" | "disable" | "0" => Some("0"),
-        _ => None,
-    }
-}
-
-/// Flatten a serde_json `Value` into `key/value` pairs using '/' as separator.
+/// Flatten a serde_json `Value` into key-value pairs using '/' as separator.
 fn flatten_json(obj: &Value, prefix: &str, acc: &mut Vec<(String, String)>) {
     match obj {
         Value::Object(map) => {
@@ -100,57 +169,82 @@ fn flatten_json(obj: &Value, prefix: &str, acc: &mut Vec<(String, String)>) {
     }
 }
 
-macro_rules! pyget {
-    ($obj:expr, $py:expr, $($attr:expr),+) => {{
-        let mut obj = $obj.to_object($py);
-        $( obj = obj.getattr($py, intern!($py, $attr))?; )*
-        obj
-    }};
+fn convert_boolean_str(input: &str) -> Option<&'static str> {
+    match input {
+        "true" | "yes" | "on" | "enabled" | "enable" | "1"
+        | "check" | "checked" | "select" | "selected" => Some("1"),
+        "false" | "no" | "off" | "disabled" | "disable" | "0" => Some("0"),
+        _ => None,
+    }
 }
 
+#[pymethods]
+impl GlobalConfig {
+    #[new]
+    fn new(
+        general: GeneralConfig,
+        topics: TopicsConfig,
+        processing: ProcessingConfig,
+        debug: DebugConfig,
+    ) -> Self {
+        GlobalConfig {
+            general,
+            topics,
+            processing,
+            debug,
+        }
+    }
+}
 
+/// Our main data processor, including the new handle_mqtt_message method.
 #[pyclass]
 pub struct MiniserverDataProcessor {
-    #[pyo3(get)]
-    global_config: PyObject,
+    #[pyo3(get, set)]
+    pub global_config: GlobalConfig,
 
-    // Expose the compiled filter to Python so tests can see it
-    #[pyo3(get)]
     compiled_subscription_filter: Option<String>,
-    #[pyo3(get)]
     do_not_forward_patterns: Option<String>,
-    #[pyo3(get)]
     topic_whitelist: HashSet<String>,
     convert_bool_cache: Mutex<LruCache<String, String>>,
     normalize_topic_cache: Mutex<LruCache<String, String>>,
 
-    relay_main_obj: PyObject,
-    mqtt_client_obj: PyObject,
-    #[pyo3(get)]
-    http_handler_obj: PyObject,
-    orjson_obj: PyObject,
+    // New: Store the topics once, so we skip repeated Python lookups
     mqtt_topics: Option<MqttTopics>,
 }
 
 #[pymethods]
 impl MiniserverDataProcessor {
-
     #[new]
-    #[pyo3(text_signature = "(self, global_config_py, relay_main_obj, mqtt_client_obj, http_handler_obj, orjson_obj)")]
-    fn new(py: Python, topic_ns: PyObject, global_config_py: PyObject, relay_main_obj: PyObject, mqtt_client_obj: PyObject, http_handler_obj: PyObject, orjson_obj: PyObject) -> PyResult<Self> {
-        debug!(
-            "Initializing MiniserverDataProcessor with cache_size={}",
-            pyget!(global_config_py, py, "general", "cache_size").extract::<i32>(py)?
-        );
+    fn new(global_config: GlobalConfig) -> PyResult<Self> {
+        debug!("Initializing MiniserverDataProcessor with cache_size={}", global_config.general.cache_size);
 
-        let compiled = Self::compile_filters(pyget!(global_config_py, py, "topics", "subscription_filters").extract(py)?);
-        let cache_size = if pyget!(global_config_py, py, "general", "cache_size").extract::<i32>(py)? == 0 {
+        let compiled = Self::compile_filters(global_config.topics.subscription_filters.clone());
+        let cache_size = if global_config.general.cache_size == 0 {
             64
         } else {
-            pyget!(global_config_py, py, "general", "cache_size").extract(py)?
+            global_config.general.cache_size
         };
         let lru_size = NonZeroUsize::new(cache_size).unwrap();
 
+        Ok(MiniserverDataProcessor {
+            compiled_subscription_filter: compiled,
+            do_not_forward_patterns: None,
+            topic_whitelist: global_config.topics.topic_whitelist.clone(),
+            convert_bool_cache: Mutex::new(LruCache::new(lru_size)),
+            normalize_topic_cache: Mutex::new(LruCache::new(lru_size)),
+            global_config,
+            mqtt_topics: None,
+        })
+    }
+
+    /// Initialize (and store) the relevant MQTT topics + whether miniserver sync is enabled.
+    /// This is called once from Python, typically right after constructing the processor.
+    ///
+    /// Usage in Python:
+    ///    self.miniserver_data_processor.initialize_topics_from_python(self.TOPIC, global_config)
+    #[pyo3(text_signature = "(self, topic_ns, global_config_py)")]
+    fn initialize_topics_from_python(&mut self, py: Python<'_>, topic_ns: PyObject, global_config_py: PyObject) -> PyResult<()> {
+        // Extract the string values from the Python SimpleNamespace
         let start_ui_topic: String = topic_ns.getattr(py, "START_UI")?.extract(py)?;
         let stop_ui_topic: String = topic_ns.getattr(py, "STOP_UI")?.extract(py)?;
         let miniserver_startup_topic: String = topic_ns.getattr(py, "MINISERVER_STARTUP_EVENT")?.extract(py)?;
@@ -161,6 +255,12 @@ impl MiniserverDataProcessor {
         let config_remove_topic: String = topic_ns.getattr(py, "CONFIG_REMOVE")?.extract(py)?;
         let config_update_topic: String = topic_ns.getattr(py, "CONFIG_UPDATE")?.extract(py)?;
         let config_restart_topic: String = topic_ns.getattr(py, "CONFIG_RESTART")?.extract(py)?;
+
+        // Also check if miniserver sync is enabled
+        let miniserver_sync_enabled: bool = global_config_py
+            .getattr(py, "miniserver")?
+            .getattr(py, "sync_with_miniserver")?
+            .extract(py)?;
 
         let topics = MqttTopics {
             start_ui_topic,
@@ -173,32 +273,15 @@ impl MiniserverDataProcessor {
             config_remove_topic,
             config_update_topic,
             config_restart_topic,
+            miniserver_sync_enabled,
         };
-        // processor.mqtt_topics = Some(topics);
+        debug!("Initialized MqttTopics in Rust: {:?}", topics);
 
-
-        let processor = MiniserverDataProcessor {
-            compiled_subscription_filter: compiled,
-            do_not_forward_patterns: None,
-            topic_whitelist: pyget!(global_config_py, py, "topics", "topic_whitelist")
-                .extract::<Vec<String>>(py)?
-                .into_iter()
-                .collect(),
-            convert_bool_cache: Mutex::new(LruCache::new(lru_size)),
-            normalize_topic_cache: Mutex::new(LruCache::new(lru_size)),
-            global_config: global_config_py,
-            mqtt_topics: Some(topics),
-            relay_main_obj,
-            mqtt_client_obj,
-            http_handler_obj,
-            orjson_obj,
-        };
-
-  
-        debug!("MiniserverDataProcessor initialization complete");
-        Ok(processor)
+        self.mqtt_topics = Some(topics);
+        Ok(())
     }
 
+    /// Helper to compile filters into a single big regex (or None if empty).
     #[staticmethod]
     fn compile_filters(filters: Vec<String>) -> Option<String> {
         if filters.is_empty() {
@@ -280,7 +363,7 @@ impl MiniserverDataProcessor {
 
     #[pyo3(text_signature = "(self, topic, val)")]
     fn expand_json<'py>(&self, py: Python<'py>, topic: &str, val: &str) -> PyResult<&'py PyFrozenSet> {
-        if val.is_empty() || ((!val.starts_with('{')) && (!val.starts_with('['))) {
+        if val.is_empty() || (!val.starts_with('{') && !val.starts_with('[')) {
             let tuple = (topic.to_string(), val.to_string());
             let set = PyFrozenSet::new(py, &[tuple])?;
             return Ok(set);
@@ -315,146 +398,6 @@ impl MiniserverDataProcessor {
         Ok(self.topic_whitelist.contains(&normalized))
     }
 
-    #[pyo3(signature = (topic, message, mqtt_publish_callback=None))]
-    fn process_data(
-        &self,
-        py: Python,
-        topic: &str,
-        message: &str,
-        mqtt_publish_callback: Option<PyObject>,
-    ) -> PyResult<()> {
-        debug!("Processing data - topic: {}, message: {}", topic, message);
-
-        // Normalize topic for whitelist comparison right away
-        let normalized_topic = self.normalize_topic(topic)?;
-        debug!("Normalized topic for processing: '{}'", normalized_topic);
-
-        // subscription filter (on original topic)
-        if let Some(ref pattern) = self.compiled_subscription_filter {
-            let regex = Regex::new(pattern).unwrap();
-            if regex.is_match(topic) {
-                debug!("Topic '{}' filtered by subscription filter", topic);
-                return Ok(());
-            }
-        }
-
-        let expand = pyget!(self.global_config, py, "processing", "expand_json").extract(py)?;
-        debug!("Transforming data with expand_json={}", expand);
-
-        let flattened: Vec<(String, String)> = if expand {
-            match serde_json::from_str::<Value>(message) {
-                Ok(json_val) => {
-                    if !json_val.is_object() {
-                        vec![(topic.to_string(), message.to_string())]
-                    } else {
-                        let mut flat_vec = Vec::new();
-                        flatten_json(&json_val, "", &mut flat_vec);
-                        flat_vec.into_iter().map(|(k, v)| (format!("{}/{}", topic, k), v)).collect()
-                    }
-                }
-                Err(_) => vec![(topic.to_string(), message.to_string())],
-            }
-        } else {
-            vec![(topic.to_string(), message.to_string())]
-        };
-        debug!("Data after flattening: {:?}", flattened);
-
-        // debug publish
-        if pyget!(self.global_config, py, "debug", "publish_processed_topics").extract(py)? {
-            if let Some(ref callback) = mqtt_publish_callback {
-                for (dbg_topic, val) in &flattened {
-                    let normalized_dbg_topic = self.normalize_topic(dbg_topic)?;
-                    let final_dbg_topic = format!(
-                        "{}processedtopics/{}",
-                        pyget!(self.global_config, py, "general", "base_topic").extract::<String>(py)?, normalized_dbg_topic
-                    );
-                    let args = PyTuple::new(py, &[
-                        final_dbg_topic.into_py(py),
-                        val.clone().into_py(py),
-                        false.to_string().into_py(py),
-                    ]);
-                    let _ = callback.call1(py, args);
-                }
-            }
-        }
-
-        for (t, v) in flattened {
-            // Check whitelist first (using normalized topic)
-            if !self.topic_whitelist.is_empty() {
-                let curr_normalized = self.normalize_topic(&t)?;
-                debug!("Checking whitelist for topic '{}' (normalized: '{}') against whitelist: {:?}", 
-                       t, curr_normalized, self.topic_whitelist);
-                
-                if !self.topic_whitelist.contains(&curr_normalized) {
-                    debug!("Topic '{}' (normalized: '{}') not in whitelist", t, curr_normalized);
-                    continue;
-                }
-                debug!("Topic '{}' (normalized: '{}') found in whitelist", t, curr_normalized);
-            }
-            
-            // second pass subscription filter (on original topic)
-            if let Some(ref pattern) = self.compiled_subscription_filter {
-                let regex = Regex::new(pattern).unwrap();
-                if regex.is_match(&t) {
-                    debug!("Topic '{}' filtered by second pass", t);
-                    continue;
-                }
-            }
-            
-            // do_not_forward (on original topic)
-            if let Some(ref pattern) = self.do_not_forward_patterns {
-                let regex = Regex::new(pattern).unwrap();
-                if regex.is_match(&t) {
-                    debug!("Topic '{}' filtered by do_not_forward", t);
-                    continue;
-                }
-            }
-            
-            debug!("Topic '{}' passed all filters, sending to miniserver", t);
-            let converted = self._convert_boolean(&v)?;
-            if let Some(val) = converted {
-                let _ = self.http_handler_obj.call_method(py, "send_to_miniserver_sync", (t, val, mqtt_publish_callback.clone()), None);
-            }
-        }
-
-        Ok(())
-    }
-
-    #[pyo3(text_signature = "(self, topic, value, http_code, mqtt_publish_callback)")]
-    fn publish_forwarded_topic(
-        &self,
-        py: Python,
-        topic: &str,
-        value: &str,
-        http_code: i32,
-        mqtt_publish_callback: PyObject,
-    ) -> PyResult<()> {
-        debug!(
-            "Publishing forwarded topic: {} with value={}, http_code={}",
-            topic, value, http_code
-        );
-        let normalized = self.normalize_topic(topic)?;
-        let mqtt_topic = format!(
-            "{}forwardedtopics/{}",
-            pyget!(self.global_config, py, "general", "base_topic").extract::<String>(py)?, normalized
-        );
-        let payload = serde_json::json!({
-            "value": value,
-            "http_code": http_code
-        });
-        let payload_str = payload.to_string();
-
-        debug!("Publishing to MQTT topic '{}' => {}", mqtt_topic, payload_str);
-
-        let args = PyTuple::new(py, &[
-            mqtt_topic.into_py(py),
-            payload_str.into_py(py),
-            PyBool::new(py, false).into_py(py),
-        ]);
-        mqtt_publish_callback.call1(py, args)?;
-        Ok(())
-    }
-
     /// Equivalent of the old `received_mqtt_message`, but now inside MiniserverDataProcessor.
     /// Because we already stored all topic strings in `mqtt_topics`, we do not repeatedly
     /// fetch them from Python on every call. Much more efficient.
@@ -469,41 +412,46 @@ impl MiniserverDataProcessor {
     ///    )
     ///    ...
     ///    asyncio.create_task(callback(topic, message))
-    #[pyo3(text_signature = "(self,topic, message)")]
+    #[pyo3(text_signature = "(self, relay_obj, mqtt_client_obj, http_handler_obj, orjson_obj, topic, message)")]
     #[allow(clippy::too_many_arguments)]
     fn handle_mqtt_message(
         &self,
         py: Python<'_>,
+        relay_obj: PyObject,
+        mqtt_client_obj: PyObject,
+        http_handler_obj: PyObject,
+        orjson_obj: PyObject,
         topic: String,
         message: String
     ) -> PyResult<()> {
         debug!("(Rust) handle_mqtt_message: {} => {}", topic, message);
 
         let Some(ref topics) = self.mqtt_topics else {
-            error!("mqtt_topics was never initialized!");
+            // If for some reason it's never set, we fail early
+            error!("mqtt_topics was never initialized! Call initialize_topics_from_python first.");
             return Ok(()); 
         };
 
         // Match the topic to whichever action it needs
-        if topic == topics.miniserver_startup_topic {
-            if pyget!(self.global_config, py, "miniserver", "sync_with_miniserver").extract::<bool>(py)? {
-                info!("Miniserver startup detected, resyncing whitelist (from Rust)");
-                let _ = self.relay_main_obj.call_method0(py, "schedule_miniserver_sync")?;
-            }
-        }
-        else if topic == topics.start_ui_topic {
-            let _ = self.relay_main_obj.call_method0(py, "start_ui");
+        if topic == topics.start_ui_topic {
+            let _ = relay_obj.call_method0(py, "start_ui");
         }
         else if topic == topics.stop_ui_topic {
-            let _ = self.relay_main_obj.call_method0(py, "stop_ui");
+            let _ = relay_obj.call_method0(py, "stop_ui");
+        }
+        else if topic == topics.miniserver_startup_topic {
+            if topics.miniserver_sync_enabled {
+                info!("Miniserver startup detected, resyncing whitelist (from Rust MDP).");
+                let _ = relay_obj.call_method0(py, "handle_miniserver_sync");
+            }
         }
         else if topic == topics.config_get_topic {
             // global_config.get_safe_config -> orjson.dumps -> publish
-            let global_config_py = self.relay_main_obj.getattr(py, "miniserver_data_processor")?
+            let global_config_py = relay_obj.getattr(py, "miniserver_data_processor")?
                 .getattr(py, "global_config")?;
             let safe_cfg = global_config_py.call_method0(py, "get_safe_config")?;
-            let serialized = self.orjson_obj.call_method1(py, "dumps", (safe_cfg,))?;
-            let publish_fn = self.mqtt_client_obj.getattr(py, "publish")?;
+            let serialized = orjson_obj.call_method1(py, "dumps", (safe_cfg,))?;
+            let publish_fn = mqtt_client_obj.getattr(py, "publish")?;
             let _ = publish_fn.call(py, (topics.config_response_topic.clone(), serialized), None);
         }
         else if topic == topics.config_set_topic || topic == topics.config_add_topic || topic == topics.config_remove_topic {
@@ -514,17 +462,17 @@ impl MiniserverDataProcessor {
             } else {
                 "remove"
             };
-            let load_res = self.orjson_obj.call_method1(py, "loads", (message.as_str(),));
+            let load_res = orjson_obj.call_method1(py, "loads", (message.as_str(),));
             match load_res {
                 Ok(py_obj) => {
-                    let global_config_py = self.relay_main_obj.getattr(py, "miniserver_data_processor")?
+                    let global_config_py = relay_obj.getattr(py, "miniserver_data_processor")?
                         .getattr(py, "global_config")?;
                     let update_res = global_config_py.call_method(py, "update_fields", (py_obj, update_mode), None);
                     if let Err(e) = update_res {
                         error!("Error updating configuration: {:?}", e);
                     } else {
                         info!("Configuration updated via MQTT. Restarting program (from Rust).");
-                        let _ = self.relay_main_obj.call_method0(py, "restart_relay_incl_ui");
+                        let _ = relay_obj.call_method0(py, "restart_relay_incl_ui");
                     }
                 },
                 Err(e) => {
@@ -534,31 +482,77 @@ impl MiniserverDataProcessor {
         }
         else if topic == topics.config_update_topic || topic == topics.config_restart_topic {
             info!("Reloading configuration. Restarting program (from Rust).");
-            let _ = self.relay_main_obj.call_method0(py, "restart_relay_incl_ui");
+            let _ = relay_obj.call_method0(py, "restart_relay_incl_ui");
         }
         else {
             // The "normal" data path => process_data => forward to miniserver
             let debug_publish_callback = {
-                let dbg_flag: bool = pyget!(self.global_config, py, "debug", "publish_processed_topics").extract::<bool>(py)?;
+                let dbg_flag: bool = self.global_config.debug.publish_processed_topics;
                 if dbg_flag {
-                    Some(self.mqtt_client_obj.getattr(py, "publish")?)
+                    Some(mqtt_client_obj.getattr(py, "publish")?)
                 } else {
                     None
                 }
             };
 
             // process_data(...) returns Vec<(String, Option<String>)>
-            let _ = self.process_data(
+            let result = self.process_data(
                 py,
                 &topic,
                 &message,
                 debug_publish_callback
-            );
+            )?;
+
+            // For each, call send_to_miniserver
+            for (t, maybe_val) in result {
+                if let Some(value) = maybe_val {
+                    // Synchronous call to Python's send_to_miniserver
+                    let kwargs = vec![
+                        ("mqtt_publish_callback", mqtt_client_obj.getattr(py, "publish")?)
+                    ].into_py_dict(py);
+
+                    let _ = http_handler_obj.call_method(py, "send_to_miniserver", (t, value), Some(kwargs));
+                }
+            }
         }
 
         Ok(())
-    }   
+    }
 
+    /// Flatten JSON logic is inside `expand_json` (already shown). 
+    /// The rest is identical to the prior code for process_data, etc.
+
+    /// Publish a forwarded topic with optional HTTP code, if needed
+    #[pyo3(text_signature = "(self, topic, value, http_code, mqtt_publish_callback)")]
+    fn publish_forwarded_topic(
+        &self,
+        py: Python,
+        topic: &str,
+        value: &str,
+        http_code: i32,
+        mqtt_publish_callback: PyObject,
+    ) -> PyResult<()> {
+        debug!("Publishing forwarded topic: {} => value={}, code={}", topic, value, http_code);
+        let normalized = self.normalize_topic(topic)?;
+        let mqtt_topic = format!(
+            "{}/forwardedtopics/{}",
+            self.global_config.general.base_topic,
+            normalized
+        );
+        let payload = serde_json::json!({
+            "value": value,
+            "http_code": http_code
+        });
+        let payload_str = payload.to_string();
+
+        let args = PyTuple::new(py, &[
+            mqtt_topic.into_py(py),
+            payload_str.into_py(py),
+            false.to_string().into_py(py),
+        ]);
+        mqtt_publish_callback.call1(py, args)?;
+        Ok(())
+    }
 }
 
 /// Initialize the Rust logger
@@ -570,6 +564,11 @@ fn init_rust_logger() {
 #[pymodule]
 fn _loxmqttrelay(py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<MiniserverDataProcessor>()?;
+    m.add_class::<GlobalConfig>()?;
+    m.add_class::<GeneralConfig>()?;
+    m.add_class::<TopicsConfig>()?;
+    m.add_class::<ProcessingConfig>()?;
+    m.add_class::<DebugConfig>()?;
     m.add_function(wrap_pyfunction!(init_rust_logger, m)?)?;
     Ok(())
 }
