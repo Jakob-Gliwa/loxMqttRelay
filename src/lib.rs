@@ -16,6 +16,10 @@ use serde_json::Value;
 // For logging
 use log::{debug, error, info};
 
+// Import `into_future` from pyo3_asyncio and `spawn` from tokio
+use pyo3_asyncio::tokio::into_future;
+use tokio::spawn;
+
 /// A small struct to store all relevant MQTT topics in Rust, so we don't fetch them repeatedly
 #[derive(Clone, Debug)]
 struct MqttTopics {
@@ -315,7 +319,7 @@ impl MiniserverDataProcessor {
         Ok(self.topic_whitelist.contains(&normalized))
     }
 
-    #[pyo3(signature = (topic, message, mqtt_publish_callback=None))]
+    #[pyo3(text_signature = "(self, topic, message, mqtt_publish_callback=None)")]
     fn process_data(
         &self,
         py: Python,
@@ -378,6 +382,7 @@ impl MiniserverDataProcessor {
             }
         }
 
+        // Loop for sending topics to the miniserver asynchronously
         for (t, v) in flattened {
             // Check whitelist first (using normalized topic)
             if !self.topic_whitelist.is_empty() {
@@ -413,7 +418,19 @@ impl MiniserverDataProcessor {
             debug!("Topic '{}' passed all filters, sending to miniserver", t);
             let converted = self._convert_boolean(&v)?;
             if let Some(val) = converted {
-                let _ = self.http_handler_obj.call_method(py, "send_to_miniserver_sync", (t, val, mqtt_publish_callback.clone()), None);
+                // Instead of the synchronous call, call the async method and spawn it.
+                let callback_obj = match &mqtt_publish_callback {
+                    Some(cb) => cb.clone(),
+                    None => py.None(),
+                };
+                let callback = callback_obj.as_ref(py);
+                let coro = self.http_handler_obj.call_method(py, "send_to_miniserver", (t, val, callback), None)?;
+                let fut = into_future(coro.as_ref(py))?;
+                spawn(async move {
+                    if let Err(e) = fut.await {
+                        error!("Error in send_to_miniserver async call: {:?}", e);
+                    }
+                });
             }
         }
 
