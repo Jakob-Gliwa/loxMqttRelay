@@ -556,16 +556,29 @@ Configure your Miniserver to publish any message to `{base_topic}/miniservereven
 
 ## Testing Setup
 
-For development and testing, you can use a mock Miniserver:
+For development and testing, you can point the MQTT Relay to a mock Miniserver (basically any HTTP server):
 ```toml
 [debug]
-mock_ip = "192.168.X.X:1880"
+mock_ip = "192.168.X.X:<port>"
 enable_mock = true
 ```
 
+It is not possible to use the mock Miniserver functionality with the websocket communication.
+To make the mock Miniserver work, you need to set the `use_websocket` option to `false` in the `[miniserver]` section.
+```toml
+[miniserver]
+use_websocket = false
+```
+
+The mock server needs to support the following endpoints:
+- `http://{mock_ip}/dev/sps/io/{topic}/{value}`
+- `http://{mock_ip}/dev/sps/io/{topic}/`
+
+The mock server needs to return a 200 status code for successful requests.
+
 The mock Miniserver functionality can be enabled/disabled without removing the IP configuration:
-- `mock_miniserver_ip`: The IP address and port of your mock Miniserver
-- `enable_mock_miniserver`: Enable or disable the mock Miniserver functionality (default: false)
+- `mock_ip`: The IP address and port of your mock Miniserver
+- `enable_mock`: Enable or disable the mock Miniserver functionality (default: false)
 
 ## Note
 

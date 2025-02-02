@@ -427,7 +427,8 @@ class LoxWs:
             
             if not json_message["LL"].get("Code") or json_message["LL"]["Code"] != "200":
                 if json_message["LL"].get("Code") == "404" and json_message["LL"].get("control"):
-                        _LOGGER.error("Unrecognized command or control not found")
+                        #TODO this could potentially flood the logs - maybe add a config to surpess this warning 
+                        _LOGGER.warning("Unrecognized command or control not found: %s. If you receive all values that you expect and/or don't have a control with this name on your Miniserver, you can ignore this message. If you want to get rid of this message, you can add the control to the whitelist/filter/donotforward in the configuration.", json_message["LL"]["control"])
                 return None
 
             if json_message["LL"].get("value") and not isinstance(json_message["LL"]["value"], str) and json_message["LL"]["value"].get("key") and json_message["LL"]["value"].get("salt"):
