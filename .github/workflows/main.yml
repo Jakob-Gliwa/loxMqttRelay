@@ -64,13 +64,6 @@ jobs:
           - platform: "linux/arm64"
             optimization: "-O2 -mtune=generic"
             suffix: "compatible"
-          # ARMv7 builds (for Raspberry Pi 3 and older, other 32-bit ARM devices)
-          - platform: "linux/arm/v7"
-            optimization: "-O3 -mcpu=cortex-a7 -ffast-math"
-            suffix: "optimized"
-          - platform: "linux/arm/v7"
-            optimization: "-O2 -mtune=generic"
-            suffix: "compatible"
 
     steps:
       - name: Check out source
