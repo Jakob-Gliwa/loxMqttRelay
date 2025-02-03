@@ -2,7 +2,7 @@ FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 WORKDIR /app
 COPY . .
 
-# Install build dependencies, Rust toolchain, and Python dependencies in a single layer
+# Install build dependencies and other necessary packages
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         gcc \
@@ -18,8 +18,8 @@ ENV PATH="/root/.cargo/bin:${PATH}"
     
 # Create and use virtual environment with uv
 RUN uv venv && \
-    uv pip install . -- --venv && \
-    uv pip install -e ".[dev]" -- --venv
+    uv pip install . && \
+    uv pip install -e ".[dev]"
 
 # Build Rust code with maturin
 RUN PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 uv run maturin develop --uv --release
