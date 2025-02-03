@@ -15,7 +15,7 @@ dependencies = [
     "uvloop>=0.21.0",
     "gmqtt>=0.7.0",
     "construct>=2.10.70",
-    "tomlkit>=0.13.0",about:blank#blocked
+    "tomlkit>=0.13.0",
     "Cython>=3.0.0"
 ]
 
