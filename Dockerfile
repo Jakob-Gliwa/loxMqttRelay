@@ -17,16 +17,15 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
 ENV PATH="/root/.cargo/bin:${PATH}"
     
 # Create and use virtual environment with uv
-RUN uv venv && \
-    uv pip install . && \
+RUN uv pip install . && \
     uv pip install -e ".[dev]"
 
 # Build Rust code with maturin
-RUN PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 uv run maturin develop --uv --release
+RUN PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin build --release && uv pip install target/wheels/loxmqttrelay-*.whl
 
 # Build Cython modules if still needed
 RUN cd src/loxwebsocket/cython_modules \
-    && uv run python setup.py build_ext --inplace 
+    && python setup.py build_ext --inplace 
 
 # Clean up build dependencies
 RUN apt-get remove -y gcc python3-dev curl build-essential \
@@ -40,4 +39,4 @@ ENV HEADLESS=false
 ENV LOG_LEVEL=INFO
 EXPOSE 11884/udp
 EXPOSE 8501/tcp
-CMD uv run loxmqttrelay $([ "$HEADLESS" = "true" ] && echo "--headless") $([ ! -z "$LOG_LEVEL" ] && echo "--log-level $LOG_LEVEL")
+CMD loxmqttrelay $([ "$HEADLESS" = "true" ] && echo "--headless") $([ ! -z "$LOG_LEVEL" ] && echo "--log-level $LOG_LEVEL")
