@@ -17,11 +17,11 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
 ENV PATH="/root/.cargo/bin:${PATH}"
     
 # Create and use virtual environment with uv
-RUN uv pip install . && \
-    uv pip install -e ".[dev]"
+RUN uv pip install . --system && \
+    uv pip install -e ".[dev]" --system
 
 # Build Rust code with maturin
-RUN PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin build --release && uv pip install target/wheels/loxmqttrelay-*.whl
+RUN PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin build --release && uv pip install target/wheels/loxmqttrelay-*.whl --system
 
 # Build Cython modules if still needed
 RUN cd src/loxwebsocket/cython_modules \
