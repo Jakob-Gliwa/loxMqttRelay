@@ -13,18 +13,20 @@ RUN apt-get update \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal \
     && . "/root/.cargo/env" \
     # Install and build Python dependencies
-    && uv pip install --system . \
-    && uv pip install --system -e ".[dev]" \
+    && uv venv \
+    && source .venv/bin/activate \
+    && uv pip install . \
+    && uv pip install -e ".[dev]" \
     # Build Rust code with maturin by building a wheel and installing it
-    && PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin build --release --strip --no-sdist --out target/wheels \
-    && uv pip install --system target/wheels/*.whl \
+    && conda deactivate \
+    && PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin develop --uv --release \
     # Build Cython modules if still needed
     && cd src/loxwebsocket/cython_modules \
     && python setup.py build_ext --inplace \
     && cd /app \
     # Clean up Python environment
-    && uv pip uninstall --system $(uv pip freeze | grep -v "^-e" | cut -d= -f1) \
-    && uv pip install --system . \
+    && uv pip uninstall $(uv pip freeze | grep -v "^-e" | cut -d= -f1) \
+    && uv pip install . \
     # Clean up build dependencies
     && apt-get remove -y gcc python3-dev curl build-essential \
     && apt-get autoremove -y \
