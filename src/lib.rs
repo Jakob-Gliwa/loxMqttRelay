@@ -1,9 +1,8 @@
-use pyo3::{prelude::*, BoundObject};
-use pyo3::types::{PyFrozenSet, PyTuple, IntoPyDict, PyBool};
+use pyo3::{prelude::*, types::{PyFrozenSet, PyTuple, PyBool}};
 use regex::Regex;
 use pyo3::intern;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Mutex;
 
 // For caching
@@ -18,8 +17,7 @@ use log::{debug, error, info};
 
 // Import `into_future` from pyo3_async_runtimes and `spawn` from tokio
 use pyo3_async_runtimes::tokio::into_future;
-use tokio::spawn;
-use tokio::runtime::Builder;
+
 /// A small struct to store all relevant MQTT topics in Rust, so we don't fetch them repeatedly
 #[derive(Clone, Debug)]
 struct MqttTopics {
@@ -509,10 +507,24 @@ impl MiniserverDataProcessor {
             }
         }
         else if topic == topics.start_ui_topic {
-            let _ = self.relay_main_obj.call_method0(py, "start_ui");
+            let coro = self.relay_main_obj.call_method0(py, "start_ui")?;
+            let coro_bound = coro.bind(py);
+            let fut = into_future(coro_bound.clone())?;
+            pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+                if let Err(e) = fut.await {
+                    error!("Error in start_ui async call: {:?}", e);
+                }
+            });
         }
         else if topic == topics.stop_ui_topic {
-            let _ = self.relay_main_obj.call_method0(py, "stop_ui");
+            let coro = self.relay_main_obj.call_method0(py, "stop_ui")?;
+            let coro_bound = coro.bind(py);
+            let fut = into_future(coro_bound.clone())?;
+            pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+                if let Err(e) = fut.await {
+                    error!("Error in stop_ui async call: {:?}", e);
+                }
+            });
         }
         else if topic == topics.config_get_topic {
             // global_config.get_safe_config -> orjson.dumps -> publish

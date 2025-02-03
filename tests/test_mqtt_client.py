@@ -224,7 +224,7 @@ async def test_message_callback(mock_client, mqtt_client):
 async def test_message_callback_error(mock_client, mqtt_client):
     """Test message callback error handling"""
     test_topics = ["test/topic1"]
-    callback = AsyncMock(side_effect=Exception("Callback error"))
+    callback = MagicMock(side_effect=Exception("Callback error"))
     
     await mqtt_client.connect(test_topics, callback)
     

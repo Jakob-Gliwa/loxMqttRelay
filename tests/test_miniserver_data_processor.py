@@ -200,9 +200,9 @@ async def test_process_data_single_filter_pass(processor, filters, topic, messag
     processor.process_data(topic, message)
     
     if should_stay:
-        processor.http_handler_obj.send_to_miniserver_sync.assert_called()
+        processor.http_handler_obj.send_to_miniserver.assert_called()
     else:
-        processor.http_handler_obj.send_to_miniserver_sync.assert_not_called()
+        processor.http_handler_obj.send_to_miniserver.assert_not_called()
 
 @pytest.mark.asyncio
 async def test_process_data_filter_second_pass_after_flatten(processor, monkeypatch):
@@ -214,7 +214,7 @@ async def test_process_data_filter_second_pass_after_flatten(processor, monkeypa
     monkeypatch.setattr(global_config.processing, 'expand_json', True)
 
     processor.process_data(topic, message)
-    calls = processor.http_handler_obj.send_to_miniserver_sync.call_args_list
+    calls = processor.http_handler_obj.send_to_miniserver.call_args_list
     processed_topics = [call[0][0] for call in calls]
 
     assert "original/topic/ignore/nested" not in processed_topics
@@ -228,10 +228,10 @@ async def test_process_data_with_whitelist(processor):
     message = "value"
     processor.update_topic_whitelist(whitelist)
     processor.process_data(topic, message)
-    processor.http_handler_obj.send_to_miniserver_sync.assert_not_called()
+    processor.http_handler_obj.send_to_miniserver.assert_not_called()
     
     # Test passing case - reset mock first
-    processor.http_handler_obj.send_to_miniserver_sync.reset_mock()
+    processor.http_handler_obj.send_to_miniserver.reset_mock()
     
     # Get the normalized version of the topic we'll send
     test_topic = "some/allowed/topic"
@@ -248,9 +248,9 @@ async def test_process_data_with_whitelist(processor):
     
     # Debug prints after processing
     print(f"Whitelist after: {processor.topic_whitelist}")
-    print(f"Mock calls: {processor.http_handler_obj.send_to_miniserver_sync.mock_calls}")
+    print(f"Mock calls: {processor.http_handler_obj.send_to_miniserver.mock_calls}")
     
-    processor.http_handler_obj.send_to_miniserver_sync.assert_called()
+    processor.http_handler_obj.send_to_miniserver.assert_called()
 
 @pytest.mark.asyncio
 async def test_process_data_with_do_not_forward(processor):
@@ -259,7 +259,7 @@ async def test_process_data_with_do_not_forward(processor):
     message = "value"
     processor.update_do_not_forward(dnf_filter)
     processor.process_data(topic, message)
-    processor.http_handler_obj.send_to_miniserver_sync.assert_not_called()
+    processor.http_handler_obj.send_to_miniserver.assert_not_called()
 
 @pytest.mark.asyncio
 async def test_process_data_order_of_filters(processor, monkeypatch):
@@ -280,14 +280,14 @@ async def test_process_data_order_of_filters(processor, monkeypatch):
         processor.process_data(topic, message)
         
     # Reset call list to ensure we start fresh
-    processor.http_handler_obj.send_to_miniserver_sync.reset_mock()
+    processor.http_handler_obj.send_to_miniserver.reset_mock()
     
     # Process messages again to ensure clean state
     for topic, message in topic_messages:
         processor.process_data(topic, message)
 
     expected_topics = ["whitelisted/foo", "normal/publish"]
-    actual_calls = [call[0][0] for call in processor.http_handler_obj.send_to_miniserver_sync.call_args_list]
+    actual_calls = [call[0][0] for call in processor.http_handler_obj.send_to_miniserver.call_args_list]
     print(f"Actual calls: {actual_calls}")  # Debug print
     print(f"Expected topics: {expected_topics}")  # Debug print
     assert set(actual_calls) == set(expected_topics), "Only whitelisted and normal topics should be processed"
