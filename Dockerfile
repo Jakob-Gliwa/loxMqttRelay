@@ -39,7 +39,10 @@ COPY --from=builder /app/pyproject.toml /app/pyproject.toml
 COPY --from=builder /app/Cargo.toml /app/Cargo.toml
 COPY --from=builder /app/src /app/src
 
-RUN uv pip install . --system && uv pip install /tmp/loxmqttrelay-*.whl --system && rm /tmp/*.whl
+# Install dependencies first, then the pre-built wheel
+RUN uv pip install --system -e . --no-build && \
+    uv pip install /tmp/loxmqttrelay-*.whl --system && \
+    rm /tmp/*.whl
 
 # Set PYTHONPATH to include the src directory
 ENV PYTHONPATH=/app/src
