@@ -162,6 +162,7 @@ pub struct MiniserverDataProcessor {
     http_handler_obj: PyObject,
     orjson_obj: PyObject,
     mqtt_topics: Option<MqttTopics>,
+    base_topic: String,
 }
 
 #[pymethods]
@@ -182,7 +183,7 @@ impl MiniserverDataProcessor {
             pyget!(global_config_py, py, "general", "cache_size").extract(py)?
         };
         let lru_size = NonZeroUsize::new(cache_size).unwrap();
-
+        let base_topic: String = pyget!(global_config_py, py, "general", "base_topic").extract(py)?;
         let start_ui_topic: String = topic_ns.getattr(py, "START_UI")?.extract(py)?;
         let stop_ui_topic: String = topic_ns.getattr(py, "STOP_UI")?.extract(py)?;
         let miniserver_startup_topic: String = topic_ns.getattr(py, "MINISERVER_STARTUP_EVENT")?.extract(py)?;
@@ -224,6 +225,7 @@ impl MiniserverDataProcessor {
             mqtt_client_obj,
             http_handler_obj,
             orjson_obj,
+            base_topic:base_topic,
         };
 
   
@@ -491,80 +493,84 @@ impl MiniserverDataProcessor {
         &self,
         py: Python<'_>,
         topic: String,
-        message: String
+        message_in: Vec<u8>
     ) -> PyResult<()> {
+        let message = String::from_utf8(message_in).unwrap();
+
         debug!("(Rust) handle_mqtt_message: {} => {}", topic, message);
 
         let Some(ref topics) = self.mqtt_topics else {
             error!("mqtt_topics was never initialized!");
             return Ok(()); 
         };
-
+        if topic.starts_with(&self.base_topic) {
         // Match the topic to whichever action it needs
-        if topic == topics.miniserver_startup_topic {
-            if pyget!(self.global_config, py, "miniserver", "sync_with_miniserver").extract::<bool>(py)? {
-                info!("Miniserver startup detected, resyncing whitelist (from Rust)");
-                let _ = self.relay_main_obj.call_method0(py, "schedule_miniserver_sync")?;
+            if topic == topics.miniserver_startup_topic {
+                if pyget!(self.global_config, py, "miniserver", "sync_with_miniserver").extract::<bool>(py)? {
+                    info!("Miniserver startup detected, resyncing whitelist (from Rust)");
+                    let _ = self.relay_main_obj.call_method0(py, "schedule_miniserver_sync")?;
+                }
             }
-        }
-        else if topic == topics.start_ui_topic {
-            let coro = self.relay_main_obj.call_method0(py, "start_ui")?;
-            let coro_bound = coro.bind(py);
-            let fut = into_future(coro_bound.clone())?;
-            pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
-                if let Err(e) = fut.await {
-                    error!("Error in start_ui async call: {:?}", e);
-                }
-            });
-        }
-        else if topic == topics.stop_ui_topic {
-            let coro = self.relay_main_obj.call_method0(py, "stop_ui")?;
-            let coro_bound = coro.bind(py);
-            let fut = into_future(coro_bound.clone())?;
-            pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
-                if let Err(e) = fut.await {
-                    error!("Error in stop_ui async call: {:?}", e);
-                }
-            });
-        }
-        else if topic == topics.config_get_topic {
-            // global_config.get_safe_config -> orjson.dumps -> publish
-            let global_config_py = self.relay_main_obj.getattr(py, "miniserver_data_processor")?
-                .getattr(py, "global_config")?;
-            let safe_cfg = global_config_py.call_method0(py, "get_safe_config")?;
-            let serialized = self.orjson_obj.call_method1(py, "dumps", (safe_cfg,))?;
-            let publish_fn = self.mqtt_client_obj.getattr(py, "publish")?;
-            let _ = publish_fn.call(py, (topics.config_response_topic.clone(), serialized), None);
-        }
-        else if topic == topics.config_set_topic || topic == topics.config_add_topic || topic == topics.config_remove_topic {
-            let update_mode = if topic == topics.config_set_topic {
-                "set"
-            } else if topic == topics.config_add_topic {
-                "add"
-            } else {
-                "remove"
-            };
-            let load_res = self.orjson_obj.call_method1(py, "loads", (message.as_str(),));
-            match load_res {
-                Ok(py_obj) => {
-                    let global_config_py = self.relay_main_obj.getattr(py, "miniserver_data_processor")?
-                        .getattr(py, "global_config")?;
-                    let update_res = global_config_py.call_method(py, "update_fields", (py_obj, update_mode), None);
-                    if let Err(e) = update_res {
-                        error!("Error updating configuration: {:?}", e);
-                    } else {
-                        info!("Configuration updated via MQTT. Restarting program (from Rust).");
-                        let _ = self.relay_main_obj.call_method0(py, "restart_relay_incl_ui");
+            else if topic == topics.start_ui_topic {
+                let coro = self.relay_main_obj.call_method0(py, "start_ui")?;
+                let coro_bound = coro.bind(py);
+                let fut = into_future(coro_bound.clone())?;
+                pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+                    if let Err(e) = fut.await {
+                        error!("Error in start_ui async call: {:?}", e);
                     }
-                },
-                Err(e) => {
-                    error!("Invalid JSON format in MQTT message: {:?}", e);
+                });
+            }
+            else if topic == topics.stop_ui_topic {
+                let coro = self.relay_main_obj.call_method0(py, "stop_ui")?;
+                let coro_bound = coro.bind(py);
+                let fut = into_future(coro_bound.clone())?;
+                pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+                    if let Err(e) = fut.await {
+                        error!("Error in stop_ui async call: {:?}", e);
+                    }
+                });
+            }
+       
+            else if topic == topics.config_get_topic {
+                // global_config.get_safe_config -> orjson.dumps -> publish
+                let global_config_py = self.relay_main_obj.getattr(py, "miniserver_data_processor")?
+                    .getattr(py, "global_config")?;
+                let safe_cfg = global_config_py.call_method0(py, "get_safe_config")?;
+                let serialized = self.orjson_obj.call_method1(py, "dumps", (safe_cfg,))?;
+                let publish_fn = self.mqtt_client_obj.getattr(py, "publish")?;
+                let _ = publish_fn.call(py, (topics.config_response_topic.clone(), serialized), None);
+            }
+            else if topic == topics.config_set_topic || topic == topics.config_add_topic || topic == topics.config_remove_topic {
+                let update_mode = if topic == topics.config_set_topic {
+                    "set"
+                } else if topic == topics.config_add_topic {
+                    "add"
+                } else {
+                    "remove"
+                };
+                let load_res = self.orjson_obj.call_method1(py, "loads", (message.as_str(),));
+                match load_res {
+                    Ok(py_obj) => {
+                        let global_config_py = self.relay_main_obj.getattr(py, "miniserver_data_processor")?
+                            .getattr(py, "global_config")?;
+                        let update_res = global_config_py.call_method(py, "update_fields", (py_obj, update_mode), None);
+                        if let Err(e) = update_res {
+                            error!("Error updating configuration: {:?}", e);
+                        } else {
+                            info!("Configuration updated via MQTT. Restarting program (from Rust).");
+                            let _ = self.relay_main_obj.call_method0(py, "restart_relay_incl_ui");
+                        }
+                    },
+                    Err(e) => {
+                        error!("Invalid JSON format in MQTT message: {:?}", e);
+                    }
                 }
             }
-        }
-        else if topic == topics.config_update_topic || topic == topics.config_restart_topic {
-            info!("Reloading configuration. Restarting program (from Rust).");
-            let _ = self.relay_main_obj.call_method0(py, "restart_relay_incl_ui");
+            else if topic == topics.config_update_topic || topic == topics.config_restart_topic {
+                info!("Reloading configuration. Restarting program (from Rust).");
+                let _ = self.relay_main_obj.call_method0(py, "restart_relay_incl_ui");
+            }
         }
         else {
             // The "normal" data path => process_data => forward to miniserver
