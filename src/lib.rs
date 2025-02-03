@@ -420,13 +420,13 @@ impl MiniserverDataProcessor {
             if let Some(val) = converted {
                 // Instead of the synchronous call, call the async method and spawn it.
                 let callback_obj = match &mqtt_publish_callback {
-                    Some(cb) => cb.clone(),
-                    None => &py.None().to_object(py),
+                    Some(cb) => cb,
+                    None => &py.None(),
                 };
                 let coro = self.http_handler_obj.call_method(py, "send_to_miniserver", (t, val, &callback_obj), None)?;
                 let coro_bound = coro.bind(py);
                 let fut = into_future(coro_bound.clone())?;
-                spawn(async move {
+                pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
                     if let Err(e) = fut.await {
                         error!("Error in send_to_miniserver async call: {:?}", e);
                     }
