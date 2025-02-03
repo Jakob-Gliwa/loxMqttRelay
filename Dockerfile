@@ -9,22 +9,30 @@ RUN apt-get update \
         python3-dev \
         curl \
         build-essential
-    # Install Rust toolchain
+
+# Install Rust toolchain
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal \
     && echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
 
 ENV PATH="/root/.cargo/bin:${PATH}"
     
 # Create and use virtual environment with uv
-RUN uv venv && uv pip install . --venv && uv pip install -e ".[dev]" --venv
+RUN uv venv && \
+    uv pip install . -- --venv && \
+    uv pip install -e ".[dev]" -- --venv
 
 # Build Rust code with maturin
 RUN PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 uv run maturin develop --uv --release
-    # Build Cython modules if still needed
+
+# Build Cython modules if still needed
 RUN cd src/loxwebsocket/cython_modules \
     && uv run python setup.py build_ext --inplace 
-    # Clean up build dependencies
-RUN apt-get remove -y gcc python3-dev curl build-essential && apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/* /root/.cargo /root/.rustup
+
+# Clean up build dependencies
+RUN apt-get remove -y gcc python3-dev curl build-essential \
+    && apt-get autoremove -y \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /root/.cargo /root/.rustup
 
 # Set PYTHONPATH to include the src directory
 ENV PYTHONPATH=/app/src
