@@ -21,7 +21,7 @@ RUN uv pip install . --system && \
     uv pip install -e ".[dev]" --system
 
 # Build Rust code with maturin
-RUN PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin build --release && uv pip install target/wheels/loxmqttrelay-*.whl --system
+RUN PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin build --release --compatibility off && uv pip install target/wheels/loxmqttrelay-*.whl --system
 
 # Build Cython modules if still needed
 RUN cd src/loxwebsocket/cython_modules \
