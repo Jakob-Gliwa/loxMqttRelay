@@ -1,4 +1,4 @@
-use pyo3::prelude::*;
+use pyo3::{prelude::*, BoundObject};
 use pyo3::types::{PyFrozenSet, PyTuple, IntoPyDict, PyBool};
 use regex::Regex;
 use pyo3::intern;
@@ -16,10 +16,10 @@ use serde_json::Value;
 // For logging
 use log::{debug, error, info};
 
-// Import `into_future` from pyo3_asyncio and `spawn` from tokio
-use pyo3_asyncio::tokio::into_future;
+// Import `into_future` from pyo3_async_runtimes and `spawn` from tokio
+use pyo3_async_runtimes::tokio::into_future;
 use tokio::spawn;
-
+use tokio::runtime::Builder;
 /// A small struct to store all relevant MQTT topics in Rust, so we don't fetch them repeatedly
 #[derive(Clone, Debug)]
 struct MqttTopics {
@@ -283,18 +283,18 @@ impl MiniserverDataProcessor {
     }
 
     #[pyo3(text_signature = "(self, topic, val)")]
-    fn expand_json<'py>(&self, py: Python<'py>, topic: &str, val: &str) -> PyResult<&'py PyFrozenSet> {
+    fn expand_json(&self, py: Python, topic: &str, val: &str) -> PyResult<Py<PyFrozenSet>> {
         if val.is_empty() || ((!val.starts_with('{')) && (!val.starts_with('['))) {
             let tuple = (topic.to_string(), val.to_string());
             let set = PyFrozenSet::new(py, &[tuple])?;
-            return Ok(set);
+            return Ok(set.into());
         }
         match serde_json::from_str::<Value>(val) {
             Ok(json_val) => {
                 if !json_val.is_object() {
                     let tuple = (topic.to_string(), val.to_string());
                     let set = PyFrozenSet::new(py, &[tuple])?;
-                    return Ok(set);
+                    return Ok(set.into());
                 }
                 let mut flattened = Vec::new();
                 flatten_json(&json_val, "", &mut flattened);
@@ -303,12 +303,12 @@ impl MiniserverDataProcessor {
                     .map(|(k, v)| (format!("{}/{}", topic, k), v))
                     .collect();
                 let set = PyFrozenSet::new(py, &results)?;
-                Ok(set)
+                Ok(set.into())
             }
             Err(_) => {
                 let tuple = (topic.to_string(), val.to_string());
                 let set = PyFrozenSet::new(py, &[tuple])?;
-                Ok(set)
+                Ok(set.into())
             }
         }
     }
@@ -376,7 +376,7 @@ impl MiniserverDataProcessor {
                         final_dbg_topic.into_py(py),
                         val.clone().into_py(py),
                         false.to_string().into_py(py),
-                    ]);
+                    ])?;
                     let _ = callback.call1(py, args);
                 }
             }
@@ -421,11 +421,11 @@ impl MiniserverDataProcessor {
                 // Instead of the synchronous call, call the async method and spawn it.
                 let callback_obj = match &mqtt_publish_callback {
                     Some(cb) => cb.clone(),
-                    None => py.None(),
+                    None => &py.None().to_object(py),
                 };
-                let callback = callback_obj.as_ref(py);
-                let coro = self.http_handler_obj.call_method(py, "send_to_miniserver", (t, val, callback), None)?;
-                let fut = into_future(coro.as_ref(py))?;
+                let coro = self.http_handler_obj.call_method(py, "send_to_miniserver", (t, val, &callback_obj), None)?;
+                let coro_bound = coro.bind(py);
+                let fut = into_future(coro_bound.clone())?;
                 spawn(async move {
                     if let Err(e) = fut.await {
                         error!("Error in send_to_miniserver async call: {:?}", e);
@@ -467,7 +467,7 @@ impl MiniserverDataProcessor {
             mqtt_topic.into_py(py),
             payload_str.into_py(py),
             PyBool::new(py, false).into_py(py),
-        ]);
+        ])?;
         mqtt_publish_callback.call1(py, args)?;
         Ok(())
     }
@@ -585,8 +585,13 @@ fn init_rust_logger() {
 }
 
 #[pymodule]
-fn _loxmqttrelay(py: Python, m: &PyModule) -> PyResult<()> {
+fn _loxmqttrelay(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()>{
+    // Initialize the Tokio runtime for pyo3-asyncio.
+    pyo3::prepare_freethreaded_python();
+    let mut builder = pyo3_async_runtimes::tokio::re_exports::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    pyo3_async_runtimes::tokio::init(builder);
     m.add_class::<MiniserverDataProcessor>()?;
-    m.add_function(wrap_pyfunction!(init_rust_logger, m)?)?;
+    m.add_function(wrap_pyfunction!(init_rust_logger, m.to_owned())?)?;
     Ok(())
 }
