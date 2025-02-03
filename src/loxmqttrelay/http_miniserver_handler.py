@@ -144,14 +144,5 @@ class HttpMiniserverHandler:
             ))
 
         return response_code
-    
-
-    def send_to_miniserver_sync(
-        self,
-        topic: str,
-        value: Any,
-        mqtt_publish_callback: Optional[Callable[[str, str, bool], Awaitable[None]]] = None
-    ) -> Dict[str, Union[int, str]]:
-        return asyncio.create_task(self.send_to_miniserver(topic, value, mqtt_publish_callback))
 
 http_miniserver_handler = HttpMiniserverHandler()
