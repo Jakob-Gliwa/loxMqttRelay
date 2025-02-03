@@ -15,8 +15,9 @@ RUN apt-get update \
     # Install and build Python dependencies
     && uv pip install --system . \
     && uv pip install --system -e ".[dev]" \
-    # Build Rust code with maturin
-    && export PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 && maturin develop --uv \
+    # Build Rust code with maturin by building a wheel and installing it
+    && PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin build --release --strip --no-sdist --out target/wheels \
+    && uv pip install --system target/wheels/*.whl \
     # Build Cython modules if still needed
     && cd src/loxwebsocket/cython_modules \
     && python setup.py build_ext --inplace \
