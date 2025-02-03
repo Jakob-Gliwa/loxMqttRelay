@@ -5,12 +5,7 @@ FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim as builder
 
 # System-Tools für Build installieren
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc python3-dev curl build-essential \
-    && pip install --no-cache-dir maturin \
-    && apt-get remove -y gcc python3-dev curl build-essential \
-    && apt-get autoremove -y \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    gcc python3-dev curl build-essential 
 
 # Install Rust toolchain
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal \
