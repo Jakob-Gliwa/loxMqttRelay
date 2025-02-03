@@ -32,7 +32,7 @@ RUN cd src/loxwebsocket/cython_modules \
 RUN apt-get remove -y gcc python3-dev curl build-essential \
     && apt-get autoremove -y \
     && apt-get clean \
-    && rm -rf /var/lib/apt/lists/* /root/.cargo /root/.rustup
+    && rm -rf /var/lib/apt/lists/*
 
 # Set PYTHONPATH to include the src directory
 ENV PYTHONPATH=/app/src
