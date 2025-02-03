@@ -14,7 +14,7 @@ RUN apt-get update \
     && . "/root/.cargo/env" \
     # Install and build Python dependencies
     && uv venv \
-    && source .venv/bin/activate \
+    && . .venv/bin/activate \
     && uv pip install . \
     && uv pip install -e ".[dev]" \
     # Build Rust code with maturin by building a wheel and installing it
