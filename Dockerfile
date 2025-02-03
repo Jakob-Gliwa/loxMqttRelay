@@ -10,8 +10,8 @@ RUN apt-get update \
         curl \
         build-essential \
     # Install Rust toolchain
-    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
-    && . "$HOME/.cargo/env" \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal \
+    && . "/root/.cargo/env" \
     # Install and build Python dependencies
     && uv pip install --system . \
     && uv pip install --system -e ".[dev]" \
@@ -29,8 +29,8 @@ RUN apt-get update \
     && apt-get autoremove -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
-    && rm -rf "$HOME/.cargo" \
-    && rm -rf "$HOME/.rustup"
+    && rm -rf /root/.cargo \
+    && rm -rf /root/.rustup
 
 # Set PYTHONPATH to include the src directory
 ENV PYTHONPATH=/app/src
