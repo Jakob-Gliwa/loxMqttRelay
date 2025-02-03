@@ -110,17 +110,47 @@ macro_rules! pyget {
     }};
 }
 
+/// Private helper function to compile regex filters
+fn compile_filters(filters: Vec<String>) -> Option<Regex> {
+    if filters.is_empty() {
+        debug!("No filters provided.");
+        return None;
+    }
+    let mut valid_filters = Vec::new();
+    for flt in filters {
+        match Regex::new(&flt) {
+            Ok(_) => {
+                debug!("Filter '{}' is valid", flt);
+                valid_filters.push(flt);
+            }
+            Err(e) => {
+                error!("Invalid filter '{}': {}", flt, e);
+            }
+        }
+    }
+    if valid_filters.is_empty() {
+        debug!("No valid filters found.");
+        return None;
+    }
+    let pattern = format!("({})", valid_filters.join("|"));
+    match Regex::new(&pattern) {
+        Ok(compiled_regex) => Some(compiled_regex),
+        Err(e) => {
+            error!("Failed to compile combined regex '{}': {}", pattern, e);
+            None
+        }
+    }
+}
 
 #[pyclass]
 pub struct MiniserverDataProcessor {
     #[pyo3(get)]
     global_config: PyObject,
 
-    // Expose the compiled filter to Python so tests can see it
-    #[pyo3(get)]
-    compiled_subscription_filter: Option<String>,
-    #[pyo3(get)]
-    do_not_forward_patterns: Option<String>,
+    compiled_subscription_filter: Option<Regex>,
+
+    do_not_forward_patterns: Option<Regex>,
+
     #[pyo3(get)]
     topic_whitelist: HashSet<String>,
     convert_bool_cache: Mutex<LruCache<String, String>>,
@@ -145,7 +175,7 @@ impl MiniserverDataProcessor {
             pyget!(global_config_py, py, "general", "cache_size").extract::<i32>(py)?
         );
 
-        let compiled = Self::compile_filters(pyget!(global_config_py, py, "topics", "subscription_filters").extract(py)?);
+        let compiled = compile_filters(pyget!(global_config_py, py, "topics", "subscription_filters").extract(py)?);
         let cache_size = if pyget!(global_config_py, py, "general", "cache_size").extract::<i32>(py)? == 0 {
             64
         } else {
@@ -201,36 +231,10 @@ impl MiniserverDataProcessor {
         Ok(processor)
     }
 
-    #[staticmethod]
-    fn compile_filters(filters: Vec<String>) -> Option<String> {
-        if filters.is_empty() {
-            debug!("No filters provided.");
-            return None;
-        }
-        let mut valid_filters = Vec::new();
-        for flt in filters {
-            match Regex::new(&flt) {
-                Ok(_) => {
-                    debug!("Filter '{}' is valid", flt);
-                    valid_filters.push(flt);
-                }
-                Err(e) => {
-                    error!("Invalid filter '{}': {}", flt, e);
-                }
-            }
-        }
-        if valid_filters.is_empty() {
-            debug!("No valid filters found.");
-            return None;
-        }
-        let pattern = format!("({})", valid_filters.join("|"));
-        Some(pattern)
-    }
-
     #[pyo3(text_signature = "(self, filters)")]
     fn update_subscription_filters(&mut self, filters: Vec<String>) {
         debug!("Updating subscription filters: {:?}", filters);
-        self.compiled_subscription_filter = Self::compile_filters(filters);
+        self.compiled_subscription_filter = compile_filters(filters);
     }
 
     #[pyo3(text_signature = "(self, whitelist)")]
@@ -243,7 +247,7 @@ impl MiniserverDataProcessor {
     #[pyo3(text_signature = "(self, filters)")]
     fn update_do_not_forward(&mut self, filters: Vec<String>) {
         debug!("Updating do_not_forward filters: {:?}", filters);
-        self.do_not_forward_patterns = Self::compile_filters(filters);
+        self.do_not_forward_patterns = compile_filters(filters);
     }
 
     #[pyo3(text_signature = "(self, val)")]
@@ -332,8 +336,7 @@ impl MiniserverDataProcessor {
         debug!("Normalized topic for processing: '{}'", normalized_topic);
 
         // subscription filter (on original topic)
-        if let Some(ref pattern) = self.compiled_subscription_filter {
-            let regex = Regex::new(pattern).unwrap();
+        if let Some(ref regex) = self.compiled_subscription_filter {
             if regex.is_match(topic) {
                 debug!("Topic '{}' filtered by subscription filter", topic);
                 return Ok(());
@@ -396,8 +399,7 @@ impl MiniserverDataProcessor {
             }
             
             // second pass subscription filter (on original topic)
-            if let Some(ref pattern) = self.compiled_subscription_filter {
-                let regex = Regex::new(pattern).unwrap();
+            if let Some(ref regex) = self.compiled_subscription_filter {
                 if regex.is_match(&t) {
                     debug!("Topic '{}' filtered by second pass", t);
                     continue;
@@ -405,8 +407,7 @@ impl MiniserverDataProcessor {
             }
             
             // do_not_forward (on original topic)
-            if let Some(ref pattern) = self.do_not_forward_patterns {
-                let regex = Regex::new(pattern).unwrap();
+            if let Some(ref regex) = self.do_not_forward_patterns {
                 if regex.is_match(&t) {
                     debug!("Topic '{}' filtered by do_not_forward", t);
                     continue;
