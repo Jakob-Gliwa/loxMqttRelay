@@ -36,6 +36,7 @@ WORKDIR /app
 # Nur Wheels aus der Build-Stage kopieren
 COPY --from=builder /app/target/wheels/*.whl /tmp/
 COPY --from=builder /app/src /app/src
+COPY --from=builder /app/pyproject.toml /app/pyproject.toml
 
 RUN uv pip install . --system && uv pip install /tmp/loxmqttrelay-*.whl --system && rm /tmp/*.whl
 
