@@ -40,10 +40,8 @@ COPY --from=builder /app/Cargo.toml /app/Cargo.toml
 COPY --from=builder /app/src /app/src
 
 # Installieren Sie nur die Abhängigkeiten ohne das Hauptpaket zu bauen
-RUN pip install --no-cache-dir --only-deps . && \
-    pip install --no-cache-dir /tmp/loxmqttrelay-*.whl && \
+RUN pip install --no-cache-dir /tmp/loxmqttrelay-*.whl && \
     rm /tmp/*.whl
-
 
 # Set PYTHONPATH to include the src directory
 ENV PYTHONPATH=/app/src
