@@ -61,9 +61,7 @@ initial_values = {
     },
     'debug': {
         'mock_ip': '',
-        'enable_mock': False,
-        'publish_processed_topics': False,
-        'publish_forwarded_topics': False
+        'enable_mock': False
     },
     'topics': {
         'subscriptions': [],
@@ -289,9 +287,7 @@ def save_config(save_path: Path):
         },
         'debug': {
             'mock_ip': mock_miniserver_ip,
-            'enable_mock': st.session_state.enable_mock_miniserver,
-            'publish_processed_topics': st.session_state.publish_processed_topics,
-            'publish_forwarded_topics': st.session_state.publish_forwarded_topics
+            'enable_mock': st.session_state.enable_mock_miniserver
         },
         'topics': {
             'subscriptions': [line.strip() for line in st.session_state.subscriptions.splitlines() if line.strip()],
@@ -469,8 +465,6 @@ with st.form("config_form"):
     debug = config_data.get('debug', {})
     mock_miniserver_ip = st.text_input("Mock Miniserver IP/Port", value=debug.get('mock_ip', ''), key='mock_miniserver_ip')
     enable_mock_miniserver = st.checkbox("Enable Mock Miniserver", value=debug.get('enable_mock', False), key='enable_mock_miniserver')
-    publish_processed_topics = st.checkbox("Publish Processed Topics", value=debug.get('publish_processed_topics', False), key='publish_processed_topics')
-    publish_forwarded_topics = st.checkbox("Publish Forwarded Topics", value=debug.get('publish_forwarded_topics', False), key='publish_forwarded_topics')
 
     st.subheader("Topics")
     topics = config_data.get('topics', {})

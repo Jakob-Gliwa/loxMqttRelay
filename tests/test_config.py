@@ -1,9 +1,8 @@
 import asyncio
 import pytest
 from loxmqttrelay.config import (
-    Config, ConfigError, BrokerConfig, AppConfig,
-    GeneralConfig, MiniserverConfig, TopicsConfig,
-    ProcessingConfig, UdpConfig, DebugConfig,
+    Config, BrokerConfig, AppConfig,
+     MiniserverConfig,
     ConfigSection, global_config
 )
 @pytest.fixture(autouse=True)
@@ -53,8 +52,6 @@ convert_booleans = false
 udp_in_port = 12345
 
 [debug]
-publish_processed_topics = true
-publish_forwarded_topics = true
 mock_ip = "127.0.0.1"
 enable_mock = true
 """
@@ -111,8 +108,6 @@ def test_config_load(temp_config_file):
     assert config.udp.udp_in_port == 12345
     
     # Debug Config Assertions
-    assert config.debug.publish_processed_topics is True
-    assert config.debug.publish_forwarded_topics is True
     assert config.debug.mock_ip == "127.0.0.1"
     assert config.debug.enable_mock is True
 

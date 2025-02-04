@@ -218,7 +218,7 @@ async def test_message_callback(mock_client, mqtt_client):
     # Add logging to check if the callback is being called
     await asyncio.sleep(0.1)
     
-    callback.assert_called_once_with("test/topic1", "test message")
+    callback.assert_called_once_with("test/topic1", b"test message")
 
 @pytest.mark.asyncio
 async def test_message_callback_error(mock_client, mqtt_client):

@@ -341,26 +341,6 @@ do_not_forward = ["internal/topic","private/data"]
 ```
 Attention: If Whitelist is defined doNotForward will be ignored
 
-### Topic Monitoring
-Monitor the processing and forwarding of topics:
-```json
-[debug]
-publish_processed_topics = false // Publish all processed topics before whitelist filtering
-publish_forwarded_topics = false // Publish topics that were forwarded to Miniserver with response codes
-```
-
-**Note:** These monitoring features should only be enabled for debugging purposes or when detailed topic processing feedback is needed, as they can significantly increase traffic on your MQTT broker.
-
-When enabled:
-- `publish_processed_topics`: All topics (after applying filters but before whitelist) will be published to `{base_topic}/processedtopics/{flattened_topic}` with their respective values
-- `publish_forwarded_topics`: Topics that pass the whitelist and are forwarded to the Miniserver will be published to `{base_topic}/forwardedtopics/{flattened_topic}` with their value and HTTP response code in JSON format:
-```json
-{
-    "value": "topic_value",
-    "http_code": 200
-}
-```
-
 ### Data Processing Options
 ```toml
 [processing]

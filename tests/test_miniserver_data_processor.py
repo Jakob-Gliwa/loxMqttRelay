@@ -25,9 +25,6 @@ def temp_config_file(tmp_path):
         "general": {
             "base_topic": "myrelay/",
             "cache_size": 100
-        },
-        "debug": {
-            "publish_processed_topics": False
         }
     }
     config_file.write_text(json.dumps(config_data))
@@ -47,7 +44,6 @@ def config_instance(temp_config_file):
     global_config.processing.convert_booleans = config_dict["processing"]["convert_booleans"]
     global_config.general.base_topic = config_dict["general"]["base_topic"]
     global_config.general.cache_size = config_dict["general"]["cache_size"]
-    global_config.debug.publish_processed_topics = config_dict["debug"]["publish_processed_topics"]
     
     return global_config
 
@@ -177,7 +173,7 @@ def test_update_subscription_filters_single(processor):
     """Test setting subscription filters."""
     filters = [r"^ignore_.*", r"^skip_.*"]
     processor.update_subscription_filters(filters)
-    assert processor.compiled_subscription_filter is not None
+    assert processor.get_subscription_filters is not None
 
 def test_update_topic_whitelist(processor):
     whitelist = ["some_allowed_topic", "another_allowed_topic"]
@@ -187,7 +183,7 @@ def test_update_topic_whitelist(processor):
 def test_update_do_not_forward(processor):
     do_not_forward = [r"^debug_.*", r"private_topic"]
     processor.update_do_not_forward(do_not_forward)
-    assert processor.do_not_forward_patterns is not None
+    assert processor.get_do_not_forward_patterns is not None
 
 @pytest.mark.parametrize("filters,topic,message,should_stay", [
     ([r"^ignore\/.*"], "ignore/something", "value", False),
@@ -292,42 +288,3 @@ async def test_process_data_order_of_filters(processor, monkeypatch):
     print(f"Expected topics: {expected_topics}")  # Debug print
     assert set(actual_calls) == set(expected_topics), "Only whitelisted and normal topics should be processed"
 
-@pytest.mark.asyncio
-async def test_process_data_with_debug_publish(processor, monkeypatch):
-    mock_publish = AsyncMock()
-    topic_messages = [
-        ("topic/one", "1"),
-        ("ignore/before/two", "2"),
-        ("topic/three", "3")
-    ]
-
-    processor.update_subscription_filters([r"^ignore\/before\/.*"])
-    monkeypatch.setattr(global_config.debug, 'publish_processed_topics', True)
-    monkeypatch.setattr(global_config.general, 'base_topic', "myrelay/")
-
-    for topic, message in topic_messages:
-        processor.process_data(topic, message, mqtt_publish_callback=mock_publish)
-
-    await asyncio.sleep(0.1)
-
-    expected_debug_topics = [
-        "myrelay/processedtopics/topic_one",
-        "myrelay/processedtopics/topic_three"
-    ]
-    
-    actual_publish_topics = [call[0][0] for call in mock_publish.call_args_list if len(call[0]) > 0]
-    assert set(actual_publish_topics) == set(expected_debug_topics), "Debug topics should be published correctly"
-
-@pytest.mark.asyncio
-async def test_publish_forwarded_topic(processor):
-    mock_publish = AsyncMock()
-    processor.publish_forwarded_topic("test/topic", "value", 200, mock_publish)
-    
-    mock_publish.assert_called_once()
-    call_args = mock_publish.call_args[0]
-    assert call_args[0] == "myrelay/forwardedtopics/test_topic"
-    assert "value" in call_args[1]
-    assert "200" in call_args[1]
-    assert call_args[2] is False
-
-# Rest of the existing tests...

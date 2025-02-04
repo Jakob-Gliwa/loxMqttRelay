@@ -11,7 +11,6 @@ from loxmqttrelay._loxmqttrelay import (
     init_rust_logger
 )
 from .utils import setup_logging
-from .miniserver_data_processor import MiniserverDataProcessor
 from .config import AppConfig, GeneralConfig, TopicsConfig, ProcessingConfig, DebugConfig
 # Only expose the version number at package level
 # Let modules import directly from specific files to avoid circular dependencies

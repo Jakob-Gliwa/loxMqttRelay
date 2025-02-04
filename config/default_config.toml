@@ -33,8 +33,6 @@ convert_booleans = false
 udp_in_port = 11884
 
 [debug]
-publish_processed_topics = false
-publish_forwarded_topics = false
 mock_ip = ""
 enable_mock = false
 

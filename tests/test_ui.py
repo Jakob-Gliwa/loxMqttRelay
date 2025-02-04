@@ -1,19 +1,16 @@
 import pytest
 from unittest.mock import Mock, patch, MagicMock, AsyncMock
-import subprocess
 import os
 from pathlib import Path
 import asyncio
 import tomlkit
 from gmqtt.mqtt.constants import MQTTv311
-import typing
 from typing import AsyncGenerator, Generator, Any
 import types
 
 from loxmqttrelay.main import MQTTRelay
 from loxmqttrelay.config import Config, global_config, AppConfig
-from loxmqttrelay.miniserver_data_processor import MiniserverDataProcessor
-from loxmqttrelay.mqtt_client import mqtt_client
+from loxmqttrelay._loxmqttrelay import MiniserverDataProcessor
 
 @pytest.fixture(autouse=True)
 async def cleanup_tasks() -> AsyncGenerator[None, None]:
@@ -112,9 +109,7 @@ def sample_toml_config() -> str:
         },
         'debug': {
             'mock_ip': '',
-            'enable_mock': False,
-            'publish_processed_topics': False,
-            'publish_forwarded_topics': False
+            'enable_mock': False
         },
         'topics': {
             'subscriptions': ['topic1', 'topic2'],

@@ -1,4 +1,4 @@
-use pyo3::{prelude::*, types::{PyFrozenSet, PyTuple, PyBool}};
+use pyo3::{prelude::*, types::PyFrozenSet};
 use regex::Regex;
 use pyo3::intern;
 
@@ -148,7 +148,7 @@ pub struct MiniserverDataProcessor {
     global_config: PyObject,
 
     compiled_subscription_filter: Option<Regex>,
-
+    
     do_not_forward_patterns: Option<Regex>,
 
     #[pyo3(get)]
@@ -252,6 +252,8 @@ impl MiniserverDataProcessor {
         self.do_not_forward_patterns = compile_filters(filters);
     }
 
+    
+
     #[pyo3(text_signature = "(self, val)")]
     fn _convert_boolean(&self, val: &str) -> PyResult<Option<String>> {
         let mut cache = self.convert_bool_cache.lock().unwrap();
@@ -323,13 +325,12 @@ impl MiniserverDataProcessor {
         Ok(self.topic_whitelist.contains(&normalized))
     }
 
-    #[pyo3(text_signature = "(self, topic, message, mqtt_publish_callback=None)")]
+    #[pyo3(text_signature = "(self, topic, message)")]
     fn process_data(
         &self,
         py: Python,
         topic: &str,
         message: &str,
-        mqtt_publish_callback: Option<PyObject>,
     ) -> PyResult<()> {
         debug!("Processing data - topic: {}, message: {}", topic, message);
 
@@ -366,38 +367,19 @@ impl MiniserverDataProcessor {
         };
         debug!("Data after flattening: {:?}", flattened);
 
-        // debug publish
-        if pyget!(self.global_config, py, "debug", "publish_processed_topics").extract(py)? {
-            if let Some(ref callback) = mqtt_publish_callback {
-                for (dbg_topic, val) in &flattened {
-                    let normalized_dbg_topic = self.normalize_topic(dbg_topic)?;
-                    let final_dbg_topic = format!(
-                        "{}processedtopics/{}",
-                        pyget!(self.global_config, py, "general", "base_topic").extract::<String>(py)?, normalized_dbg_topic
-                    );
-                    let args = PyTuple::new(py, &[
-                        final_dbg_topic.into_py(py),
-                        val.clone().into_py(py),
-                        false.to_string().into_py(py),
-                    ])?;
-                    let _ = callback.call1(py, args);
-                }
-            }
-        }
-
         // Loop for sending topics to the miniserver asynchronously
         for (t, v) in flattened {
             // Check whitelist first (using normalized topic)
+            let cur_t_normalized = self.normalize_topic(&t)?;
             if !self.topic_whitelist.is_empty() {
-                let curr_normalized = self.normalize_topic(&t)?;
                 debug!("Checking whitelist for topic '{}' (normalized: '{}') against whitelist: {:?}", 
-                       t, curr_normalized, self.topic_whitelist);
+                       t, cur_t_normalized, self.topic_whitelist);
                 
-                if !self.topic_whitelist.contains(&curr_normalized) {
-                    debug!("Topic '{}' (normalized: '{}') not in whitelist", t, curr_normalized);
+                if !self.topic_whitelist.contains(&cur_t_normalized) {
+                    debug!("Topic '{}' (normalized: '{}') not in whitelist", t, cur_t_normalized);
                     continue;
                 }
-                debug!("Topic '{}' (normalized: '{}') found in whitelist", t, curr_normalized);
+                debug!("Topic '{}' (normalized: '{}') found in whitelist", t, cur_t_normalized);
             }
             
             // second pass subscription filter (on original topic)
@@ -419,12 +401,7 @@ impl MiniserverDataProcessor {
             debug!("Topic '{}' passed all filters, sending to miniserver", t);
             let converted = self._convert_boolean(&v)?;
             if let Some(val) = converted {
-                // Instead of the synchronous call, call the async method and spawn it.
-                let callback_obj = match &mqtt_publish_callback {
-                    Some(cb) => cb,
-                    None => &py.None(),
-                };
-                let coro = self.http_handler_obj.call_method(py, "send_to_miniserver", (t, val, &callback_obj), None)?;
+                let coro = self.http_handler_obj.call_method(py, "send_to_miniserver", (t, cur_t_normalized, val), None)?;
                 let coro_bound = coro.bind(py);
                 let fut = into_future(coro_bound.clone())?;
                 pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
@@ -435,41 +412,6 @@ impl MiniserverDataProcessor {
             }
         }
 
-        Ok(())
-    }
-
-    #[pyo3(text_signature = "(self, topic, value, http_code, mqtt_publish_callback)")]
-    fn publish_forwarded_topic(
-        &self,
-        py: Python,
-        topic: &str,
-        value: &str,
-        http_code: i32,
-        mqtt_publish_callback: PyObject,
-    ) -> PyResult<()> {
-        debug!(
-            "Publishing forwarded topic: {} with value={}, http_code={}",
-            topic, value, http_code
-        );
-        let normalized = self.normalize_topic(topic)?;
-        let mqtt_topic = format!(
-            "{}forwardedtopics/{}",
-            pyget!(self.global_config, py, "general", "base_topic").extract::<String>(py)?, normalized
-        );
-        let payload = serde_json::json!({
-            "value": value,
-            "http_code": http_code
-        });
-        let payload_str = payload.to_string();
-
-        debug!("Publishing to MQTT topic '{}' => {}", mqtt_topic, payload_str);
-
-        let args = PyTuple::new(py, &[
-            mqtt_topic.into_py(py),
-            payload_str.into_py(py),
-            PyBool::new(py, false).into_py(py),
-        ])?;
-        mqtt_publish_callback.call1(py, args)?;
         Ok(())
     }
 
@@ -538,8 +480,14 @@ impl MiniserverDataProcessor {
                     .getattr(py, "global_config")?;
                 let safe_cfg = global_config_py.call_method0(py, "get_safe_config")?;
                 let serialized = self.orjson_obj.call_method1(py, "dumps", (safe_cfg,))?;
-                let publish_fn = self.mqtt_client_obj.getattr(py, "publish")?;
-                let _ = publish_fn.call(py, (topics.config_response_topic.clone(), serialized), None);
+                let coro = self.mqtt_client_obj.call_method(py, "publish", (topics.config_response_topic.clone(), serialized), None)?;
+                let coro_bound = coro.bind(py);
+                let fut = into_future(coro_bound.clone())?;
+                pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+                    if let Err(e) = fut.await {
+                        error!("Error publishing config response: {:?}", e);
+                    }
+                });
             }
             else if topic == topics.config_set_topic || topic == topics.config_add_topic || topic == topics.config_remove_topic {
                 let update_mode = if topic == topics.config_set_topic {
@@ -573,27 +521,57 @@ impl MiniserverDataProcessor {
             }
         }
         else {
-            // The "normal" data path => process_data => forward to miniserver
-            let debug_publish_callback = {
-                let dbg_flag: bool = pyget!(self.global_config, py, "debug", "publish_processed_topics").extract::<bool>(py)?;
-                if dbg_flag {
-                    Some(self.mqtt_client_obj.getattr(py, "publish")?)
-                } else {
-                    None
-                }
-            };
 
             // process_data(...) returns Vec<(String, Option<String>)>
             let _ = self.process_data(
                 py,
                 &topic,
-                &message,
-                debug_publish_callback
+                &message
             );
         }
 
         Ok(())
     }   
+
+    #[pyo3(text_signature = "(self)")]
+    fn get_do_not_forward_patterns(&self) -> Vec<String> {
+        if let Some(ref regex) = self.do_not_forward_patterns {
+            // Convert the regex pattern back to individual patterns by:
+            // 1. Remove the outer parentheses
+            // 2. Split on the '|' character
+            let pattern = regex.as_str();
+            if pattern.starts_with('(') && pattern.ends_with(')') {
+                pattern[1..pattern.len()-1]
+                    .split('|')
+                    .map(String::from)
+                    .collect()
+            } else {
+                vec![pattern.to_string()]
+            }
+        } else {
+            Vec::new()
+        }
+    }
+
+    #[pyo3(text_signature = "(self)")]
+    fn get_subscription_filters(&self) -> Vec<String> {
+        if let Some(ref regex) = self.compiled_subscription_filter {
+            // Convert the regex pattern back to individual patterns by:
+            // 1. Remove the outer parentheses
+            // 2. Split on the '|' character
+            let pattern = regex.as_str();
+            if pattern.starts_with('(') && pattern.ends_with(')') {
+                pattern[1..pattern.len()-1]
+                    .split('|')
+                    .map(String::from)
+                    .collect()
+            } else {
+                vec![pattern.to_string()]
+            }
+        } else {
+            Vec::new()
+        }
+    }
 
 }
 

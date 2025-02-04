@@ -128,7 +128,7 @@ async def test_whitelist_sync_on_miniserver_startup(config_instance: Config, moc
             # Since handle_mqtt_message is synchronous in Rust, we call it directly
             relay.miniserver_data_processor.handle_mqtt_message(
                 TOPIC.MINISERVER_STARTUP_EVENT,
-                ""
+                b""
             )
 
             # Add a small delay to allow async operations to complete
