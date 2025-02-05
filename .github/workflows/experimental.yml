@@ -22,13 +22,11 @@ jobs:
           apt-get install -y gcc python3-dev curl build-essential rustc cargo
 
       - name: Install Rust toolchain
-        run: |
-          # Set HOME explicitly to match the effective user's home
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+        uses: actions-rs/toolchain@v1.0.6
+          toolchain: stable 
+          profile: minimal 
+          override: true 
 
-      - name: Source the cargo environment
-        run: |
-          . "$HOME/.cargo/env"
       - name: Install Python packages
         run: |
           uv pip install --system maturin
