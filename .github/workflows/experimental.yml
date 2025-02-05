@@ -9,6 +9,9 @@ on:
 jobs:
   # --- TEST STAGE ---
   test:
+    env:
+      PATH: "/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      CARGO: "/root/.cargo/bin/cargo"
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/astral-sh/uv:python3.13-bookworm-slim
