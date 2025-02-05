@@ -64,8 +64,7 @@ COPY --from=builder /app/Cargo.toml /app/Cargo.toml
 COPY --from=builder /app/src /app/src
 
 # Install the built wheel (now with a proper ARM64 or x86_64 Python)
-RUN uv pip install . --system
-RUN uv pip install --no-cache-dir --system /tmp/loxmqttrelay-*.whl && \
+RUN uv pip install --no-cache-dir /tmp/loxmqttrelay-*.whl && \
     rm /tmp/*.whl
 
 # ENV PYTHONPATH=/app/src
