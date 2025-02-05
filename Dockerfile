@@ -10,8 +10,8 @@ ARG TARGET=unknown-linux-gnu
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc python3-dev curl build-essential  \
     && if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
-            apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross && \
-            ln -sf /usr/bin/aarch64-linux-gnu-gcc /usr/bin/cc; \
+            apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross clang && \
+            ln -sf /usr/bin/aarch64-linux-gnu-clang /usr/bin/cc; \
         fi
 
 
@@ -30,7 +30,7 @@ RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
 RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
 mkdir -p ~/.cargo && \
 echo "[target.aarch64-unknown-linux-gnu]" > ~/.cargo/config.toml && \
-echo "linker = \"aarch64-linux-gnu-gcc\"" >> ~/.cargo/config.toml && \
+echo "linker = \"aarch64-linux-gnu-clang\"" >> ~/.cargo/config.toml && \
 echo "ar = \"aarch64-linux-gnu-ar\"" >> ~/.cargo/config.toml; \
 fi
 
