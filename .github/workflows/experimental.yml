@@ -19,7 +19,7 @@ jobs:
       - name: Install build dependencies
         run: |
           apt-get update
-          apt-get install -y gcc python3-dev
+          apt-get install -y gcc python3-dev curl build-essential
 
       - name: Install Rust toolchain
         run: |
@@ -40,7 +40,7 @@ jobs:
           maturin build --release --compatibility off
 
       - name: Install built Rust wheel
-        run: uv pip install --force-reinstall target/wheels/loxmqttrelay-*.whl --system
+        run: uv pip install target/wheels/loxmqttrelay-*.whl --system
 
       - name: Build Cython modules
         run: |
