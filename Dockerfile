@@ -68,7 +68,7 @@ COPY --from=builder /app/src /app/src
 RUN uv pip install --no-cache-dir --system /tmp/loxmqttrelay-*.whl && \
     rm /tmp/*.whl
 
-ENV PYTHONPATH="/app:${PYTHONPATH}"
+#ENV PYTHONPATH="/app:${PYTHONPATH}"
 
 ENV HEADLESS=false
 ENV LOG_LEVEL=INFO

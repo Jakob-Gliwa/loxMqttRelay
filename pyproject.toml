@@ -62,4 +62,5 @@ asyncio_mode = "strict"
 [tool.maturin]
 python-source = "src"
 module-name = "loxmqttrelay._loxmqttrelay"
+include = ["loxmqttrelay/loxwebsocket/cython_modules"]
 features = ["pyo3/extension-module"]
