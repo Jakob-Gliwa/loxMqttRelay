@@ -26,6 +26,15 @@ jobs:
         with:
           toolchain: stable 
 
+      # --- NEW STEP: Cache pip packages ---
+      - name: Cache pip packages
+        uses: actions/cache@v3
+        with:
+          # caching the pip downloads/wheels
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('setup.py', 'requirements.txt', 'pyproject.toml') }}
+          restore-keys: ${{ runner.os }}-pip-
+      
       - name: Install Python packages
         run: |
           uv pip install --system maturin
@@ -113,6 +122,8 @@ jobs:
           annotations: ${{ steps.meta.outputs.annotations }}
           provenance: true
           sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Tag AMD64 optimized version as latest
         if: matrix.platform == 'linux/amd64' && matrix.suffix == 'optimized' && github.event_name != 'pull_request'
