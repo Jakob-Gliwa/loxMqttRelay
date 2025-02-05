@@ -64,6 +64,9 @@ RUN cd src/loxwebsocket/cython_modules \
 FROM ${BASE_IMAGE}
 WORKDIR /app
 
+# For ARM builds (when TARGET is ARM), the base image won't have uv pre-installed.
+RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then pip install uv; fi
+
 # Only copy wheels and project files from the builder stage
 COPY --from=builder /app/target/wheels/*.whl /tmp/
 COPY --from=builder /app/pyproject.toml /app/pyproject.toml
