@@ -23,19 +23,23 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
+          # Set HOME explicitly to match the effective user's home
+          export HOME=/root
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-          # Ensure the Rust binaries are available in subsequent steps
-          echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
+          # Source the cargo environment
+          . "$HOME/.cargo/env"
 
       - name: Install Python packages
         run: |
+          uv pip install --system maturin
           uv pip install --system .
           uv pip install --system .[test]
           uv pip install --system .[dev]
 
       - name: Build Rust libraries with maturin
         run: |
-          export PATH="/root/.cargo/bin:$PATH"  # Ensure cargo is in the PATH
+          # Source cargo environment again for this step
+          . /root/.cargo/env
           export PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
           maturin build --release --compatibility off
 
