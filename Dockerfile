@@ -51,10 +51,10 @@ RUN cd src/loxwebsocket/cython_modules \
 
 # Wheel bauen (Python + Rust)
 RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
-        PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin build --release --compatibility off --target aarch64-unknown-linux-gnu; \
-    else \
-        PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin build --release --compatibility off && \
-    fi
+         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin build --release --compatibility off --target aarch64-unknown-linux-gnu; \
+     else \
+         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin build --release --compatibility off; \
+     fi
 
 # -------------------------------------
 # 2) Final-Stage
