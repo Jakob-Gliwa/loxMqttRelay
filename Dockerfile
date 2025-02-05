@@ -38,12 +38,7 @@ WORKDIR /app
 COPY . .
 
 # Create and use virtual environment with uv
-RUN if [ "$TARGET" != "aarch64-unknown-linux-gnu" ]; then \
-      uv pip install . --system && \
-      uv pip install -e ".[dev]" --system; \
-    else \
-      echo "Skipping pip install for ARM target in builder stage"; \
-    fi
+RUN uv pip install ".[build]" --system
 
     # Build Cython modules if still needed
 RUN cd src/loxwebsocket/cython_modules \
@@ -59,7 +54,7 @@ RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
 # -------------------------------------
 # 2) Final-Stage
 # -------------------------------------
-FROM ${BASE_IMAGE}
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 WORKDIR /app
 
 # Only copy wheels and project files from the builder stage

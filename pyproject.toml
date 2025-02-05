@@ -34,6 +34,11 @@ dev = [
     "setuptools>=75.0.0", 
     "maturin>=1.8"
 ]
+build = [
+    "setuptools>=75.0.0", 
+    "maturin>=1.8",
+    "Cython>=3.0.0"
+]
 
 [tool.uv]
 native-tls = true
