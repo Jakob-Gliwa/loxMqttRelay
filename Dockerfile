@@ -42,7 +42,7 @@ RUN uv pip install ".[build]" --system && \
     uv pip install . --system
 
     # Build Cython modules if still needed
-RUN cd src/loxwebsocket/cython_modules \
+RUN cd src/loxmqttrelay/loxwebsocket/cython_modules \
     && python setup.py build_ext --inplace 
 
 # Wheel bauen (Python + Rust)

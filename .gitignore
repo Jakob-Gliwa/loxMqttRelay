@@ -39,7 +39,7 @@ uv.lock
 *.log
 logs/
 config/config.toml
-src/loxwebsocket/cython_modules/extractor.c
+src/loxmqttrelay/loxwebsocket/cython_modules/extractor.c
 target/
 benchmark.py
 Cargo.lock
