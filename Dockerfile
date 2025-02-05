@@ -67,8 +67,8 @@ COPY --from=builder /app/src /app/src
 RUN pip install --no-cache-dir /tmp/loxmqttrelay-*.whl && \
     rm /tmp/*.whl
 
-# Set PYTHONPATH to include the src directory
-ENV PYTHONPATH=/app/src
+# ENV PYTHONPATH=/app/src
+
 ENV HEADLESS=false
 ENV LOG_LEVEL=INFO
 EXPOSE 11884/udp
