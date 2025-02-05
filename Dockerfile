@@ -1,10 +1,10 @@
+ARG TARGET=unknown-linux-gnu
+ARG BASE_IMAGE=ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+
 # -------------------------------------
 # 1) Build-Stage
 # -------------------------------------
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim as builder
-
-# Build-Argument für das Ziel (default: native)
-ARG TARGET=unknown-linux-gnu
 
 # System-Tools für Build installieren
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -38,13 +38,16 @@ WORKDIR /app
 COPY . .
 
 # Create and use virtual environment with uv
-RUN uv pip install . --system && \
-    uv pip install -e ".[dev]" --system
+RUN if [ "$TARGET" != "aarch64-unknown-linux-gnu" ]; then \
+      uv pip install . --system && \
+      uv pip install -e ".[dev]" --system; \
+    else \
+      echo "Skipping pip install for ARM target in builder stage"; \
+    fi
 
 # Wheel bauen (Python + Rust)
 RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
-        PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin build --release --compatibility off --target aarch64-unknown-linux-gnu && \
-        uv pip install target/wheels/loxmqttrelay-*.whl --system; \
+        PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin build --release --compatibility off --target aarch64-unknown-linux-gnu; \
     else \
         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin build --release --compatibility off && \
         uv pip install target/wheels/loxmqttrelay-*.whl --system; \
@@ -58,16 +61,16 @@ RUN cd src/loxwebsocket/cython_modules \
 # -------------------------------------
 # 2) Final-Stage
 # -------------------------------------
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+FROM ${BASE_IMAGE}
 WORKDIR /app
 
-# Nur Wheels aus der Build-Stage kopieren
+# Only copy wheels and project files from the builder stage
 COPY --from=builder /app/target/wheels/*.whl /tmp/
 COPY --from=builder /app/pyproject.toml /app/pyproject.toml
 COPY --from=builder /app/Cargo.toml /app/Cargo.toml
 COPY --from=builder /app/src /app/src
 
-# Installieren Sie nur die Abhängigkeiten ohne das Hauptpaket zu bauen
+# Install the built wheel (now with a proper ARM64 or x86_64 Python)
 RUN pip install --no-cache-dir /tmp/loxmqttrelay-*.whl && \
     rm /tmp/*.whl
 
