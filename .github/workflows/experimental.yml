@@ -65,9 +65,9 @@ jobs:
       matrix:
         include:
           # AMD64 builds
-          #- platform: "linux/amd64"
-          #  optimization: "-O3 -march=native -ffast-math"
-          #  suffix: "optimized"
+          - platform: "linux/amd64"
+            optimization: "-O3 -march=native -ffast-math"
+            suffix: "optimized"
           #- platform: "linux/amd64"
           #  optimization: "-O2 -mtune=generic"
           #  suffix: "compatible"

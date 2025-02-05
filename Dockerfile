@@ -45,27 +45,22 @@ RUN if [ "$TARGET" != "aarch64-unknown-linux-gnu" ]; then \
       echo "Skipping pip install for ARM target in builder stage"; \
     fi
 
+    # Build Cython modules if still needed
+RUN cd src/loxwebsocket/cython_modules \
+    && python setup.py build_ext --inplace 
+
 # Wheel bauen (Python + Rust)
 RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin build --release --compatibility off --target aarch64-unknown-linux-gnu; \
     else \
         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin build --release --compatibility off && \
-        uv pip install target/wheels/loxmqttrelay-*.whl --system; \
     fi
-
-
-# Build Cython modules if still needed
-RUN cd src/loxwebsocket/cython_modules \
-    && python setup.py build_ext --inplace 
 
 # -------------------------------------
 # 2) Final-Stage
 # -------------------------------------
 FROM ${BASE_IMAGE}
 WORKDIR /app
-
-# For ARM builds (when TARGET is ARM), the base image won't have uv pre-installed.
-RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then pip install uv; fi
 
 # Only copy wheels and project files from the builder stage
 COPY --from=builder /app/target/wheels/*.whl /tmp/
