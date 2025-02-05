@@ -19,7 +19,7 @@ jobs:
       - name: Install build dependencies
         run: |
           apt-get update
-          apt-get install -y gcc python3-dev curl build-essential
+          apt-get install -y gcc python3-dev curl build-essential rustc cargo
 
       - name: Install Rust toolchain
         run: |
