@@ -9,9 +9,6 @@ on:
 jobs:
   # --- TEST STAGE ---
   test:
-    env:
-      PATH: "/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-      CARGO: "/root/.cargo/bin/cargo"
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/astral-sh/uv:python3.13-bookworm-slim
@@ -27,11 +24,11 @@ jobs:
       - name: Install Rust toolchain
         run: |
           # Set HOME explicitly to match the effective user's home
-          export HOME=/root
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-          # Source the cargo environment
-          . "$HOME/.cargo/env"
 
+      - name: Source the cargo environment
+        run: |
+          . "$HOME/.cargo/env"
       - name: Install Python packages
         run: |
           uv pip install --system maturin
