@@ -35,6 +35,7 @@ jobs:
 
       - name: Build Rust libraries with maturin
         run: |
+          export PATH="/root/.cargo/bin:$PATH"  # Ensure cargo is in the PATH
           export PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
           maturin build --release --compatibility off
 
