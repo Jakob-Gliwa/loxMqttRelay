@@ -47,6 +47,9 @@ native-tls = true
 package-dir = {"" = "src"}
 packages = ["loxmqttrelay", "loxwebsocket"]
 
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [project.scripts]
 loxmqttrelay = "loxmqttrelay.main:main"
 
