@@ -68,10 +68,7 @@ COPY --from=builder /app/src /app/src
 RUN uv pip install --no-cache-dir --system /tmp/loxmqttrelay-*.whl && \
     rm /tmp/*.whl
 
-RUN cd src/loxmqttrelay/loxwebsocket/cython_modules \
-    && python setup.py build_ext --inplace 
-
-ENV PYTHONPATH="/app:${PYTHONPATH}"
+ENV PYTHONPATH=/app/src
 
 ENV HEADLESS=false
 ENV LOG_LEVEL=INFO
