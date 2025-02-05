@@ -38,7 +38,8 @@ WORKDIR /app
 COPY . .
 
 # Create and use virtual environment with uv
-RUN uv pip install ".[build]" --system
+RUN uv pip install ".[build]" --system && \
+    uv pip install . --system
 
     # Build Cython modules if still needed
 RUN cd src/loxwebsocket/cython_modules \
@@ -64,7 +65,7 @@ COPY --from=builder /app/Cargo.toml /app/Cargo.toml
 COPY --from=builder /app/src /app/src
 
 # Install the built wheel (now with a proper ARM64 or x86_64 Python)
-RUN uv pip install --no-cache-dir /tmp/loxmqttrelay-*.whl && \
+RUN uv pip install --no-cache-dir --system /tmp/loxmqttrelay-*.whl && \
     rm /tmp/*.whl
 
 # ENV PYTHONPATH=/app/src
