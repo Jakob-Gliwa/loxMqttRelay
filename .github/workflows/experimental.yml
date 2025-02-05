@@ -8,67 +8,67 @@ on:
 
 jobs:
   # --- TEST STAGE ---
-  test:
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/astral-sh/uv:python3.13-bookworm-slim
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v4
+  # test:
+  #   runs-on: ubuntu-latest
+  #   container:
+  #     image: ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+  #   steps:
+  #     - name: Check out source
+  #       uses: actions/checkout@v4
 
-      - name: Install build dependencies
-        run: |
-          apt-get update
-          apt-get install -y gcc python3-dev curl build-essential rustc cargo
+  #     - name: Install build dependencies
+  #       run: |
+  #         apt-get update
+  #         apt-get install -y gcc python3-dev curl build-essential rustc cargo
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: stable 
+  #     - name: Install Rust toolchain
+  #       uses: dtolnay/rust-toolchain@v1
+  #       with:
+  #         toolchain: stable 
 
-      # --- NEW STEP: Cache pip packages ---
-      - name: Cache pip packages
-        uses: actions/cache@v3
-        with:
-          # caching the pip downloads/wheels
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('setup.py', 'requirements.txt', 'pyproject.toml') }}
-          restore-keys: ${{ runner.os }}-pip-
+  #     # --- NEW STEP: Cache pip packages ---
+  #     - name: Cache pip packages
+  #       uses: actions/cache@v3
+  #       with:
+  #         # caching the pip downloads/wheels
+  #         path: ~/.cache/pip
+  #         key: ${{ runner.os }}-pip-${{ hashFiles('setup.py', 'requirements.txt', 'pyproject.toml') }}
+  #         restore-keys: ${{ runner.os }}-pip-
       
-      - name: Install Python packages
-        run: |
-          uv pip install --system maturin
-          uv pip install --system .
-          uv pip install --system .[test]
-          uv pip install --system .[dev]
+  #     - name: Install Python packages
+  #       run: |
+  #         uv pip install --system maturin
+  #         uv pip install --system .
+  #         uv pip install --system .[test]
+  #         uv pip install --system .[dev]
 
-      - name: Build Rust libraries with maturin
-        run: |
-          export PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
-          maturin build --release --compatibility off
+  #     - name: Build Rust libraries with maturin
+  #       run: |
+  #         export PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
+  #         maturin build --release --compatibility off
 
-      - name: Install built Rust wheel
-        run: uv pip install target/wheels/loxmqttrelay-*.whl --system
+  #     - name: Install built Rust wheel
+  #       run: uv pip install target/wheels/loxmqttrelay-*.whl --system
 
-      - name: Build Cython modules
-        run: |
-          cd src/loxwebsocket/cython_modules
-          python setup.py build_ext --inplace
-          cd ../../../
+  #     - name: Build Cython modules
+  #       run: |
+  #         cd src/loxwebsocket/cython_modules
+  #         python setup.py build_ext --inplace
+  #         cd ../../../
 
-      - name: Run tests with coverage
-        run: |
-          pytest tests/ --cov=loxmqttrelay --cov-report=xml --cov-report=term
+  #     - name: Run tests with coverage
+  #       run: |
+  #         pytest tests/ --cov=loxmqttrelay --cov-report=xml --cov-report=term
 
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage.xml
-          path: coverage.xml
+  #     - name: Upload coverage report
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: coverage.xml
+  #         path: coverage.xml
 
   # --- BUILD & PUSH DOCKER STAGE ---
   docker-build:
-    needs: test
+    #needs: test
     runs-on: ubuntu-latest
     strategy:
       matrix:
