@@ -100,7 +100,8 @@ jobs:
         run: |
           mkdir -p ${{ runner.temp }}/digests
           digest="${{ steps.build.outputs.digest }}"
-          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+          # Prepend the matrix suffix (optimized or compatible) so that later we can filter these files
+          touch "${{ runner.temp }}/digests/${{ matrix.suffix }}-${digest#sha256:}"
 
       - name: Upload digest
         uses: actions/upload-artifact@v4
