@@ -132,7 +132,7 @@ async def test_whitelist_sync_on_miniserver_startup(config_instance: Config, moc
             )
 
             # Add a small delay to allow async operations to complete
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.5)
 
             # Wurde sync erneut aufgerufen?
             mock_sync.assert_called_once()
