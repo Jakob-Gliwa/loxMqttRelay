@@ -38,16 +38,16 @@ WORKDIR /app
 COPY . .
 
 # Create and use virtual environment with uv
-RUN uv venv && uv pip install ".[build]" --system && uv run python setup.py build_ext --inplace
+RUN uv venv && uv pip install ".[build]" && uv run python setup.py build_ext --inplace
 
     # Build Cython modules if still needed
 RUN uv run python setup.py build_ext --inplace 
 
 # Wheel bauen (Python + Rust)
 RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
-         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 && uv run maturin develop --uv --release --compatibility off --target aarch64-unknown-linux-gnu; \
+         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 && uv run maturin develop --uv --release --target aarch64-unknown-linux-gnu \
      else \
-         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 && uv run maturin develop --uv --release --compatibility off; \
+         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 && uv run maturin develop --uv --release \
      fi
 
 # -------------------------------------
