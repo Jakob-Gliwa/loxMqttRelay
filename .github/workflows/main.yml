@@ -48,6 +48,7 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           # AMD64 builds
@@ -66,14 +67,16 @@ jobs:
             suffix: "compatible"
 
     steps:
+      - name: Prepare
+        run: |
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Extract Docker image metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ vars.DOCKER_USERNAME }}/loxmqttrelay
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Registry
         uses: docker/login-action@v3
@@ -81,27 +84,76 @@ jobs:
           username: ${{ vars.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          push: true
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            OPTIMIZATION_FLAGS=${{ matrix.optimization }}
+          provenance: true
+          sbom: true
+          outputs: type=image,name=${{ vars.DOCKER_USERNAME }}/loxmqttrelay,push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}-${{ matrix.suffix }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # --- MERGE STAGE ---
+  merge:
+    needs: [docker-build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+      - name: Log in to Docker Registry
+        uses: docker/login-action@v3
         with:
-          push: ${{ github.event_name != 'pull_request' }}
-          platforms: ${{ matrix.platform }}
-          tags: |
-            ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }}-${{ matrix.suffix }}
-            ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest-${{ matrix.suffix }}
-          build-args: |
-            OPTIMIZATION_FLAGS=${{ matrix.optimization }}
-          annotations: ${{ steps.meta.outputs.annotations }}
-          provenance: true
-          sbom: true
+          username: ${{ vars.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
-      # Tag AMD64 optimized version as latest
-      - name: Tag AMD64 optimized version as latest
-        if: matrix.platform == 'linux/amd64' && matrix.suffix == 'optimized' && github.event_name != 'pull_request'
+      - name: Create and push manifest lists
+        working-directory: ${{ runner.temp }}/digests
         run: |
-          docker pull ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }}-optimized
-          docker tag ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }}-optimized ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest
-          docker push ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest
+          # Create manifest for optimized images
+          docker buildx imagetools create \
+            -t ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest-optimized \
+            -t ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }}-optimized \
+            $(ls -1 *optimized*/* | xargs -I {} basename {} | xargs -I DIG echo "${{ vars.DOCKER_USERNAME }}/loxmqttrelay@sha256:DIG")
+
+          # Create manifest for compatible images
+          docker buildx imagetools create \
+            -t ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest-compatible \
+            -t ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }}-compatible \
+            $(ls -1 *compatible*/* | xargs -I {} basename {} | xargs -I DIG echo "${{ vars.DOCKER_USERNAME }}/loxmqttrelay@sha256:DIG")
+
+          # Create manifest for latest tag (using optimized images)
+          docker buildx imagetools create \
+            -t ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest \
+            -t ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }} \
+            $(ls -1 *optimized*/* | xargs -I {} basename {} | xargs -I DIG echo "${{ vars.DOCKER_USERNAME }}/loxmqttrelay@sha256:DIG")
+
+      - name: Inspect images
+        run: |
+          docker buildx imagetools inspect ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest
+          docker buildx imagetools inspect ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest-optimized
+          docker buildx imagetools inspect ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest-compatible
