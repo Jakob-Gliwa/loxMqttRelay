@@ -81,9 +81,9 @@ jobs:
           #  optimization: "-O2 -mtune=generic"
           #  suffix: "compatible"
           # ARM64 builds (e.g., Raspberry Pi 4, newer ARM servers, etc.)
-          #- platform: "linux/arm64"
-          #  optimization: "-O3 -mcpu=cortex-a72 -ffast-math"
-          #  suffix: "optimized"
+          - platform: "linux/arm64"
+            optimization: "-O3 -mcpu=cortex-a72 -ffast-math"
+            suffix: "optimized"
           #- platform: "linux/arm64"
           #  optimization: "-O2 -mtune=generic"
           #  suffix: "compatible"
