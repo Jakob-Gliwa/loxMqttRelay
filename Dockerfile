@@ -38,18 +38,16 @@ WORKDIR /app
 COPY . .
 
 # Create and use virtual environment with uv
-RUN uv pip install ".[build]" --system && \
-    uv pip install . --system
+RUN uv venv && uv pip install ".[build]" --system && uv run python setup.py build_ext --inplace
 
     # Build Cython modules if still needed
-RUN cd src/loxmqttrelay/loxwebsocket/cython_modules \
-    && python setup.py build_ext --inplace 
+RUN uv run python setup.py build_ext --inplace 
 
 # Wheel bauen (Python + Rust)
 RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
-         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin build --release --compatibility off --target aarch64-unknown-linux-gnu; \
+         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 && uv run maturin develop --uv --release --compatibility off --target aarch64-unknown-linux-gnu; \
      else \
-         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin build --release --compatibility off; \
+         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 && uv run maturin develop --uv --release --compatibility off; \
      fi
 
 # -------------------------------------
@@ -59,19 +57,15 @@ FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 WORKDIR /app
 
 # Only copy wheels and project files from the builder stage
-COPY --from=builder /app/target/wheels/*.whl /tmp/
 COPY --from=builder /app/pyproject.toml /app/pyproject.toml
 COPY --from=builder /app/Cargo.toml /app/Cargo.toml
 COPY --from=builder /app/src /app/src
+COPY --from=builder /app/.venv /app/.venv
 
-# Install the built wheel (now with a proper ARM64 or x86_64 Python)
-RUN uv pip install --no-cache-dir --system /tmp/loxmqttrelay-*.whl && \
-    rm /tmp/*.whl
-
-ENV PYTHONPATH=/app/src
+# ENV PYTHONPATH=/app/src
 
 ENV HEADLESS=false
 ENV LOG_LEVEL=INFO
 EXPOSE 11884/udp
 EXPOSE 8501/tcp
-CMD loxmqttrelay $([ "$HEADLESS" = "true" ] && echo "--headless") $([ ! -z "$LOG_LEVEL" ] && echo "--log-level $LOG_LEVEL")
+CMD uv run loxmqttrelay $([ "$HEADLESS" = "true" ] && echo "--headless") $([ ! -z "$LOG_LEVEL" ] && echo "--log-level $LOG_LEVEL")

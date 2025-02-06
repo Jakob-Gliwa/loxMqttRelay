@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
+requires = ["setuptools>=75.0.0", "Cython>=3.0.0", "maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -62,5 +62,11 @@ asyncio_mode = "strict"
 [tool.maturin]
 python-source = "src"
 module-name = "loxmqttrelay._loxmqttrelay"
-include = ["loxmqttrelay/loxwebsocket/cython_modules"]
 features = ["pyo3/extension-module"]
+# Uncomment and adjust these if you need to include additional files
+include = [
+    { path = "src/loxmqttrelay/loxwebsocket/cython_modules/*.pyx", format = "sdist" },
+    { path = "src/loxmqttrelay/loxwebsocket/cython_modules/*.pxd", format = "sdist" }
+]
+# Make sure the Rust extension is properly built as a Python module
+bindings = "pyo3"

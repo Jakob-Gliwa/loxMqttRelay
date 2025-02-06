@@ -1,20 +1,22 @@
 # setup.py
 
-from setuptools import setup
+from setuptools import setup, find_packages
 from Cython.Build import cythonize
 from setuptools.extension import Extension
 
 extensions = [
     Extension(
-        "extractor",
-        ["extractor.pyx"],
+        "loxmqttrelay.loxwebsocket.cython_modules.extractor",
+        ["src/loxmqttrelay/loxwebsocket/cython_modules/extractor.pyx"],
         extra_compile_args=["-O3", "-march=native", "-ffast-math"],  # Maximum optimization
         extra_link_args=["-O3"]
     )
 ]
 
 setup(
-    name="extractor",
+    name="loxmqttrelay",
+    packages=find_packages(where="src"),
+    package_dir={"": "src"},
     ext_modules=cythonize(
         extensions,
         language_level="3",
