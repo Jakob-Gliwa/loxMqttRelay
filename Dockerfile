@@ -45,9 +45,9 @@ RUN uv run python setup.py build_ext --inplace
 
 # Wheel bauen (Python + Rust)
 RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
-         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 && uv run maturin develop --uv --release --target aarch64-unknown-linux-gnu \
+         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 && uv run maturin develop --uv --release --target aarch64-unknown-linux-gnu; \
      else \
-         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 && uv run maturin develop --uv --release \
+         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 && uv run maturin develop --uv --release; \
      fi
 
 # -------------------------------------
