@@ -65,4 +65,4 @@ ENV HEADLESS=false
 ENV LOG_LEVEL=INFO
 EXPOSE 11884/udp
 EXPOSE 8501/tcp
-CMD . .venv/bin/activate && python -m loxmqttrelay $([ "$HEADLESS" = "true" ] && echo "--headless") $([ ! -z "$LOG_LEVEL" ] && echo "--log-level $LOG_LEVEL")
+CMD . .venv/bin/activate && python src/loxmqttrelay $([ "$HEADLESS" = "true" ] && echo "--headless") $([ ! -z "$LOG_LEVEL" ] && echo "--log-level $LOG_LEVEL")
