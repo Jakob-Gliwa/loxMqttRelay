@@ -38,7 +38,7 @@ WORKDIR /app
 COPY . .
 
 # Create and use virtual environment with uv
-RUN uv venv && uv pip install ".[build]" && uv run python setup.py build_ext --inplace
+RUN uv venv && uv pip install ".[build]" && cd src/loxmqttrelay/loxwebsocket/cython_modules && uv run python setup.py build_ext --inplace && cd ../../..
 
 # Wheel bauen (Python + Rust)
 RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
@@ -46,8 +46,6 @@ RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
      else \
          PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 && uv run maturin develop --uv --release; \
      fi
-
-RUN uv pip install .
 
 # -------------------------------------
 # 2) Final-Stage

@@ -21,7 +21,7 @@ from loxmqttrelay.loxwebsocket.exceptions import LoxoneException
 from loxmqttrelay.loxwebsocket.lxtoken import LxToken
 from loxmqttrelay.loxwebsocket.encryption import LxJsonKeySalt, LxEncryptionHandler
 from construct import Struct, Int32ul, Bytes, this
-from loxmqttrelay.loxwebsocket.cython_modules.extractor import parse_message, parse_type_3_message
+from .cython_modules.extractor import parse_message, parse_type_3_message
 
 _LOGGER = logging.getLogger(__name__)
 
