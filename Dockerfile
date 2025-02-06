@@ -47,6 +47,8 @@ RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
          PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 && uv run maturin develop --uv --release; \
      fi
 
+RUN uv pip install .
+
 # -------------------------------------
 # 2) Final-Stage
 # -------------------------------------
@@ -65,4 +67,4 @@ ENV HEADLESS=false
 ENV LOG_LEVEL=INFO
 EXPOSE 11884/udp
 EXPOSE 8501/tcp
-CMD . .venv/bin/activate && python src/loxmqttrelay $([ "$HEADLESS" = "true" ] && echo "--headless") $([ ! -z "$LOG_LEVEL" ] && echo "--log-level $LOG_LEVEL")
+CMD . .venv/bin/activate && python loxmqttrelay $([ "$HEADLESS" = "true" ] && echo "--headless") $([ ! -z "$LOG_LEVEL" ] && echo "--log-level $LOG_LEVEL")
