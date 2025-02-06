@@ -138,19 +138,19 @@ jobs:
           docker buildx imagetools create \
             -t ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest-optimized \
             -t ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }}-optimized \
-            $(ls -1 digests-*-optimized/* | xargs -I {} basename {} | xargs -I DIG echo "${{ vars.DOCKER_USERNAME }}/loxmqttrelay@sha256:DIG")
+            $(ls -1 *optimized* | xargs -I {} basename {} | xargs -I DIG echo "${{ vars.DOCKER_USERNAME }}/loxmqttrelay@sha256:DIG")
 
           # Create manifest for compatible images
           docker buildx imagetools create \
             -t ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest-compatible \
             -t ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }}-compatible \
-            $(ls -1 digests-*-compatible/* | xargs -I {} basename {} | xargs -I DIG echo "${{ vars.DOCKER_USERNAME }}/loxmqttrelay@sha256:DIG")
+            $(ls -1 *compatible* | xargs -I {} basename {} | xargs -I DIG echo "${{ vars.DOCKER_USERNAME }}/loxmqttrelay@sha256:DIG")
 
           # Create manifest for latest tag (using optimized images)
           docker buildx imagetools create \
             -t ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest \
             -t ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }} \
-            $(ls -1 digests-*-optimized/* | xargs -I {} basename {} | xargs -I DIG echo "${{ vars.DOCKER_USERNAME }}/loxmqttrelay@sha256:DIG")
+            $(ls -1 *optimized* | xargs -I {} basename {} | xargs -I DIG echo "${{ vars.DOCKER_USERNAME }}/loxmqttrelay@sha256:DIG")
 
       - name: Inspect images
         run: |
