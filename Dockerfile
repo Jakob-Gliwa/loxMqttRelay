@@ -8,7 +8,7 @@ FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim as builder
 
 # System-Tools für Build installieren
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc python3-dev curl build-essential  \
+    gcc python3-dev curl build-essential python3-pandas \
     && if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
             apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross clang && \
             ln -sf /usr/bin/aarch64-linux-gnu-clang /usr/bin/cc; \
@@ -38,7 +38,9 @@ WORKDIR /app
 COPY . .
 
 # Create and use virtual environment with uv
-RUN uv venv && uv pip install ".[build]" && cd src/loxwebsocket/cython_modules && uv run python setup.py build_ext --inplace && cd ../../..
+RUN uv venv && uv pip install -v ".[build]" --only-binary=pandas
+
+RUN cd src/loxwebsocket/cython_modules && uv run python setup.py build_ext --inplace && cd ../../..
 
 # Wheel bauen (Python + Rust)
 RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
