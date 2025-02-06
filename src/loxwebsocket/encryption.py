@@ -12,7 +12,7 @@ from Crypto.PublicKey import RSA
 from Crypto.Util import Padding
 import urllib.request as req
 
-import loxmqttrelay.loxwebsocket.const as c
+import loxwebsocket.const as c
 _LOGGER = logging.getLogger(__name__)
 
 class LxJsonKeySalt:

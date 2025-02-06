@@ -38,7 +38,7 @@ WORKDIR /app
 COPY . .
 
 # Create and use virtual environment with uv
-RUN uv venv && uv pip install ".[build]" && cd src/loxmqttrelay/loxwebsocket/cython_modules && uv run python setup.py build_ext --inplace && cd ../../..
+RUN uv venv && uv pip install ".[build]" && cd src/loxwebsocket/cython_modules && uv run python setup.py build_ext --inplace && cd ../../..
 
 # Wheel bauen (Python + Rust)
 RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \

@@ -63,8 +63,8 @@ module-name = "loxmqttrelay._loxmqttrelay"
 features = ["pyo3/extension-module"]
 # Uncomment and adjust these if you need to include additional files
 include = [
-    { path = "src/loxmqttrelay/loxwebsocket/cython_modules/*.pyx", format = "sdist" },
-    { path = "src/loxmqttrelay/loxwebsocket/cython_modules/*.pxd", format = "sdist" }
+    { path = "src/loxwebsocket/cython_modules/*.pyx", format = "sdist" },
+    { path = "src/loxwebsocket/cython_modules/*.pxd", format = "sdist" }
 ]
 # Make sure the Rust extension is properly built as a Python module
 bindings = "pyo3"

@@ -3,7 +3,7 @@ import asyncio
 import aiohttp
 from typing import Any 
 from loxmqttrelay.config import global_config
-from loxmqttrelay.loxwebsocket.lox_ws_api import loxwebsocket
+from loxwebsocket.lox_ws_api import loxwebsocket
 
 logger = logging.getLogger(__name__)
 

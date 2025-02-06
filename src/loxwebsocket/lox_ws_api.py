@@ -16,10 +16,10 @@ import aiohttp
 from aiohttp import WSMsgType
 import orjson as json
 from Crypto.Hash import HMAC, SHA1, SHA256
-import loxmqttrelay.loxwebsocket.const as c
-from loxmqttrelay.loxwebsocket.exceptions import LoxoneException
-from loxmqttrelay.loxwebsocket.lxtoken import LxToken
-from loxmqttrelay.loxwebsocket.encryption import LxJsonKeySalt, LxEncryptionHandler
+import loxwebsocket.const as c
+from loxwebsocket.exceptions import LoxoneException
+from loxwebsocket.lxtoken import LxToken
+from loxwebsocket.encryption import LxJsonKeySalt, LxEncryptionHandler
 from construct import Struct, Int32ul, Bytes, this
 from .cython_modules.extractor import parse_message, parse_type_3_message
 

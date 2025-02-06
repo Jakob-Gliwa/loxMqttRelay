@@ -52,7 +52,7 @@ jobs:
 
   #     - name: Build Cython modules
   #       run: |
-  #         cd src/loxmqttrelay/loxwebsocket/cython_modules
+  #         cd src/loxwebsocket/cython_modules
   #         python setup.py build_ext --inplace
   #         cd ../../../
 
