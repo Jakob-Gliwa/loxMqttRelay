@@ -16,14 +16,19 @@ def load_miniserver_config(ip: str, username: str, password: str) -> str:
     from the Miniserver via FTP.
     """
     try:
+        logger.debug(f"Loading miniserver configuration from {ip} with username {username}")
         ftp = ftplib.FTP(ip)
         try:
             ftp.login(username, password)
+            logger.debug(f"Logged in successfully - files/folders in root: {ftp.nlst()}")
+            ftp.cwd('prog')
+            filesInFolder = ftp.nlst()
+            logger.debug(f"Found files in prog folder: {filesInFolder}")
         except ftplib.all_errors as e:
             logger.error(f"Error with ftp login to miniserver during miniserver sync: {e}")
 
         # Change to prog directory
-        ftp.cwd('prog')
+  
         
         # Find the most recent configuration file
         filelist = []
