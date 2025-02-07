@@ -1,10 +1,16 @@
+# First ARG declarations (available for FROM)
 ARG TARGET=unknown-linux-gnu
 ARG BASE_IMAGE=ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+ARG OPTIMIZATION_FLAGS
 
 # -------------------------------------
 # 1) Build-Stage
 # -------------------------------------
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim as builder
+
+# Redeclare the ARGs needed in this stage
+ARG TARGET
+ARG OPTIMIZATION_FLAGS
 
 # System-Tools für Build installieren
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -44,9 +50,9 @@ RUN cd src/loxwebsocket/cython_modules && uv run python setup.py build_ext --inp
 
 # Wheel bauen (Python + Rust)
 RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
-         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 && uv run maturin develop --uv --release --target aarch64-unknown-linux-gnu; \
+         RUSTFLAGS="$OPTIMIZATION_FLAGS" PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 uv run maturin develop --uv --release --target aarch64-unknown-linux-gnu; \
      else \
-         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 && uv run maturin develop --uv --release; \
+         RUSTFLAGS="$OPTIMIZATION_FLAGS" PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 uv run maturin develop --uv --release; \
      fi
 
 # -------------------------------------

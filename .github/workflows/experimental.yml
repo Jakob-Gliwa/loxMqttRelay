@@ -76,14 +76,16 @@ jobs:
           # AMD64 builds
           - platform: "linux/amd64"
             optimization: "-O3 -march=native -ffast-math"
+            rustflags: "-C opt-level=3 -C target-cpu=native -C target-feature=+fast-math"
             suffix: "optimized"
           - platform: "linux/amd64"
             optimization: "-O2 -mtune=generic"
+            rustflags: "-C opt-level=2 -C target-cpu=generic"
             suffix: "compatible"
           # ARM64 builds (e.g., Raspberry Pi 4, newer ARM servers, etc.)
-          - platform: "linux/arm64"
-            optimization: "-O3 -mcpu=cortex-a72 -ffast-math"
-            suffix: "optimized"
+          #- platform: "linux/arm64"
+          #  optimization: "-O3 -mcpu=cortex-a72 -ffast-math"
+          #  suffix: "optimized"
           #- platform: "linux/arm64"
           #  optimization: "-O2 -mtune=generic"
           #  suffix: "compatible"
@@ -119,7 +121,7 @@ jobs:
             ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:experimental-${{ github.sha }}-${{ matrix.suffix }}
             ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:experimental-latest-${{ matrix.suffix }}
           build-args: |
-            OPTIMIZATION_FLAGS=${{ matrix.optimization }}
+            OPTIMIZATION_FLAGS=${{ matrix.rustflags }}
             TARGET=${{ matrix.platform == 'linux/arm64' && 'aarch64-unknown-linux-gnu' || 'unknown-linux-gnu' }}
             BASE_IMAGE=${{ matrix.platform == 'linux/arm64' && 'python:3.13-slim-bookworm' || 'ghcr.io/astral-sh/uv:python3.13-bookworm-slim' }}
           annotations: ${{ steps.meta.outputs.annotations }}
