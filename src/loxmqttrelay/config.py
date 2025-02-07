@@ -2,7 +2,7 @@ import os
 import logging
 from dataclasses import dataclass, field, asdict, replace
 import threading
-from typing import Dict, Any, List, Optional, Union, Literal, get_type_hints, Set
+from typing import Dict, Any, List, Optional, Literal, get_type_hints, Set
 import tomlkit
 from enum import Enum
 
@@ -59,8 +59,6 @@ class UdpConfig:
 
 @dataclass
 class DebugConfig:
-    publish_processed_topics: bool = False
-    publish_forwarded_topics: bool = False
     mock_ip: str = ""
     enable_mock: bool = False
 
@@ -144,9 +142,21 @@ class Config:
                 table.add(key, value)
             
             doc.add(section, table)
-            
-        with open(self.config_path, "w") as f:
-            f.write(tomlkit.dumps(doc))
+        try:    
+            with open(self.config_path, "w") as f:
+                f.write(tomlkit.dumps(doc))
+        except PermissionError as e:
+            logger.error(f"⚠️ No write permission for {self.config_path} for user {os.getlogin()} with uid {os.getuid()} and gid {os.getgid()}. File Owner: {os.stat(self.config_path).st_uid}, Group: {os.stat(self.config_path).st_gid}")
+            logger.error("Trying to change ownership...")
+            try:
+                os.chmod(self.config_path, 0o666)
+                with open(self.config_path, "w") as f:
+                    f.write(tomlkit.dumps(doc))
+            except PermissionError as e:
+                logger.error(f"⚠️ Still no write permission for {self.config_path} for user {os.getlogin()} with uid {os.getuid()} and gid {os.getgid()}. File Owner: {os.stat(self.config_path).st_uid}, Group: {os.stat(self.config_path).st_gid}")
+                logger.error("Please change the file permissions and restart.")
+        except Exception as e:
+            logger.error(f"Error saving config: {e}")
 
     def update_field(self, field_name: str, value: Any, list_mode: Literal["set", "add", "remove"] = "set") -> None:
         section, field_type = self._get_field_info(field_name)
