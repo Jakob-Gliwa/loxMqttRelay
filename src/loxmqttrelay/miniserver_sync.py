@@ -17,7 +17,10 @@ def load_miniserver_config(ip: str, username: str, password: str) -> str:
     """
     try:
         ftp = ftplib.FTP(ip)
-        ftp.login(username, password)
+        try:
+            ftp.login(username, password)
+        except ftplib.all_errors as e:
+            logger.error(f"Error with ftp login to miniserver during miniserver sync: {e}")
 
         # Change to prog directory
         ftp.cwd('prog')
