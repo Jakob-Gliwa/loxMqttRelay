@@ -61,7 +61,8 @@ class UdpConfig:
 class DebugConfig:
     mock_ip: str = ""
     enable_mock: bool = False
-
+    publish_processed_topics: bool = False
+    publish_forwarded_topics: bool = False
 @dataclass
 class AppConfig:
     general: GeneralConfig = field(default_factory=GeneralConfig)
