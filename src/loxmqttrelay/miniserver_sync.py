@@ -7,6 +7,7 @@ import zipfile
 import zlib
 from io import BytesIO
 from .config import global_config
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -32,10 +33,11 @@ def load_miniserver_config(ip: str, username: str, password: str) -> str:
         
         # Find the most recent configuration file
         filelist = []
+        pattern = r'(sps_\d+_\d+\.(?:zip|LoxCC))'
         for line in ftp.nlst():
-            filename = line
-            if filename.startswith('sps_') and (filename.endswith('.zip') or filename.endswith('.LoxCC')):
-                filelist.append(filename)
+            match = re.search(pattern, line)
+            if match:
+                filelist.append(match.group(1))
         
         if not filelist:
             raise Exception("No configuration files found")
