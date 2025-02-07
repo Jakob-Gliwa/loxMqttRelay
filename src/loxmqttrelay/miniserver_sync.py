@@ -7,6 +7,7 @@ import zipfile
 import zlib
 from io import BytesIO
 from .config import global_config
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -16,22 +17,32 @@ def load_miniserver_config(ip: str, username: str, password: str) -> str:
     from the Miniserver via FTP.
     """
     try:
+        logger.debug(f"Loading miniserver configuration from {ip} with username {username}")
         ftp = ftplib.FTP(ip)
-        ftp.login(username, password)
+        try:
+            ftp.login(username, password)
+            logger.debug(f"Logged in successfully - files/folders in root: {ftp.nlst()}")
+            ftp.cwd('prog')
+            filesInFolder = ftp.nlst()
+            logger.debug(f"Found files in prog folder: {filesInFolder}")
+        except ftplib.all_errors as e:
+            logger.error(f"Error with ftp login to miniserver during miniserver sync: {e}")
 
         # Change to prog directory
-        ftp.cwd('prog')
+  
         
         # Find the most recent configuration file
         filelist = []
+        pattern = r'(sps_\d+_\d+\.(?:zip|LoxCC))'
         for line in ftp.nlst():
-            filename = line
-            if filename.startswith('sps_') and (filename.endswith('.zip') or filename.endswith('.LoxCC')):
-                filelist.append(filename)
+            match = re.search(pattern, line)
+            if match:
+                filelist.append(match.group(1))
         
         if not filelist:
             raise Exception("No configuration files found")
-            
+        
+                    
         filename = sorted(filelist)[-1]
         logger.info(f"Selected configuration file: {filename}")
         

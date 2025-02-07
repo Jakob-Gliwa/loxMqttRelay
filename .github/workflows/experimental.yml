@@ -76,7 +76,7 @@ jobs:
           # AMD64 builds
           - platform: "linux/amd64"
             optimization: "-O3 -march=native -ffast-math"
-            rustflags: "-C opt-level=3 -C target-cpu=native -C target-feature=+fast-math"
+            rustflags: "-C opt-level=3 -C target-cpu=native"
             suffix: "optimized"
           - platform: "linux/amd64"
             optimization: "-O2 -mtune=generic"
@@ -85,9 +85,11 @@ jobs:
           # ARM64 builds (e.g., Raspberry Pi 4, newer ARM servers, etc.)
           #- platform: "linux/arm64"
           #  optimization: "-O3 -mcpu=cortex-a72 -ffast-math"
+          #  rustflags: "-C opt-level=3 -C target-cpu=cortex-a72"
           #  suffix: "optimized"
           #- platform: "linux/arm64"
           #  optimization: "-O2 -mtune=generic"
+          #  rustflags: "-C opt-level=2 -C target-cpu=generic"
           #  suffix: "compatible"
 
     steps:
