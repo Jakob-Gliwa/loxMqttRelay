@@ -62,7 +62,7 @@ RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
      else \
          export RUSTFLAGS="$OPTIMIZATION_FLAGS"; \
          cargo clean; \
-         uv run maturin develop -vv --uv --target x86_64-unknown-linux-gnu -- -C target-cpu=generic; \
+         uv run maturin develop -vv --uv --profile compatibility --target x86_64-unknown-linux-gnu -- -C target-cpu=generic; \
      fi
 
 # -------------------------------------
