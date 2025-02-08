@@ -11,7 +11,7 @@ FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim as builder
 # Redeclare the ARGs needed in this stage
 ARG TARGET
 ARG OPTIMIZATION_FLAGS
-# Set both RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS
+# Set both RUSTFLAGS and CYTHON_OPT_FLAGS from build-args
 ENV CYTHON_OPT_FLAGS=$CYTHON_OPT_FLAGS
 ENV RUSTFLAGS=$OPTIMIZATION_FLAGS
 RUN CARGO_ENCODED_RUSTFLAGS=$(echo "$OPTIMIZATION_FLAGS" | tr ' ' '\037') && \
@@ -63,7 +63,7 @@ RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
 
 # Build Cython modules with the passed CYTHON_OPT_FLAGS
 RUN cd src/loxwebsocket/cython_modules && \
-    CYTHON_OPT_FLAGS="$CYTHON_OPT_FLAGS" uv run python setup.py build_ext --inplace && \
+    uv run python setup.py build_ext --inplace && \
     cd ../../..
 
 # -------------------------------------
