@@ -2,6 +2,7 @@
 ARG TARGET=unknown-linux-gnu
 ARG BASE_IMAGE=ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 ARG OPTIMIZATION_FLAGS
+ARG CYTHON_OPT_FLAGS
 
 # -------------------------------------
 # 1) Build-Stage
@@ -46,7 +47,10 @@ COPY . .
 # Create and use virtual environment with uv
 RUN uv venv && uv pip install -v ".[build]" --only-binary=pandas
 
-RUN cd src/loxwebsocket/cython_modules && uv run python setup.py build_ext --inplace && cd ../../..
+# Build Cython modules with the passed CYTHON_OPT_FLAGS
+RUN cd src/loxwebsocket/cython_modules && \
+    CYTHON_OPT_FLAGS="$CYTHON_OPT_FLAGS" uv run python setup.py build_ext --inplace && \
+    cd ../../..
 
 # Wheel bauen (Python + Rust)
 RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \

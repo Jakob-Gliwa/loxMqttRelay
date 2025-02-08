@@ -1,15 +1,23 @@
 # setup.py
 
+import os
 from setuptools import setup
 from Cython.Build import cythonize
 from setuptools.extension import Extension
+
+# Read optimization flags from environment, if available.
+cython_opt_flags = os.environ.get("CYTHON_OPT_FLAGS")
+if cython_opt_flags:
+    compile_args = cython_opt_flags.split()  # convert string flags into a list
+else:
+    compile_args = ["-O3", "-march=native", "-ffast-math"]  # fallback default
 
 extensions = [
     Extension(
         "extractor",
         ["extractor.pyx"],
-        extra_compile_args=["-O3", "-march=native", "-ffast-math"],  # Maximum optimization
-        extra_link_args=["-O3"]
+        extra_compile_args=compile_args,  # use flags from env or default
+        extra_link_args=compile_args        # apply same optimization flags for linking
     )
 ]
 
