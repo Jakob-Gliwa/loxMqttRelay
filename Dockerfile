@@ -27,6 +27,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
 && echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
 
 ENV PATH="/root/.cargo/bin:${PATH}"
+ENV RUSTFLAGS="$OPTIMIZATION_FLAGS"
 
 # Fügen Sie das gewünschte Rust-Ziel hinzu
 RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
@@ -52,11 +53,13 @@ RUN cd src/loxwebsocket/cython_modules && \
     CYTHON_OPT_FLAGS="$CYTHON_OPT_FLAGS" uv run python setup.py build_ext --inplace && \
     cd ../../..
 
-# Wheel bauen (Python + Rust)
+# Build wheel (Python + Rust)
 RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
-         RUSTFLAGS="$OPTIMIZATION_FLAGS" PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 uv run maturin develop --uv --release --target aarch64-unknown-linux-gnu; \
+         export RUSTFLAGS="$OPTIMIZATION_FLAGS"; \
+         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 uv run maturin develop --uv --release --target aarch64-unknown-linux-gnu; \
      else \
-         RUSTFLAGS="$OPTIMIZATION_FLAGS" PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 uv run maturin develop -vv --uv --release --target x86_64-unknown-linux-gnu; \
+         export RUSTFLAGS="$OPTIMIZATION_FLAGS"; \
+         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 uv run maturin develop -vv --uv --release --target x86_64-unknown-linux-gnu; \
      fi
 
 # -------------------------------------
