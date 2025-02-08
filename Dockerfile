@@ -27,7 +27,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
 && echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
 
 ENV PATH="/root/.cargo/bin:${PATH}"
-ENV PYO3_PRINT_CONFIG=1
+#ENV PYO3_PRINT_CONFIG=1
 RUN export RUSTFLAGS="$OPTIMIZATION_FLAGS"
 
 # Fügen Sie das gewünschte Rust-Ziel hinzu
