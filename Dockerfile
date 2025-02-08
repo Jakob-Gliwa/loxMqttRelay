@@ -12,6 +12,7 @@ FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim as builder
 ARG TARGET
 ARG OPTIMIZATION_FLAGS
 # Set both RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS
+ENV CYTHON_OPT_FLAGS=$CYTHON_OPT_FLAGS
 ENV RUSTFLAGS=$OPTIMIZATION_FLAGS
 RUN CARGO_ENCODED_RUSTFLAGS=$(echo "$OPTIMIZATION_FLAGS" | tr ' ' '\037') && \
     export CARGO_ENCODED_RUSTFLAGS
@@ -51,11 +52,6 @@ COPY . .
 # Create and use virtual environment with uv
 RUN uv venv && uv pip install -v ".[build]" --only-binary=pandas
 
-# Build Cython modules with the passed CYTHON_OPT_FLAGS
-RUN cd src/loxwebsocket/cython_modules && \
-    CYTHON_OPT_FLAGS="$CYTHON_OPT_FLAGS" uv run python setup.py build_ext --inplace && \
-    cd ../../..
-
 # Build wheel (Python + Rust)
 RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
          cargo clean; \
@@ -64,6 +60,11 @@ RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
          cargo clean; \
          uv run maturin develop -vv --uv --profile compatibility --target x86_64-unknown-linux-gnu -- -C target-cpu=x86_64; \
      fi
+
+# Build Cython modules with the passed CYTHON_OPT_FLAGS
+RUN cd src/loxwebsocket/cython_modules && \
+    CYTHON_OPT_FLAGS="$CYTHON_OPT_FLAGS" uv run python setup.py build_ext --inplace && \
+    cd ../../..
 
 # -------------------------------------
 # 2) Final-Stage

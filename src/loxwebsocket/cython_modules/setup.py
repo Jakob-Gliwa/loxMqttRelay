@@ -1,15 +1,20 @@
 # setup.py
 
 import os
+import logging
 from setuptools import setup
 from Cython.Build import cythonize
 from setuptools.extension import Extension
 
+logger = logging.getLogger(__name__)
+
 # Read optimization flags from environment, if available.
 cython_opt_flags = os.environ.get("CYTHON_OPT_FLAGS")
 if cython_opt_flags:
+    logger.info(f"Using CYTHON_OPT_FLAGS: {cython_opt_flags}")
     compile_args = cython_opt_flags.split()  # convert string flags into a list
 else:
+    logger.warning("No CYTHON_OPT_FLAGS environment variable found. Using default optimization flags.")
     compile_args = ["-O3", "-march=native", "-ffast-math"]  # fallback default
 
 extensions = [
