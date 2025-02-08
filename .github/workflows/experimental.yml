@@ -124,7 +124,7 @@ jobs:
             ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:experimental-latest-${{ matrix.suffix }}
           build-args: |
             OPTIMIZATION_FLAGS=${{ matrix.rustflags }}
-            CYTHON_OPT_FLAGS=${{ matrix.optimization }}
+            CYTHON_OPT_FLAGS="${{ matrix.optimization }}"
             TARGET=${{ matrix.platform == 'linux/arm64' && 'aarch64-unknown-linux-gnu' || 'unknown-linux-gnu' }}
             BASE_IMAGE=${{ matrix.platform == 'linux/arm64' && 'python:3.13-slim-bookworm' || 'ghcr.io/astral-sh/uv:python3.13-bookworm-slim' }}
           annotations: ${{ steps.meta.outputs.annotations }}

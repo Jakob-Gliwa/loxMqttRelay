@@ -7,9 +7,14 @@ from Cython.Build import cythonize
 from setuptools.extension import Extension
 
 logger = logging.getLogger(__name__)
+# Set up basic logging configuration
+logging.basicConfig(level=logging.INFO)
 
 # Read optimization flags from environment, if available.
 cython_opt_flags = os.environ.get("CYTHON_OPT_FLAGS")
+logger.info(f"All environment variables: {dict(os.environ)}")
+logger.info(f"CYTHON_OPT_FLAGS value: {cython_opt_flags!r}")
+
 if cython_opt_flags:
     logger.info(f"Using CYTHON_OPT_FLAGS: {cython_opt_flags}")
     compile_args = cython_opt_flags.split()  # convert string flags into a list
