@@ -66,7 +66,7 @@ RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
 RUN cd src/loxwebsocket/cython_modules && \
     echo "CYTHON_OPT_FLAGS is set to: ${CYTHON_OPT_FLAGS}" && \
     env | grep CYTHON && \
-    uv run python setup.py build_ext --inplace && \
+    CYTHON_OPT_FLAGS="${CYTHON_OPT_FLAGS}" uv run python setup.py build_ext --inplace && \
     cd ../../..
 
 # -------------------------------------
