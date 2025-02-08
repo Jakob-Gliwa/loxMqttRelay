@@ -56,7 +56,7 @@ RUN cd src/loxwebsocket/cython_modules && \
 RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
          RUSTFLAGS="$OPTIMIZATION_FLAGS" PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 uv run maturin develop --uv --release --target aarch64-unknown-linux-gnu; \
      else \
-         RUSTFLAGS="$OPTIMIZATION_FLAGS" PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 uv run maturin develop --uv --release --target x86_64-unknown-linux-gnu; \
+         RUSTFLAGS="$OPTIMIZATION_FLAGS" PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 uv run maturin develop -vv --uv --release --target x86_64-unknown-linux-gnu; \
      fi
 
 # -------------------------------------
