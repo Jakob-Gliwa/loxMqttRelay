@@ -11,7 +11,8 @@ FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim as builder
 # Redeclare the ARGs needed in this stage
 ARG TARGET
 ARG OPTIMIZATION_FLAGS
-# Fix: Set encoded rustflags using RUN
+# Set both RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS
+ENV RUSTFLAGS=$OPTIMIZATION_FLAGS
 RUN CARGO_ENCODED_RUSTFLAGS=$(echo "$OPTIMIZATION_FLAGS" | tr ' ' '\037') && \
     export CARGO_ENCODED_RUSTFLAGS
 
