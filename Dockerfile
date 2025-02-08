@@ -8,10 +8,10 @@ ARG CYTHON_OPT_FLAGS
 # 1) Build-Stage
 # -------------------------------------
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim as builder
-
 # Redeclare the ARGs needed in this stage
 ARG TARGET
 ARG OPTIMIZATION_FLAGS
+ENV RUSTFLAGS="$OPTIMIZATION_FLAGS"
 
 # System-Tools für Build installieren
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -27,7 +27,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
 && echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
 
 ENV PATH="/root/.cargo/bin:${PATH}"
-ENV RUSTFLAGS="$OPTIMIZATION_FLAGS"
+
 
 # Fügen Sie das gewünschte Rust-Ziel hinzu
 RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
