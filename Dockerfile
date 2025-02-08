@@ -11,7 +11,9 @@ FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim as builder
 # Redeclare the ARGs needed in this stage
 ARG TARGET
 ARG OPTIMIZATION_FLAGS
-ENV RUSTFLAGS="$OPTIMIZATION_FLAGS"
+# Fix: Set encoded rustflags using RUN
+RUN CARGO_ENCODED_RUSTFLAGS=$(echo "$OPTIMIZATION_FLAGS" | tr ' ' '\037') && \
+    export CARGO_ENCODED_RUSTFLAGS
 
 # System-Tools für Build installieren
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -28,7 +30,6 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
 
 ENV PATH="/root/.cargo/bin:${PATH}"
 #ENV PYO3_PRINT_CONFIG=1
-RUN export RUSTFLAGS="$OPTIMIZATION_FLAGS"
 
 # Fügen Sie das gewünschte Rust-Ziel hinzu
 RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
@@ -56,11 +57,9 @@ RUN cd src/loxwebsocket/cython_modules && \
 
 # Build wheel (Python + Rust)
 RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
-         export RUSTFLAGS="$OPTIMIZATION_FLAGS"; \
          cargo clean; \
          PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 uv run maturin develop --uv --release --target aarch64-unknown-linux-gnu; \
      else \
-         export RUSTFLAGS="$OPTIMIZATION_FLAGS"; \
          cargo clean; \
          uv run maturin develop -vv --uv --profile compatibility --target x86_64-unknown-linux-gnu -- -C target-cpu=generic; \
      fi
