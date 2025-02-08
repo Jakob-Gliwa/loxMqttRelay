@@ -62,7 +62,7 @@ RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
          PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 uv run maturin develop --uv --release --target aarch64-unknown-linux-gnu; \
      else \
          cargo clean; \
-         uv run maturin develop -vv --uv --profile compatibility --target x86_64-unknown-linux-gnu -- -C target-cpu=generic; \
+         uv run maturin develop -vv --uv --profile compatibility --target x86_64-unknown-linux-gnu -- -C target-cpu=x86_64; \
      fi
 
 # -------------------------------------
