@@ -1,7 +1,7 @@
 # First ARG declarations (available for FROM)
 ARG TARGET=unknown-linux-gnu
 ARG BASE_IMAGE=ghcr.io/astral-sh/uv:python3.13-bookworm-slim
-ARG OPTIMIZATION_FLAGS
+ARG RUSTFLAGS
 ARG CYTHON_OPT_FLAGS
 
 # -------------------------------------
@@ -10,13 +10,19 @@ ARG CYTHON_OPT_FLAGS
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim as builder
 # Redeclare the ARGs needed in this stage
 ARG TARGET
-ARG OPTIMIZATION_FLAGS
+ARG RUSTFLAGS
 ARG CYTHON_OPT_FLAGS
 # Set both RUSTFLAGS and CYTHON_OPT_FLAGS from build-args
 ENV CYTHON_OPT_FLAGS=$CYTHON_OPT_FLAGS
-ENV RUSTFLAGS=$OPTIMIZATION_FLAGS
-RUN CARGO_ENCODED_RUSTFLAGS=$(echo "$OPTIMIZATION_FLAGS" | tr ' ' '\037') && \
-    export CARGO_ENCODED_RUSTFLAGS
+ENV RUSTFLAGS=$RUSTFLAGS
+#RUN CARGO_ENCODED_RUSTFLAGS=$(echo "$RUSTFLAGS" | tr ' ' '\037') && \
+#    export CARGO_ENCODED_RUSTFLAGS
+
+RUN echo "CYTHON_OPT_FLAGS is set to: ${CYTHON_OPT_FLAGS}" && \
+    echo "RUSTFLAGS is set to: ${RUSTFLAGS}" && \
+    env | grep CYTHON && \
+    env | grep RUSTFLAGS
+
 
 # System-Tools für Build installieren
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -55,11 +61,9 @@ RUN uv venv && uv pip install -v ".[build]" --only-binary=pandas
 
 # Build wheel (Python + Rust)
 RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
-         cargo clean; \
          PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 uv run maturin develop --uv --release --target aarch64-unknown-linux-gnu; \
      else \
-         cargo clean; \
-         uv run maturin develop -vv --uv --profile compatibility --target x86_64-unknown-linux-gnu -- -C target-cpu=x86_64; \
+         uv run maturin develop --release -vv --uv --target x86_64-unknown-linux-gnu; \
      fi
 
 # Build Cython modules with the passed CYTHON_OPT_FLAGS
