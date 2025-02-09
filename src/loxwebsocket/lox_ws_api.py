@@ -21,9 +21,31 @@ from loxwebsocket.exceptions import LoxoneException
 from loxwebsocket.lxtoken import LxToken
 from loxwebsocket.encryption import LxJsonKeySalt, LxEncryptionHandler
 from construct import Struct, Int32ul, Bytes, this
-from .cython_modules.extractor import parse_message, parse_type_3_message
-
+import subprocess
+import platform
 _LOGGER = logging.getLogger(__name__)
+
+if "arm" in platform.machine().lower():
+    from .cython_modules.extractor_optimized import parse_message, parse_type_3_message
+else:
+    system = platform.system()
+    try:
+        if system == "Linux":
+            output = subprocess.check_output("lscpu", shell=True, text=True)
+        elif system == "Darwin":  # macOS
+            output = subprocess.check_output("sysctl -a | grep machdep.cpu", shell=True, text=True)
+        elif system == "Windows":
+            output = subprocess.check_output("wmic cpu get Caption", shell=True, text=True)            
+        
+        if output and ("avx" in output.lower() and "avx2" in output.lower()):
+            from .cython_modules.extractor_optimized import parse_message, parse_type_3_message
+        else:
+            from .cython_modules.extractor_compatible import parse_message, parse_type_3_message
+
+    except subprocess.CalledProcessError:
+        _LOGGER.error("Error checking CPU features. Using compatible extractor.")
+        from .cython_modules.extractor_compatible import parse_message, parse_type_3_message
+
 
 # Definition von EvDataText
 EvDataText = Struct(

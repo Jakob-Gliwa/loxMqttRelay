@@ -2,7 +2,6 @@
 ARG TARGET=unknown-linux-gnu
 ARG BASE_IMAGE=ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 ARG RUSTFLAGS
-ARG CYTHON_OPT_FLAGS
 
 # -------------------------------------
 # 1) Build-Stage
@@ -11,16 +10,11 @@ FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim as builder
 # Redeclare the ARGs needed in this stage
 ARG TARGET
 ARG RUSTFLAGS
-ARG CYTHON_OPT_FLAGS
-# Set both RUSTFLAGS and CYTHON_OPT_FLAGS from build-args
-ENV CYTHON_OPT_FLAGS=$CYTHON_OPT_FLAGS
 ENV RUSTFLAGS=$RUSTFLAGS
 #RUN CARGO_ENCODED_RUSTFLAGS=$(echo "$RUSTFLAGS" | tr ' ' '\037') && \
 #    export CARGO_ENCODED_RUSTFLAGS
 
-RUN echo "CYTHON_OPT_FLAGS is set to: ${CYTHON_OPT_FLAGS}" && \
-    echo "RUSTFLAGS is set to: ${RUSTFLAGS}" && \
-    env | grep CYTHON && \
+RUN echo "RUSTFLAGS is set to: ${RUSTFLAGS}" && \
     env | grep RUSTFLAGS
 
 
@@ -66,18 +60,15 @@ RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
          uv run maturin develop --release -vv --uv --target x86_64-unknown-linux-gnu; \
      fi
 
-# Build Cython modules with the passed CYTHON_OPT_FLAGS
+# Build Cython modules
 RUN cd src/loxwebsocket/cython_modules && \
-    echo "CYTHON_OPT_FLAGS is set to: ${CYTHON_OPT_FLAGS}" && \
-    env | grep CYTHON && \
-    CYTHON_OPT_FLAGS="${CYTHON_OPT_FLAGS}" uv run python setup.py build_ext --inplace && \
+    uv run python setup.py build_ext --inplace && \
     cd ../../..
 
 # -------------------------------------
 # 2) Final-Stage
 # -------------------------------------
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
-ARG OPTIMIZATION_FLAGS="-O3 -march=native -ffast-math"
 WORKDIR /app
 
 # Only copy wheels and project files from the builder stage

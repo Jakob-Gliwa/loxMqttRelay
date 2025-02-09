@@ -76,11 +76,9 @@ jobs:
         include:
           # AMD64 builds
           - platform: "linux/amd64"
-            optimization: "-O3 -march=native -ffast-math"
             rustflags: "-C opt-level=3 -C target-cpu=native"
             suffix: "optimized"
           - platform: "linux/amd64"
-            optimization: "-O2 -mtune=generic"
             rustflags: "-C opt-level=2 -C target-cpu=generic"
             suffix: "compatible"
           # ARM64 builds (e.g., Raspberry Pi 4, newer ARM servers, etc.)
@@ -125,7 +123,6 @@ jobs:
             ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest-${{ matrix.suffix }}
           build-args: |
             RUSTFLAGS=${{ matrix.rustflags }}
-            CYTHON_OPT_FLAGS=${{ matrix.optimization }}
             TARGET=${{ matrix.platform == 'linux/arm64' && 'aarch64-unknown-linux-gnu' || 'unknown-linux-gnu' }}
             BASE_IMAGE=${{ matrix.platform == 'linux/arm64' && 'python:3.13-slim-bookworm' || 'ghcr.io/astral-sh/uv:python3.13-bookworm-slim' }}
           annotations: ${{ steps.meta.outputs.annotations }}
