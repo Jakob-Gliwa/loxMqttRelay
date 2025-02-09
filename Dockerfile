@@ -77,6 +77,7 @@ RUN cd src/loxwebsocket/cython_modules && \
 # 2) Final-Stage
 # -------------------------------------
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+ARG OPTIMIZATION_FLAGS="-O3 -march=native -ffast-math"
 WORKDIR /app
 
 # Only copy wheels and project files from the builder stage

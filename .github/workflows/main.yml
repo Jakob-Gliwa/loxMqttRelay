@@ -38,16 +38,39 @@ jobs:
           pytest tests/ --cov=loxmqttrelay --cov-report=xml --cov-report=term
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: coverage.xml
           path: coverage.xml
 
   # --- BUILD & PUSH DOCKER STAGE ---
   docker-build:
-    # Damit dieser Job erst nach erfolgreichen Tests ausgeführt wird:
     needs: test
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # AMD64 builds
+          - platform: "linux/amd64"
+            optimization: "-O3 -march=native -ffast-math"
+            suffix: "optimized"
+          - platform: "linux/amd64"
+            optimization: "-O2 -mtune=generic"
+            suffix: "compatible"
+          # ARM64 builds (for Raspberry Pi 4, newer ARM servers, etc.)
+          - platform: "linux/arm64"
+            optimization: "-O3 -mcpu=native -ffast-math"
+            suffix: "optimized"
+          - platform: "linux/arm64"
+            optimization: "-O2 -mtune=generic"
+            suffix: "compatible"
+          # ARMv7 builds (for Raspberry Pi 3 and older, other 32-bit ARM devices)
+          - platform: "linux/arm/v7"
+            optimization: "-O3 -mcpu=cortex-a7 -ffast-math"
+            suffix: "optimized"
+          - platform: "linux/arm/v7"
+            optimization: "-O2 -mtune=generic"
+            suffix: "compatible"
 
     steps:
       - name: Check out source
@@ -57,7 +80,6 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          # Beispiel: loxmqttrelay an Docker Hub pushen
           images: ${{ vars.DOCKER_USERNAME }}/loxmqttrelay
 
       - name: Log in to Docker Registry
@@ -73,9 +95,20 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           push: ${{ github.event_name != 'pull_request' }}
+          platforms: ${{ matrix.platform }}
           tags: |
-            ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }}
-            ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest
+            ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }}-${{ matrix.suffix }}
+            ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest-${{ matrix.suffix }}
+          build-args: |
+            OPTIMIZATION_FLAGS=${{ matrix.optimization }}
           annotations: ${{ steps.meta.outputs.annotations }}
           provenance: true
           sbom: true
+
+      # Tag AMD64 optimized version as latest
+      - name: Tag AMD64 optimized version as latest
+        if: matrix.platform == 'linux/amd64' && matrix.suffix == 'optimized' && github.event_name != 'pull_request'
+        run: |
+          docker pull ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }}-optimized
+          docker tag ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }}-optimized ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest
+          docker push ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest
