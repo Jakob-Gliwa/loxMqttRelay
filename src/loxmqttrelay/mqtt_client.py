@@ -72,10 +72,9 @@ class MQTTClient:
                 except Exception:
                     logger.warning("Error during MQTT client cleanup", exc_info=True)
 
-    async def _on_message(self, client, topic, payload:bytes, qos, properties):
+    async def _on_message(self, client, topic, payload: bytes, qos, properties):
         try:
-            payload_str = payload.decode('utf-8', errors='ignore')
-            asyncio.create_task(self._callback(topic, payload_str))
+            self._callback(topic, payload)
         except Exception as e:
             logger.error(f"Error processing message: {e}")
             return PubAckReasonCode.UNSPECIFIED_ERROR

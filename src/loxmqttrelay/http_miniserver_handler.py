@@ -1,8 +1,7 @@
 import logging
 import asyncio
 import aiohttp
-from typing import Dict, Any, Callable, Awaitable, List, Optional, Union
-from loxmqttrelay.miniserver_data_processor import miniserver_data_processor
+from typing import Any 
 from loxmqttrelay.config import global_config
 from loxwebsocket.lox_ws_api import loxwebsocket
 
@@ -22,6 +21,9 @@ class HttpMiniserverHandler:
     connection_semaphore = asyncio.Semaphore(global_config.miniserver.miniserver_max_parallel_connections)  # Default to 5 parallel connections
     target_ip = mock_ms_ip if (mock_ms_ip and enable_mock_miniserver) else ms_ip
     ws_base_url = f"{"https" if ms_port == 443 else "http"}://{target_ip}"
+    auth = aiohttp.BasicAuth(ms_user, ms_pass) if ms_user and ms_pass else None
+    # Increase the timeout to 10 seconds
+    timeout = aiohttp.ClientTimeout(total=10)
 
 
     """Handler for processing and sending data to Miniserver via HTTP."""
@@ -31,8 +33,9 @@ class HttpMiniserverHandler:
     async def send_to_minisever_via_websocket(
         self,
         topic: str,
+        normalized_topic: str,
         value: Any
-    ) -> Dict[str, Union[int, str]]:
+    ) -> None:
         """
         Sends data to the Loxone Miniserver via a WebSocket connection.
         Returns a dictionary with results for each topic.
@@ -44,23 +47,22 @@ class HttpMiniserverHandler:
         if "CONNECTED" not in ws_client.state:
             await ws_client.connect(user=self.ms_user, password=self.ms_pass, loxone_url=self.ws_base_url, receive_updates=False)
 
-        # Send commands over the WebSocket connection
-        safe_topic = miniserver_data_processor.normalize_topic(topic)
         try:
-            await ws_client.send_websocket_command(safe_topic, str(value))
-            logger.debug(f"Sent {topic}={value} to Miniserver successfully via WebSocket.")
-            return {'code': 200}
+            await ws_client.send_websocket_command(normalized_topic, str(value))
+            logger.debug(f"Sent {topic} (as {normalized_topic})={value} to Miniserver successfully via WebSocket.")
+            return 
         except Exception as e:
-            error_msg = f"Error sending {topic} to Miniserver via WebSocket: {str(e)}"
+            error_msg = f"Error sending {topic} (as {normalized_topic})={value} to Miniserver via WebSocket: {str(e)}"
             logger.error(error_msg)
-            return {'code': 500, 'error': error_msg}
+            return 
 
 
     async def send_to_miniserver_via_http(
         self,
         topic: str,
+        normalized_topic: str,
         value: Any
-    ) -> Dict[str, Union[int, str]]:
+    ) -> None:
         """
         Send data to Miniserver with rate limiting.
         If mock_ms_ip is provided and enable_mock_miniserver is True, mock server will be used instead of ms_ip.
@@ -69,16 +71,10 @@ class HttpMiniserverHandler:
         # Use mock miniserver IP only if both provided and enabled
         logger.debug(f"Using miniserver address: {self.target_ip} {'(mock)' if (self.mock_ms_ip and self.enable_mock_miniserver) else '(real)'}")
 
-        auth = aiohttp.BasicAuth(self.ms_user, self.ms_pass) if self.ms_user and self.ms_pass else None
-
-        # Increase the timeout to 10 seconds
-        timeout = aiohttp.ClientTimeout(total=10)
-
-        async with aiohttp.ClientSession(auth=auth, timeout=timeout) as session:
-            safe_topic = miniserver_data_processor.normalize_topic(topic)
+        async with aiohttp.ClientSession(auth=self.auth, timeout=self.timeout) as session:
             # Ensure value is converted to string
             safe_value = str(value)
-            url = f"http://{self.target_ip}/dev/sps/io/{safe_topic}/{safe_value}"
+            url = f"http://{self.target_ip}/dev/sps/io/{normalized_topic}/{safe_value}"
             logger.debug(f"Sending to {url}")
             
             try:
@@ -91,32 +87,32 @@ class HttpMiniserverHandler:
                             logger.debug(f"Sent {topic}={value} to Miniserver successfully.")
                         return { 'code': resp.status }
             except asyncio.TimeoutError:
-                error_msg = f"Timeout while sending {topic} to Miniserver (URL: {url}): request timed out after 10 seconds"
+                error_msg = f" Error 408: Timeout while sending {topic} (as {normalized_topic})={value} to Miniserver (URL: {url}): request timed out after 10 seconds"
                 logger.error(error_msg)
-                return { 'code': 408, 'error': error_msg }
+                return 
             except asyncio.CancelledError:
-                error_msg = f"Request for {topic} was cancelled (URL: {url})"
+                error_msg = f"Error 499: Request for {topic} (as {normalized_topic})={value} was cancelled (URL: {url})"
                 logger.error(error_msg)
-                return { 'code': 499, 'error': error_msg }
+                return 
             except OSError as e:
-                error_msg = f"Connection error sending {topic} to Miniserver (URL: {url}): {str(e)}"
+                error_msg = f"Error 503: Connection error sending {topic} (as {normalized_topic})={value} to Miniserver (URL: {url}): {str(e)}"
                 logger.error(error_msg)
-                return { 'code': 503, 'error': error_msg }
+                return 
             except aiohttp.ClientError as e:
-                error_msg = f"Client error sending {topic} to Miniserver (URL: {url}): {str(e)}"
+                error_msg = f"Error 500: Client error sending {topic} (as {normalized_topic})={value} to Miniserver (URL: {url}): {str(e)}"
                 logger.error(error_msg)
-                return { 'code': 500, 'error': error_msg }
+                return 
             except Exception as e:
-                error_msg = f"Unexpected error sending {topic} to Miniserver (URL: {url}): {str(e)}"
+                error_msg = f"Error 500: Unexpected error sending {topic} (as {normalized_topic})={value} to Miniserver (URL: {url}): {str(e)}"
                 logger.error(error_msg)
-                return { 'code': 500, 'error': error_msg }
+                return 
     
     async def send_to_miniserver(
         self,
         topic: str,
+        normalized_topic: str,
         value: Any,
-        mqtt_publish_callback: Optional[Callable[[str, str, bool], Awaitable[None]]] = None
-    ) -> Dict[str, Union[int, str]]:
+    ) -> None:
         """
         Process data and send it to Miniserver.
         
@@ -125,24 +121,15 @@ class HttpMiniserverHandler:
             mqtt_publish_callback: Callback for MQTT publishing (required for topic forwarding)
             
         Returns:
-            Dictionary mapping topics to their HTTP response codes
+            None
         """
-        
+        logger.debug(f"Sending {topic} (as {normalized_topic})={value} to Miniserver")
         # Send to Miniserver using WebSocket or HTTP based on config
         if global_config.miniserver.use_websocket:
-            response_code = await self.send_to_minisever_via_websocket(topic, value)
+            await self.send_to_minisever_via_websocket(topic, normalized_topic, value)
         else:
-            response_code = await self.send_to_miniserver_via_http(topic, value)
+            await self.send_to_miniserver_via_http(topic, normalized_topic, value)
 
-        # Publish forwarded topics with response codes if enabled
-        if global_config.debug.publish_forwarded_topics and mqtt_publish_callback:
-            # Ensure code is int for publish_forwarded_topic
-            http_code = response_code if isinstance(response_code, int) else 0
-            asyncio.create_task(miniserver_data_processor.publish_forwarded_topic(
-                topic, value, http_code,
-                mqtt_publish_callback
-            ))
-
-        return response_code
+        return 
 
 http_miniserver_handler = HttpMiniserverHandler()

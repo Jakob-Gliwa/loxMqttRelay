@@ -10,4 +10,5 @@ tomlkit>=0.13.0
 gmqtt>=0.7.0
 Cython>=3.0.0
 pycryptodome>=3.18.0
+maturin>=1.8
 

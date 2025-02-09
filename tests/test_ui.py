@@ -1,18 +1,16 @@
 import pytest
 from unittest.mock import Mock, patch, MagicMock, AsyncMock
-import subprocess
 import os
 from pathlib import Path
 import asyncio
 import tomlkit
 from gmqtt.mqtt.constants import MQTTv311
-import typing
 from typing import AsyncGenerator, Generator, Any
+import types
 
 from loxmqttrelay.main import MQTTRelay
 from loxmqttrelay.config import Config, global_config, AppConfig
-from loxmqttrelay.miniserver_data_processor import MiniserverDataProcessor
-from loxmqttrelay.mqtt_client import mqtt_client
+from loxmqttrelay._loxmqttrelay import MiniserverDataProcessor
 
 @pytest.fixture(autouse=True)
 async def cleanup_tasks() -> AsyncGenerator[None, None]:
@@ -70,11 +68,12 @@ def mock_mqtt_client(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     return mock_instance
 
 @pytest.fixture
-def mock_data_processor() -> Generator[MagicMock, None, None]:
-    with patch('loxmqttrelay.miniserver_data_processor.MiniserverDataProcessor') as mock_processor:
-        processor_instance = MagicMock()
-        mock_processor.get_instance = MagicMock(return_value=processor_instance)
-        yield processor_instance
+def mock_data_processor(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """Mock MiniserverDataProcessor"""
+    processor = MagicMock()
+    processor.return_value = processor  # Make the mock work as both class and instance
+    monkeypatch.setattr('loxmqttrelay.main.MiniserverDataProcessor', processor)
+    return processor
 
 @pytest.fixture
 def sample_toml_config() -> str:
@@ -110,9 +109,7 @@ def sample_toml_config() -> str:
         },
         'debug': {
             'mock_ip': '',
-            'enable_mock': False,
-            'publish_processed_topics': False,
-            'publish_forwarded_topics': False
+            'enable_mock': False
         },
         'topics': {
             'subscriptions': ['topic1', 'topic2'],
@@ -123,13 +120,33 @@ def sample_toml_config() -> str:
     }
     return tomlkit.dumps(config)
 
+@pytest.fixture
+def mock_topic(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
+    """Mock TOPIC constant"""
+    topic = types.SimpleNamespace(
+        START_UI="test/startui",
+        STOP_UI="test/stopui",
+        MINISERVER_STARTUP_EVENT="test/miniserver/startup",
+        CONFIG_GET="test/config/get",
+        CONFIG_RESPONSE="test/config/response",
+        CONFIG_SET="test/config/set",
+        CONFIG_ADD="test/config/add",
+        CONFIG_REMOVE="test/config/remove",
+        CONFIG_UPDATE="test/config/update",
+        CONFIG_RESTART="test/config/restart",
+        UI_STATUS="test/ui/status"
+    )
+    monkeypatch.setattr('loxmqttrelay.main.TOPIC', topic)
+    return topic
+
 @pytest.mark.asyncio
 async def test_ui_starts_properly(
     mock_subprocess: MagicMock,
     mock_mqtt_client: MagicMock,
     mock_config: AppConfig,
     mock_data_processor: MagicMock,
-    mock_args: MagicMock
+    mock_args: MagicMock,
+    mock_topic: types.SimpleNamespace
 ) -> None:
     # Create relay instance
     relay = MQTTRelay()
@@ -162,7 +179,8 @@ async def test_ui_stops_properly(
     mock_mqtt_client: MagicMock,
     mock_config: AppConfig,
     mock_data_processor: MagicMock,
-    mock_args: MagicMock
+    mock_args: MagicMock,
+    mock_topic: types.SimpleNamespace
 ) -> None:
     # Create relay instance and start UI
     relay = MQTTRelay()
@@ -187,7 +205,8 @@ async def test_ui_already_running(
     mock_mqtt_client: MagicMock,
     mock_config: AppConfig,
     mock_data_processor: MagicMock,
-    mock_args: MagicMock
+    mock_args: MagicMock,
+    mock_topic: types.SimpleNamespace
 ) -> None:
     # Create relay instance
     relay = MQTTRelay()
@@ -210,7 +229,8 @@ async def test_ui_not_running_when_stopping(
     mock_mqtt_client: MagicMock,
     mock_config: AppConfig,
     mock_data_processor: MagicMock,
-    mock_args: MagicMock
+    mock_args: MagicMock,
+    mock_topic: types.SimpleNamespace
 ) -> None:
     # Create relay instance without starting UI
     relay = MQTTRelay()
@@ -233,7 +253,8 @@ async def test_ui_does_not_start_in_headless_mode(
     mock_mqtt_client: MagicMock,
     mock_config: AppConfig,
     mock_data_processor: MagicMock,
-    mock_args: MagicMock
+    mock_args: MagicMock,
+    mock_topic: types.SimpleNamespace
 ) -> None:
     # Set headless mode
     mock_args.headless = True

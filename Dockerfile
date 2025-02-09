@@ -1,27 +1,95 @@
+# First ARG declarations (available for FROM)
+ARG TARGET=unknown-linux-gnu
+ARG BASE_IMAGE=ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+ARG RUSTFLAGS
+ARG CYTHON_OPT_FLAGS
+
+# -------------------------------------
+# 1) Build-Stage
+# -------------------------------------
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim as builder
+# Redeclare the ARGs needed in this stage
+ARG TARGET
+ARG RUSTFLAGS
+ARG CYTHON_OPT_FLAGS
+# Set both RUSTFLAGS and CYTHON_OPT_FLAGS from build-args
+ENV CYTHON_OPT_FLAGS=$CYTHON_OPT_FLAGS
+ENV RUSTFLAGS=$RUSTFLAGS
+#RUN CARGO_ENCODED_RUSTFLAGS=$(echo "$RUSTFLAGS" | tr ' ' '\037') && \
+#    export CARGO_ENCODED_RUSTFLAGS
+
+RUN echo "CYTHON_OPT_FLAGS is set to: ${CYTHON_OPT_FLAGS}" && \
+    echo "RUSTFLAGS is set to: ${RUSTFLAGS}" && \
+    env | grep CYTHON && \
+    env | grep RUSTFLAGS
+
+
+# System-Tools für Build installieren
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc python3-dev curl build-essential python3-pandas \
+    && if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
+            apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross clang && \
+            ln -sf /usr/bin/aarch64-linux-gnu-clang /usr/bin/cc; \
+        fi
+
+
+# Install Rust toolchain
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal \
+&& echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+#ENV PYO3_PRINT_CONFIG=1
+
+# Fügen Sie das gewünschte Rust-Ziel hinzu
+RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
+        rustup target add aarch64-unknown-linux-gnu; \
+    fi
+
+    # Konfiguriere Cargo, um den ARM64 Linker zu verwenden
+RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
+mkdir -p ~/.cargo && \
+echo "[target.aarch64-unknown-linux-gnu]" > ~/.cargo/config.toml && \
+echo "linker = \"aarch64-linux-gnu-clang\"" >> ~/.cargo/config.toml && \
+echo "ar = \"aarch64-linux-gnu-ar\"" >> ~/.cargo/config.toml; \
+fi
+
+WORKDIR /app
+COPY . .
+
+# Create and use virtual environment with uv
+RUN uv venv && uv pip install -v ".[build]" --only-binary=pandas
+
+# Build wheel (Python + Rust)
+RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
+         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 uv run maturin develop --uv --release --target aarch64-unknown-linux-gnu; \
+     else \
+         uv run maturin develop --release -vv --uv --target x86_64-unknown-linux-gnu; \
+     fi
+
+# Build Cython modules with the passed CYTHON_OPT_FLAGS
+RUN cd src/loxwebsocket/cython_modules && \
+    echo "CYTHON_OPT_FLAGS is set to: ${CYTHON_OPT_FLAGS}" && \
+    env | grep CYTHON && \
+    CYTHON_OPT_FLAGS="${CYTHON_OPT_FLAGS}" uv run python setup.py build_ext --inplace && \
+    cd ../../..
+
+# -------------------------------------
+# 2) Final-Stage
+# -------------------------------------
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 ARG OPTIMIZATION_FLAGS="-O3 -march=native -ffast-math"
 WORKDIR /app
-COPY . .
-# Install build dependencies, Python dependencies, and clean up in a single layer
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        gcc \
-        python3-dev \
-    && uv pip install --system . \
-    && uv pip install --system -e ".[dev]" \
-    && cd src/loxwebsocket/cython_modules \
-    && CFLAGS="$OPTIMIZATION_FLAGS" python setup.py build_ext --inplace \
-    && cd /app \
-    && uv pip uninstall --system $(uv pip freeze | grep -v "^-e" | cut -d= -f1) \
-    && uv pip install --system . \
-    && apt-get remove -y gcc python3-dev \
-    && apt-get autoremove -y \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-# Set PYTHONPATH to include the src directory
-ENV PYTHONPATH=/app/src
+
+# Only copy wheels and project files from the builder stage
+COPY --from=builder /app/pyproject.toml /app/pyproject.toml
+COPY --from=builder /app/Cargo.toml /app/Cargo.toml
+COPY --from=builder /app/src /app/src
+COPY --from=builder /app/.venv /app/.venv
+
+# ENV PYTHONPATH=/app/src
+
 ENV HEADLESS=false
 ENV LOG_LEVEL=INFO
 EXPOSE 11884/udp
 EXPOSE 8501/tcp
-CMD loxmqttrelay $([ "$HEADLESS" = "true" ] && echo "--headless") $([ ! -z "$LOG_LEVEL" ] && echo "--log-level $LOG_LEVEL")
+CMD . .venv/bin/activate && exec .venv/bin/loxmqttrelay $([ "$HEADLESS" = "true" ] && echo "--headless") $([ ! -z "$LOG_LEVEL" ] && echo "--log-level $LOG_LEVEL")

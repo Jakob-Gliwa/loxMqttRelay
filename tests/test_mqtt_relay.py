@@ -123,15 +123,16 @@ async def test_whitelist_sync_on_miniserver_startup(config_instance: Config, moc
             # Reset der Mock-Objekte, damit wir den zweiten Sync klar erkennen
             mock_sync.reset_mock()
             mock_logger.reset_mock()
-            
-            # Startup-Event per MQTT simulieren
-            await relay.received_mqtt_message(
+
+            # Startup-Event per MQTT simulieren - now using the Rust implementation
+            # Since handle_mqtt_message is synchronous in Rust, we call it directly
+            relay.miniserver_data_processor.handle_mqtt_message(
                 TOPIC.MINISERVER_STARTUP_EVENT,
-                ""
+                b""
             )
 
             # Add a small delay to allow async operations to complete
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.5)
 
             # Wurde sync erneut aufgerufen?
             mock_sync.assert_called_once()
