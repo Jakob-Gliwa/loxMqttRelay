@@ -32,12 +32,14 @@ dev = [
     "pytest-cov>=4.1.0",
     "pyinstrument>=5.0.0",
     "setuptools>=75.0.0", 
-    "maturin>=1.8"
+    "maturin>=1.8",
+    "setuptools-rust>=1.10.0"
 ]
 build = [
     "setuptools>=75.0.0", 
     "maturin>=1.8",
-    "Cython>=3.0.0"
+    "Cython>=3.0.0",
+    "setuptools-rust>=1.10.0"
 ]
 
 [tool.uv]
@@ -61,10 +63,4 @@ asyncio_mode = "strict"
 python-source = "src"
 module-name = "loxmqttrelay._loxmqttrelay"
 features = ["pyo3/extension-module"]
-# Uncomment and adjust these if you need to include additional files
-include = [
-    { path = "src/loxwebsocket/cython_modules/*.pyx", format = "sdist" },
-    { path = "src/loxwebsocket/cython_modules/*.pxd", format = "sdist" }
-]
-# Make sure the Rust extension is properly built as a Python module
 bindings = "pyo3"

@@ -1,13 +1,14 @@
 import asyncio
 import logging
 import types
-from typing import Dict, Any, Optional,Literal
+from typing import Dict, Any, Optional, Literal
 import sys
 import os
 import orjson
 import subprocess
 import uvloop
 import typing
+import platform
 
 from loxmqttrelay.config import ConfigError, ConfigSection, global_config
 from loxmqttrelay.mqtt_client import mqtt_client
@@ -15,10 +16,9 @@ from loxmqttrelay.udp_handler import start_udp_server
 from loxmqttrelay.miniserver_sync import sync_miniserver_whitelist
 from loxmqttrelay.http_miniserver_handler import http_miniserver_handler
 import loxmqttrelay.utils as utils
-from loxmqttrelay._loxmqttrelay import (
-    MiniserverDataProcessor,
-    init_rust_logger
-)
+
+# The imports are now handled by __init__.py
+from loxmqttrelay import MiniserverDataProcessor, init_rust_logger
 
 TOPIC = types.SimpleNamespace(
     CONFIG_SET = f"{global_config.general.base_topic}config/set",
