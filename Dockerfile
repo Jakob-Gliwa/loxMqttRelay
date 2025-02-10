@@ -1,7 +1,5 @@
 # First ARG declarations (available for FROM)
 ARG TARGET=unknown-linux-gnu
-ARG BASE_IMAGE=ghcr.io/astral-sh/uv:python3.13-bookworm-slim
-ARG RUSTFLAGS
 
 # -------------------------------------
 # 1) Build-Stage
@@ -9,30 +7,21 @@ ARG RUSTFLAGS
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim as builder
 # Redeclare the ARGs needed in this stage
 ARG TARGET
-ARG RUSTFLAGS
-ENV RUSTFLAGS=$RUSTFLAGS
-#RUN CARGO_ENCODED_RUSTFLAGS=$(echo "$RUSTFLAGS" | tr ' ' '\037') && \
-#    export CARGO_ENCODED_RUSTFLAGS
-
-RUN echo "RUSTFLAGS is set to: ${RUSTFLAGS}" && \
-    env | grep RUSTFLAGS
 
 
 # System-Tools für Build installieren
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc python3-dev curl build-essential python3-pandas \
+    gcc python3-dev curl build-essential \
     && if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
             apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross clang && \
             ln -sf /usr/bin/aarch64-linux-gnu-clang /usr/bin/cc; \
         fi
-
 
 # Install Rust toolchain
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal \
 && echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
 
 ENV PATH="/root/.cargo/bin:${PATH}"
-#ENV PYO3_PRINT_CONFIG=1
 
 # Fügen Sie das gewünschte Rust-Ziel hinzu
 RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
@@ -51,19 +40,7 @@ WORKDIR /app
 COPY . .
 
 # Create and use virtual environment with uv
-RUN uv venv && uv pip install -v ".[build]" --only-binary=pandas
-
-# Build wheel (Python + Rust)
-RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
-         PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 uv run maturin develop --uv --release --target aarch64-unknown-linux-gnu; \
-     else \
-         uv run maturin develop --release -vv --uv --target x86_64-unknown-linux-gnu; \
-     fi
-
-# Build Cython modules
-RUN cd src/loxwebsocket/cython_modules && \
-    uv run python setup.py build_ext --inplace && \
-    cd ../../..
+RUN uv venv && uv pip install -v . --only-binary=pandas
 
 # -------------------------------------
 # 2) Final-Stage
