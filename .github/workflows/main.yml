@@ -37,24 +37,7 @@ jobs:
     
       - name: Install Python packages
         run: |
-          uv pip install --system maturin
           uv pip install --system .
-          uv pip install --system .[test]
-          uv pip install --system .[dev]
-
-      - name: Build Rust libraries with maturin
-        run: |
-          export PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
-          maturin build --release --compatibility off
-
-      - name: Install built Rust wheel
-        run: uv pip install target/wheels/loxmqttrelay-*.whl --system
-
-      - name: Build Cython modules
-        run: |
-          cd src/loxwebsocket/cython_modules
-          python setup.py build_ext --inplace
-          cd ../../../
 
       - name: Run tests with coverage
         run: |
