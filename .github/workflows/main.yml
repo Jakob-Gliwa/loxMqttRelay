@@ -51,22 +51,12 @@ jobs:
 
   # --- BUILD & PUSH DOCKER STAGE ---
   docker-build:
-    #needs: test
-    runs-on: ubuntu-latest
     needs: test
+    runs-on: ubuntu-latest
     strategy:
       matrix:
-        include:
-          # AMD64 builds
-          - platform: "linux/amd64"
-            suffix: "optimized"
-          - platform: "linux/amd64"
-            suffix: "compatible"
-          # ARM64 builds (e.g., Raspberry Pi 4, newer ARM servers, etc.)
-          #- platform: "linux/arm64"
-          #  suffix: "optimized"
-          #- platform: "linux/arm64"
-          #  suffix: "compatible"
+        platform: ["linux/amd64"]
+        #platform: ["linux/amd64", "linux/arm64"]
 
     steps:
       - name: Check out source
@@ -95,9 +85,7 @@ jobs:
         with:
           push: ${{ github.event_name != 'pull_request' }}
           platforms: ${{ matrix.platform }}
-          tags: |
-            ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }}-${{ matrix.suffix }}
-            ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest-${{ matrix.suffix }}
+          tags: ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }}
           build-args: |
             TARGET=${{ matrix.platform == 'linux/arm64' && 'aarch64-unknown-linux-gnu' || 'unknown-linux-gnu' }}
           annotations: ${{ steps.meta.outputs.annotations }}
@@ -106,9 +94,19 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Tag AMD64 optimized version as latest
-        if: matrix.platform == 'linux/amd64' && matrix.suffix == 'optimized' && github.event_name != 'pull_request'
+  # --- CREATE MULTI-ARCH IMAGE ---
+  create-manifest:
+    needs: docker-build
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    steps:
+      - name: Log in to Docker Registry
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Create and push multi-arch manifest
         run: |
-          docker pull ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }}-optimized
-          docker tag ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }}-optimized ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest
-          docker push ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest
+          docker buildx imagetools create -t ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest \
+            ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }}
