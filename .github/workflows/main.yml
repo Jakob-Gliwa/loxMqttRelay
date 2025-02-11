@@ -37,7 +37,7 @@ jobs:
     
       - name: Install Python packages
         run: |
-          uv pip install --system .
+          uv pip install --system .[test]
 
       - name: Run tests with coverage
         run: |
