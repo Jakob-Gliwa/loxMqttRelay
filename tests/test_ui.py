@@ -10,7 +10,7 @@ import types
 
 from loxmqttrelay.main import MQTTRelay
 from loxmqttrelay.config import Config, global_config, AppConfig
-from loxmqttrelay._loxmqttrelay import MiniserverDataProcessor
+from loxmqttrelay.compatible._loxmqttrelay import MiniserverDataProcessor
 
 @pytest.fixture(autouse=True)
 async def cleanup_tasks() -> AsyncGenerator[None, None]:

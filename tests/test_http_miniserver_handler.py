@@ -3,7 +3,7 @@ import pytest_asyncio
 from unittest.mock import AsyncMock, patch, MagicMock
 from loxmqttrelay.http_miniserver_handler import HttpMiniserverHandler
 from loxmqttrelay.config import Config, AppConfig
-from loxmqttrelay._loxmqttrelay import MiniserverDataProcessor
+from loxmqttrelay.compatible._loxmqttrelay import MiniserverDataProcessor
 import aiohttp
 import asyncio
 from typing import AsyncGenerator, Generator, List, Tuple, Any

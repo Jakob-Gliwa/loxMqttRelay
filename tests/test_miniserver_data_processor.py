@@ -4,7 +4,7 @@ import json
 from unittest.mock import AsyncMock, patch, MagicMock
 from loxmqttrelay.config import Config, AppConfig, global_config
 import asyncio
-from loxmqttrelay._loxmqttrelay import MiniserverDataProcessor  # Assuming 'librs' is the compiled Rust module
+from loxmqttrelay.compatible._loxmqttrelay import MiniserverDataProcessor  # Assuming 'librs' is the compiled Rust module
 
 TOPIC = 'mock/topic'  # Define a mock or placeholder for the TOPIC variable
 
