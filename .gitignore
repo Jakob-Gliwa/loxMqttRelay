@@ -44,3 +44,5 @@ target/
 benchmark.py
 Cargo.lock
 lib copy.rs
+src/loxwebsocket/cython_modules/extractor_compatible.c
+src/loxwebsocket/cython_modules/extractor_optimized.c
