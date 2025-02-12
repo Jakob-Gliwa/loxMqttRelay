@@ -5,12 +5,13 @@ FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim as builder
 
 # System-Tools für Build installieren
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc python3-dev curl build-essential rustup
+    gcc python3-dev curl build-essential
 
 # Install Rust toolchain
-#RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal \
-#&& echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
-#ENV PATH="/root/.cargo/bin:${PATH}"
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal \
+&& echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
+
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /app
 COPY . .
