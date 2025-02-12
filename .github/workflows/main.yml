@@ -56,8 +56,9 @@ jobs:
     strategy:
       matrix:
         platform: ["linux/amd64", "linux/arm64"]
-        #platform: ["linux/amd64"]
-
+    outputs:
+      amd64_tag: ${{ steps.set_tag.outputs.amd64_tag }}
+      arm64_tag: ${{ steps.set_tag.outputs.arm64_tag }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -85,12 +86,21 @@ jobs:
         with:
           push: ${{ github.event_name != 'pull_request' }}
           platforms: ${{ matrix.platform }}
-          tags: ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:multiarch-${{ github.sha }}
+          tags: ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:multiarch-${{ matrix.platform }}-${{ github.sha }}
           annotations: ${{ steps.meta.outputs.annotations }}
           provenance: true
           sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Set output tags
+        id: set_tag
+        run: |
+          if [ "${{ matrix.platform }}" = "linux/amd64" ]; then
+            echo "amd64_tag=multiarch-linux-amd64-${{ github.sha }}" >> $GITHUB_OUTPUT
+          else
+            echo "arm64_tag=multiarch-linux-arm64-${{ github.sha }}" >> $GITHUB_OUTPUT
+          fi
 
   # --- CREATE MULTI-ARCH IMAGE ---
   create-manifest:
@@ -111,14 +121,14 @@ jobs:
         run: |
           # Create manifest list and push
           docker manifest create ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest-multiarch \
-            --amend ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:multiarch-${{ github.sha }} \
-            --amend ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:multiarch-${{ github.sha }}
+            --amend ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:multiarch-linux-amd64-${{ github.sha }} \
+            --amend ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:multiarch-linux-arm64-${{ github.sha }}
           
           # Annotate the manifest with architecture information
           docker manifest annotate ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest-multiarch \
-            ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:multiarch-${{ github.sha }} --arch amd64 --os linux
+            ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:multiarch-linux-amd64-${{ github.sha }} --arch amd64 --os linux
           docker manifest annotate ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest-multiarch \
-            ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:multiarch-${{ github.sha }} --arch arm64 --os linux
+            ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:multiarch-linux-arm64-${{ github.sha }} --arch arm64 --os linux
           
           # Push the manifest
           docker manifest push ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest-multiarch
