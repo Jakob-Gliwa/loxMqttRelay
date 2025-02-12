@@ -51,6 +51,7 @@ jobs:
 
   # --- BUILD & PUSH DOCKER STAGE ---
   docker-build:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
