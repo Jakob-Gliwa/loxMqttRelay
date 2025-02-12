@@ -26,7 +26,7 @@ import platform
 _LOGGER = logging.getLogger(__name__)
 
 if "arm" in platform.machine().lower():
-    from .cython_modules.extractor_optimized import parse_message, parse_type_3_message
+    from .cython_modules.extractor_compatible import parse_message, parse_type_3_message
 else:
     system = platform.system()
     try:
