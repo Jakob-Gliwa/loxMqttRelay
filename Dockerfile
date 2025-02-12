@@ -1,40 +1,16 @@
-# First ARG declarations (available for FROM)
-ARG TARGET=unknown-linux-gnu
-
 # -------------------------------------
 # 1) Build-Stage
 # -------------------------------------
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim as builder
-# Redeclare the ARGs needed in this stage
-ARG TARGET
-
 
 # System-Tools für Build installieren
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc python3-dev curl build-essential \
-    && if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
-            apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross clang && \
-            ln -sf /usr/bin/aarch64-linux-gnu-clang /usr/bin/cc; \
-        fi
+    gcc python3-dev curl build-essential rustup
 
 # Install Rust toolchain
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal \
-&& echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
-
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-# Fügen Sie das gewünschte Rust-Ziel hinzu
-RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
-        rustup target add aarch64-unknown-linux-gnu; \
-    fi
-
-    # Konfiguriere Cargo, um den ARM64 Linker zu verwenden
-RUN if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then \
-mkdir -p ~/.cargo && \
-echo "[target.aarch64-unknown-linux-gnu]" > ~/.cargo/config.toml && \
-echo "linker = \"aarch64-linux-gnu-clang\"" >> ~/.cargo/config.toml && \
-echo "ar = \"aarch64-linux-gnu-ar\"" >> ~/.cargo/config.toml; \
-fi
+#RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal \
+#&& echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
+#ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /app
 COPY . .

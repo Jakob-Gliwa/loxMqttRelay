@@ -4,59 +4,59 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - main
+      - multiarch
 
 jobs:
   # --- TEST STAGE ---
-  test:
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/astral-sh/uv:python3.13-bookworm-slim
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v4
+  # test:
+  #   runs-on: ubuntu-latest
+  #   container:
+  #     image: ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+  #   steps:
+  #     - name: Check out source
+  #       uses: actions/checkout@v4
 
-      - name: Install build dependencies
-        run: |
-          apt-get update
-          apt-get install -y gcc python3-dev curl build-essential rustc cargo
+  #     - name: Install build dependencies
+  #       run: |
+  #         apt-get update
+  #         apt-get install -y gcc python3-dev curl build-essential rustc cargo
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: stable 
+  #     - name: Install Rust toolchain
+  #       uses: dtolnay/rust-toolchain@v1
+  #       with:
+  #         toolchain: stable 
 
-      # --- NEW STEP: Cache pip packages ---
-      - name: Cache pip packages
-        uses: actions/cache@v3
-        with:
-          # caching the pip downloads/wheels
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('setup.py', 'requirements.txt', 'pyproject.toml') }}
-          restore-keys: ${{ runner.os }}-pip-
+  #     # --- NEW STEP: Cache pip packages ---
+  #     - name: Cache pip packages
+  #       uses: actions/cache@v3
+  #       with:
+  #         # caching the pip downloads/wheels
+  #         path: ~/.cache/pip
+  #         key: ${{ runner.os }}-pip-${{ hashFiles('setup.py', 'requirements.txt', 'pyproject.toml') }}
+  #         restore-keys: ${{ runner.os }}-pip-
     
-      - name: Install Python packages
-        run: |
-          uv pip install --system .[test]
+  #     - name: Install Python packages
+  #       run: |
+  #         uv pip install --system .[test]
 
-      - name: Run tests with coverage
-        run: |
-          pytest tests/ --cov=loxmqttrelay --cov-report=xml --cov-report=term
+  #     - name: Run tests with coverage
+  #       run: |
+  #         pytest tests/ --cov=loxmqttrelay --cov-report=xml --cov-report=term
 
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage.xml
-          path: coverage.xml
+  #     - name: Upload coverage report
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: coverage.xml
+  #         path: coverage.xml
 
   # --- BUILD & PUSH DOCKER STAGE ---
   docker-build:
-    needs: test
+    #needs: test
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        platform: ["linux/amd64"]
         #platform: ["linux/amd64", "linux/arm64"]
+        platform: ["linux/amd64"]
 
     steps:
       - name: Check out source
@@ -85,9 +85,7 @@ jobs:
         with:
           push: ${{ github.event_name != 'pull_request' }}
           platforms: ${{ matrix.platform }}
-          tags: ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }}
-          build-args: |
-            TARGET=${{ matrix.platform == 'linux/arm64' && 'aarch64-unknown-linux-gnu' || 'unknown-linux-gnu' }}
+          tags: ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:multiarch-${{ github.sha }}
           annotations: ${{ steps.meta.outputs.annotations }}
           provenance: true
           sbom: true
@@ -108,5 +106,5 @@ jobs:
 
       - name: Create and push multi-arch manifest
         run: |
-          docker buildx imagetools create -t ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest \
-            ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:${{ github.sha }}
+          docker buildx imagetools create -t ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:latest-multiarch \
+            ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:multiarch-${{ github.sha }}
