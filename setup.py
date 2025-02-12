@@ -66,23 +66,31 @@ else:
 # Cython Setup
 ################################################################################
 
-# Definiere zwei Build-Varianten: optimized & compatible
-build_variants = {
-    "optimized": ["-O3", "-march=native", "-ffast-math"],
-    "compatible": ["-O2", "-mtune=generic"]
-}
+# Define build variants based on architecture
+if arch in ("x86_64", "amd64"):
+    logger.info("Building Cython extensions for AMD64 architecture - optimized & compatible versions")
+    build_variants = {
+        "optimized": ["-O3", "-march=native", "-ffast-math"],
+        "compatible": ["-O2", "-mtune=generic"]
+    }
+else:
+    logger.info("Building Cython extensions for non-AMD64 architecture - compatible version only")
+    build_variants = {
+        "compatible": ["-O2", "-mtune=generic"]
+    }
 
 cython_extensions = []
 for variant, compile_args in build_variants.items():
-    ext_name = f"loxwebsocket.cython_modules.extractor_{variant}"  # Updated package path
+    ext_name = f"loxwebsocket.cython_modules.extractor_{variant}"
     pyx_original = "src/loxwebsocket/cython_modules/extractor.pyx"
-    pyx_variant = f"src/loxwebsocket/cython_modules/extractor_{variant}.pyx" # Dumb hack to force a separate build because by god i cant get it to not cache the previous compilation...
-    # Copy the original .pyx to a variant-specific file to force a separate build.
+    pyx_variant = f"src/loxwebsocket/cython_modules/extractor_{variant}.pyx"
+    
+    # Copy the original .pyx to a variant-specific file
     shutil.copyfile(pyx_original, pyx_variant)
 
     ext = Extension(
         ext_name,
-        sources=[pyx_variant],  # Use the variant-specific source file
+        sources=[pyx_variant],
         extra_compile_args=compile_args,
         extra_link_args=compile_args,
         define_macros=[("CYTHON_BUILD_VARIANT", f'"{variant}"')]
