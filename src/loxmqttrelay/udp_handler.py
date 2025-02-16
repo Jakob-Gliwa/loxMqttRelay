@@ -2,6 +2,7 @@ import asyncio
 import logging
 from typing import Tuple, Callable, Coroutine, Any, Optional
 from loxmqttrelay.config import global_config
+from loxmqttrelay.mqtt_client import mqtt_client
 logger = logging.getLogger(__name__)
 
 def parse_udp_message(udpmsg: str) -> Optional[Tuple[str, str, str]]:
@@ -33,8 +34,7 @@ def parse_udp_message(udpmsg: str) -> Optional[Tuple[str, str, str]]:
         logger.error(f"Invalid UDP message format: {udpmsg}")
         return None
 
-async def handle_udp_message(udpmsg: str, addr,
-                           mqtt_publish: Callable[[str,str,bool], Coroutine[Any, Any, None]]) -> None:
+async def handle_udp_message(udpmsg: str, addr) -> None:
     """
     Handle an incoming UDP message:
       - parse
@@ -52,30 +52,27 @@ async def handle_udp_message(udpmsg: str, addr,
     command, topic, message = result
     if command == 'publish':
         logger.debug(f"Publishing: '{topic}'='{message}'")
-        await mqtt_publish(topic, message, False)
+        await mqtt_client.publish(topic, message, False)
     elif command == 'retain':
         logger.debug(f"Publish (retain): '{topic}'='{message}'")
-        await mqtt_publish(topic, message, True)
+        await mqtt_client.publish(topic, message, True)
     else:
         logger.error("Unknown command in UDP handler")
 
 
 class UDPProtocol(asyncio.DatagramProtocol):
-    def __init__(self, relay):
-        self.relay = relay
 
     def datagram_received(self, data, addr):
         msg = data.decode('utf-8', errors='ignore')
         asyncio.create_task(
-            handle_udp_message(msg, addr, self.relay.mqtt_publish)
+            handle_udp_message(msg, addr)
         )
-        self.relay.udp_data_received = 1
 
-async def start_udp_server(self):
+async def start_udp_server():
     udpport = global_config.udp.udp_in_port
     loop = asyncio.get_running_loop()
     transport, protocol = await loop.create_datagram_endpoint(
-        lambda: UDPProtocol(self),
+        lambda: UDPProtocol(),
         local_addr=("0.0.0.0", udpport)
     )
     logger.info(f"UDP-IN listening on port {udpport}")

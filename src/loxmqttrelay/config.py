@@ -84,7 +84,17 @@ class AppConfig:
         section_class = globals().get(section.capitalize() + "Config")
         if section_class is None:
             raise ConfigError(f"Invalid configuration section: {section}")
-        return section_class(**config_dict.get(section, {}))
+        data = config_dict.get(section, {})
+        valid_fields = get_type_hints(section_class)
+        valid_data = {}
+        for key, value in data.items():
+            if key in valid_fields:
+                valid_data[key] = value
+            else:
+                logger.warning(
+                    f"Unknown field '{key}' in config section '{section}' will be ignored."
+                )
+        return section_class(**valid_data)
 
 class ConfigError(Exception):
     pass

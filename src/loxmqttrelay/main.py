@@ -47,7 +47,7 @@ class MQTTRelay:
     async def main(self):
         await self.connect_and_subscribe_mqtt()
         await self.handle_miniserver_sync()
-        asyncio.create_task(start_udp_server(self))
+        asyncio.create_task(start_udp_server())
         await self.start_ui()
 
         logger.info("MQTT Relay started")
