@@ -397,10 +397,10 @@ class LoxWs:
                 except Exception as inner_exception:
                     _LOGGER.error(f"Error processing message: {inner_exception}")
                     continue
-            self.handle_connection_interrupt(msg_type=msg.type)
+            await self.handle_connection_interrupt(msg_type=msg.type)
 
         except Exception as e:
-            self.handle_connection_interrupt(exception=e)
+            await self.handle_connection_interrupt(exception=e)
 
     async def _async_process_message(self, message: bytes) -> None:
         """
