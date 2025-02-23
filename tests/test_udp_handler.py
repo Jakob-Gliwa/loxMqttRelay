@@ -62,7 +62,7 @@ from loxmqttrelay.udp_handler import parse_udp_message, handle_udp_message, UDPP
     
 
     # Test case: Topic with spaces and JSON payload when no explicit command provided
-    ("a/b/c/d/set {\"action\":\"toggle\"}", ("publish", "a/b/v/d/set", "{\"action\":\"toggle\"}")),
+    ("a/b/c/d/set {\"action\":\"toggle\"}", ("publish", "a/b/c/d/set", "{\"action\":\"toggle\"}")),
     ("a/b c d/set {\"action\":\"toggle\"}", ("publish", "a/b c d/set", "{\"action\":\"toggle\"}")),
 
     # Test case: publish command with topic containing spaces and JSON payload with spaces
