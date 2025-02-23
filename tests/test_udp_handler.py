@@ -19,6 +19,8 @@ from loxmqttrelay.udp_handler import parse_udp_message, handle_udp_message, UDPP
     ("Retain topic5 message5", ("retain", "topic5", "message5")),
     
     # Test messages with multiple spaces
+    ("publish a/b c/d message with spaces", ("publish", "a/b c/d", "message with spaces")),
+    ("a/b c/d message with spaces", ("publish", "a/b c/d", "message with spaces")),
     ("publish topic6 message with spaces", ("publish", "topic6", "message with spaces")),
     ("topic7 message with spaces", ("publish", "topic7", "message with spaces")),
     
@@ -29,10 +31,46 @@ from loxmqttrelay.udp_handler import parse_udp_message, handle_udp_message, UDPP
     # Test messages with special characters
     ("publish topic/with/slashes message/with/slashes", 
      ("publish", "topic/with/slashes", "message/with/slashes")),
+    ("publish test/topic/path message/with/slashes",
+     ("publish", "test/topic/path", "message/with/slashes")),
+    ("test/topic/path message/with/slashes",
+     ("publish", "test/topic/path", "message/with/slashes")),
     
     # Test messages with leading/trailing spaces
+    ("  publish  a/path with/spaces  message8  ", ("publish", "a/path with/spaces", "message8")),
+    ("  a/path with/spaces  message9  ", ("publish", "a/path with/spaces", "message9")),
     ("  publish  topic8  message8  ", ("publish", "topic8", "message8")),
     ("  topic9  message9  ", ("publish", "topic9", "message9")),
+
+    # Test case: Topic with spaces in the topic (bug fix case)
+    ("zigbee2mqtt/Rollo Gallerie links/set 100", ("publish", "zigbee2mqtt/Rollo Gallerie links/set", "100")),
+
+    # Test case: publish command with JSON payload without inner spaces
+    ("publish test/complex topic {\"key\":\"value\"}", ("publish", "test/complex topic", "{\"key\":\"value\"}")),
+    ("publish test/topic {\"key\":\"value\"}", ("publish", "test/topic", "{\"key\":\"value\"}")),
+
+    # Test case: publish command with JSON payload that contains spaces (note: will split at the last space)
+    ("publish test/complex/topic {\"key\": \"value\"}", ("publish", "test/complex/topic", "{\"key\": \"value\"}")),
+    ("publish test/topic {\"key\": \"value with spaces\"}", ("publish", "test/topic", "{\"key\": \"value with spaces\"}")),
+    ("publish test/complex topic {\"key\": \"value\"}", ("publish", "test/complex topic", "{\"key\": \"value\"}")),
+    ("publish test/topic {\"key\": \"value\"}", ("publish", "test/topic", "{\"key\": \"value\"}")),
+
+    # Test case: retain command with JSON payload without inner spaces
+    ("retain test/complex/topic {\"number\":42}", ("retain", "test/complex/topic", "{\"number\":42}")),
+    ("retain test/complex topic {\"number\":42}", ("retain", "test/complex topic", "{\"number\":42}")),
+    ("retain test/topic {\"number\":42}", ("retain", "test/topic", "{\"number\":42}")),
+    
+
+    # Test case: Topic with spaces and JSON payload when no explicit command provided
+    ("a/b/c/d/set {\"action\":\"toggle\"}", ("publish", "a/b/v/d/set", "{\"action\":\"toggle\"}")),
+    ("a/b c d/set {\"action\":\"toggle\"}", ("publish", "a/b c d/set", "{\"action\":\"toggle\"}")),
+
+    # Test case: publish command with topic containing spaces and JSON payload with spaces
+    ("publish Home/Automation/Light Control {\"mode\": \"auto on\"}", ("publish", "Home/Automation/Light Control", "{\"mode\": \"auto on\"}")),
+
+    # Test case: Simple topic with spaces followed by two-word message
+    ("a/b c/d e f", ("publish", "a/b c/d", "e f")),
+    ("publish Home/Automation/Light/Control {\"mode\": \"auto on\"}", ("publish", "Home/Automation/Light/Control", "{\"mode\": \"auto on\"}")),
 ])
 def test_parse_udp_message(udp_message, expected):
     result = parse_udp_message(udp_message)

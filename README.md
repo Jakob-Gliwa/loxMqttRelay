@@ -538,6 +538,77 @@ retain home/temperature 22.5
 home/kitchen/light off    # Will be published without retain
 ```
 
+## UDP Message Format Details
+
+The MQTT Relay accepts simple text messages via UDP that tell it what to publish to MQTT. Here's how to format your messages:
+
+### Basic Usage
+
+1. **Simple Messages** (automatically published):
+```
+kitchen/light on
+bedroom/fan off
+living/temperature 22.5
+```
+
+2. **Messages with Retain Flag** (stays on MQTT broker after disconnect):
+```
+retain kitchen/light on
+retain living/temperature 22.5
+```
+
+3. **Explicit Publish** (same as simple messages):
+```
+publish kitchen/light on
+```
+
+### Working with Complex Topics
+
+1. **Topics with Spaces**:
+Although it's a discouraged MQTT practice, you can use spaces in your topics naturally:
+```
+zigbee2mqtt/Living Room Light/set on
+zigbee2mqtt/Kitchen Counter/brightness 80
+```
+
+Spaces however are only allowed between tokens, not at end of a topic.
+
+```
+zigbee2mqtt/Living Room Light/set status on -> topic: zigbee2mqtt/Living Room Light/set, payload: status on
+zigbee2mqtt/Kitchen Counter/brightness 80 -> topic: zigbee2mqtt/Kitchen Counter/brightness, payload: 80
+```
+
+2. **JSON Messages**:
+For devices that need JSON data, just include the JSON part at the end:
+```
+home/lights {"state": "on", "brightness": 100}
+zigbee2mqtt/Living Room Light/set {"state": "ON", "brightness": 255}
+```
+
+The JSON payload will be sent as-is with no validation or quoting of the JSON string.
+Everything before the first `{` is considered the topic.
+
+### Common Examples
+
+Here are some typical use cases:
+
+```
+# Basic light control
+kitchen/light on
+living/light off
+
+# Setting values
+bedroom/temperature 21.5
+kitchen/humidity 45
+
+# Device control with JSON
+home/thermostat {"mode": "heat", "target": 22}
+
+# Retained status messages
+retain home/system/status online
+retain home/sensor/battery 80
+```
+
 ## Credits and Inspiration
 
 This project was inspired by and builds upon the work of several other projects:
