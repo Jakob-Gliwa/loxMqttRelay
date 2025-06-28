@@ -11,7 +11,7 @@ import re
 
 logger = logging.getLogger(__name__)
 
-def load_miniserver_config(ip: str, username: str, password: str) -> str:
+def load_miniserver_config(ip: str, username: str, password: str) -> bytes:
     """
     Load the most recent version of the currently active configuration file
     from the Miniserver via FTP.
@@ -111,17 +111,19 @@ def load_miniserver_config(ip: str, username: str, password: str) -> str:
             if len(resultStr) != uncompressedSize:
                 raise Exception(f'Uncompressed filesize mismatch: {len(resultStr)} != {uncompressedSize}')
                 
-            return resultStr.decode('utf-8')
+            # Return raw bytes - let XML parser handle encoding detection
+            return bytes(resultStr)
             
     except Exception as e:
         logger.error(f"Error loading miniserver configuration: {str(e)}")
         raise
 
-def extract_inputs(config_xml: str) -> List[str]:
+def extract_inputs(config_xml: bytes) -> List[str]:
     """
     Extract all possible inputs from the Loxone configuration XML.
     """
     try:
+        # ET.fromstring can accept bytes and will auto-detect encoding
         root = ET.fromstring(config_xml)
         titles = []
 
