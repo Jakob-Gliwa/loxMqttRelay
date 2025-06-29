@@ -1,6 +1,5 @@
 import pytest
 from unittest.mock import Mock, patch, mock_open, AsyncMock, MagicMock
-import xml.etree.ElementTree as ET
 from io import BytesIO
 import struct
 import zlib
@@ -24,7 +23,7 @@ def mock_ftp():
 
 @pytest.fixture
 def sample_config_xml():
-    return '''<?xml version="1.0" encoding="utf-8"?>
+    return b'''<?xml version="1.0" encoding="utf-8"?>
     <C>
         <C Type="VirtualInCaption">
             <C Title="Input1"/>
@@ -60,7 +59,7 @@ def test_extract_inputs(sample_config_xml):
     assert set(inputs) == {"Input1", "Input2", "Input3"}
 
 def test_extract_inputs_empty():
-    empty_xml = '''<?xml version="1.0" encoding="utf-8"?>
+    empty_xml = b'''<?xml version="1.0" encoding="utf-8"?>
     <C>
         <C Type="Other">
             <C Title="NotAnInput"/>
@@ -71,7 +70,7 @@ def test_extract_inputs_empty():
 
 def test_extract_inputs_invalid_xml():
     with pytest.raises(Exception):
-        extract_inputs("Invalid XML")
+        extract_inputs(b"Invalid XML")
 
 def test_load_miniserver_config_no_files(mock_ftp):
     mock_ftp.nlst.return_value = []
@@ -135,7 +134,7 @@ def test_sync_miniserver_whitelist_load_error(mock_load):
         sync_miniserver_whitelist()
 
 def test_extract_inputs_complex_xml():
-    complex_xml = '''<?xml version="1.0" encoding="utf-8"?>
+    complex_xml = b'''<?xml version="1.0" encoding="utf-8"?>
     <C>
         <C Type="VirtualInCaption">
             <C Title="Input1"/>
@@ -153,7 +152,7 @@ def test_extract_inputs_complex_xml():
     assert set(inputs) == {"Input1", "Input2", "Input3", "Input4", "Input5"}
 
 def test_extract_inputs_with_special_characters():
-    xml_with_special_chars = '''<?xml version="1.0" encoding="utf-8"?>
+    xml_with_special_chars = b'''<?xml version="1.0" encoding="utf-8"?>
     <C>
         <C Type="VirtualInCaption">
             <C Title="Input/With/Slashes"/>
@@ -167,3 +166,23 @@ def test_extract_inputs_with_special_characters():
         "Input With Spaces",
         "Input_With_Underscores"
     }
+
+def test_extract_inputs_malformed_xml_recovery():
+    # Test XML with duplicate attributes (common Loxone v16 issue)
+    malformed_xml = b'''<?xml version="1.0" encoding="utf-8"?>
+    <C>
+        <C Type="VirtualInCaption" Type="Duplicate">
+            <C Title="Input1" Title="DuplicateTitle"/>
+            <C Title="Input2"/>
+        </C>
+    </C>'''
+    # Should still work with lxml recovery mode
+    inputs = extract_inputs(malformed_xml)
+    assert "Input1" in inputs
+    assert "Input2" in inputs
+
+def test_extract_inputs_with_bom():
+    # Test XML with UTF-8 BOM
+    xml_with_bom = b'\xef\xbb\xbf<?xml version="1.0" encoding="utf-8"?>\n<C><C Type="VirtualInCaption"><C Title="InputWithBOM"/></C></C>'
+    inputs = extract_inputs(xml_with_bom)
+    assert inputs == ["InputWithBOM"]
