@@ -16,7 +16,8 @@ dependencies = [
     "uvloop>=0.21.0",
     "gmqtt>=0.7.0",
     "construct>=2.10.70",
-    "tomlkit>=0.13.0"
+    "tomlkit>=0.13.0",
+    "lxml>=6.0.0"
 ]
 
 [project.optional-dependencies]

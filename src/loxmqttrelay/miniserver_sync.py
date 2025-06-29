@@ -1,5 +1,5 @@
 import logging
-import xml.etree.ElementTree as ET
+from lxml import etree
 from typing import List
 import ftplib
 import struct
@@ -122,9 +122,21 @@ def extract_inputs(config_xml: bytes) -> List[str]:
     """
     Extract all possible inputs from the Loxone configuration XML.
     """
+    # Try normal XML parsing first
     try:
-        # ET.fromstring can accept bytes and will auto-detect encoding
-        root = ET.fromstring(config_xml)
+        root = etree.fromstring(config_xml)
+        logger.info("XML parsed successfully with standard parser")
+    except etree.XMLSyntaxError as e:
+        logger.warning(f"Standard XML parsing failed: {str(e)}")
+        logger.warning("Attempting XML parsing with recovery mode for malformed XML")
+        
+        # Use lxml recovery mode for malformed XML (handles duplicate attributes, encoding issues, etc.)
+        parser = etree.XMLParser(recover=True)
+        root = etree.fromstring(config_xml, parser)
+        logger.warning("Successfully parsed malformed XML using lxml recovery mode")
+    
+    # Extract titles from parsed XML
+    try:
         titles = []
 
         def find_titles_under_virtual_in_caption(element):
@@ -137,6 +149,7 @@ def extract_inputs(config_xml: bytes) -> List[str]:
                 find_titles_under_virtual_in_caption(child)
 
         find_titles_under_virtual_in_caption(root)
+        logger.info(f"Extracted {len(titles)} inputs from configuration")
         return titles
 
     except Exception as e:

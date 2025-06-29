@@ -119,6 +119,7 @@ graph LR
 - Automatic boolean value conversion
 - Live configuration updates via MQTT
 - Automatic synchronization of whitelisted topics using the Miniserver configuration
+- Robust XML parsing with lxml recovery mode for malformed Loxone v16 configurations
 - Topic monitoring and processing feedback
 - Web-based configuration UI
 - UI & headless mode operation
