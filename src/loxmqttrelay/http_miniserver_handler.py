@@ -20,7 +20,14 @@ class HttpMiniserverHandler:
     mock_ms_ip=global_config.debug.mock_ip
     connection_semaphore = asyncio.Semaphore(global_config.miniserver.miniserver_max_parallel_connections)  # Default to 5 parallel connections
     target_ip = mock_ms_ip if (mock_ms_ip and enable_mock_miniserver) else ms_ip
-    ws_base_url = f"{"https" if ms_port == 443 else "http"}://{target_ip}"
+    # Construct WebSocket URL with proper port handling
+    protocol = "https" if ms_port == 443 else "http"
+    if ms_port not in [80, 443]:
+        ws_base_url = f"{protocol}://{target_ip}:{ms_port}"
+        http_base_url = f"http://{target_ip}:{ms_port}"
+    else:
+        ws_base_url = f"{protocol}://{target_ip}"
+        http_base_url = f"http://{target_ip}"
     auth = aiohttp.BasicAuth(ms_user, ms_pass) if ms_user and ms_pass else None
     # Increase the timeout to 10 seconds
     timeout = aiohttp.ClientTimeout(total=10)
@@ -74,7 +81,8 @@ class HttpMiniserverHandler:
         async with aiohttp.ClientSession(auth=self.auth, timeout=self.timeout) as session:
             # Ensure value is converted to string
             safe_value = str(value)
-            url = f"http://{self.target_ip}/dev/sps/io/{normalized_topic}/{safe_value}"
+            # Use pre-built HTTP base URL
+            url = f"{self.http_base_url}/dev/sps/io/{normalized_topic}/{safe_value}"
             logger.debug(f"Sending to {url}")
             
             try:
