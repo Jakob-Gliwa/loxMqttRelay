@@ -104,8 +104,8 @@ fn flatten_json(obj: &Value, prefix: &str, acc: &mut Vec<(String, String)>) {
 
 macro_rules! pyget {
     ($obj:expr, $py:expr, $($attr:expr),+) => {{
-        let mut obj = $obj.to_object($py);
-        $( obj = obj.getattr($py, intern!($py, $attr))?; )*
+        let mut obj = $obj.bind($py).as_borrowed().to_owned();
+        $( obj = obj.getattr(intern!($py, $attr))?; )*
         obj
     }};
 }
@@ -173,27 +173,27 @@ impl MiniserverDataProcessor {
     fn new(py: Python, topic_ns: PyObject, global_config_py: PyObject, relay_main_obj: PyObject, mqtt_client_obj: PyObject, http_handler_obj: PyObject, orjson_obj: PyObject) -> PyResult<Self> {
         debug!(
             "Initializing MiniserverDataProcessor with cache_size={}",
-            pyget!(global_config_py, py, "general", "cache_size").extract::<i32>(py)?
+            pyget!(global_config_py, py, "general", "cache_size").extract::<i32>()?
         );
 
-        let compiled = compile_filters(pyget!(global_config_py, py, "topics", "subscription_filters").extract(py)?);
-        let cache_size = if pyget!(global_config_py, py, "general", "cache_size").extract::<i32>(py)? == 0 {
+        let compiled = compile_filters(pyget!(global_config_py, py, "topics", "subscription_filters").extract()?);
+        let cache_size = if pyget!(global_config_py, py, "general", "cache_size").extract::<i32>()? == 0 {
             64
         } else {
-            pyget!(global_config_py, py, "general", "cache_size").extract(py)?
+            pyget!(global_config_py, py, "general", "cache_size").extract()? 
         };
         let lru_size = NonZeroUsize::new(cache_size).unwrap();
-        let base_topic: String = pyget!(global_config_py, py, "general", "base_topic").extract(py)?;
-        let start_ui_topic: String = topic_ns.getattr(py, "START_UI")?.extract(py)?;
-        let stop_ui_topic: String = topic_ns.getattr(py, "STOP_UI")?.extract(py)?;
-        let miniserver_startup_topic: String = topic_ns.getattr(py, "MINISERVER_STARTUP_EVENT")?.extract(py)?;
-        let config_get_topic: String = topic_ns.getattr(py, "CONFIG_GET")?.extract(py)?;
-        let config_response_topic: String = topic_ns.getattr(py, "CONFIG_RESPONSE")?.extract(py)?;
-        let config_set_topic: String = topic_ns.getattr(py, "CONFIG_SET")?.extract(py)?;
-        let config_add_topic: String = topic_ns.getattr(py, "CONFIG_ADD")?.extract(py)?;
-        let config_remove_topic: String = topic_ns.getattr(py, "CONFIG_REMOVE")?.extract(py)?;
-        let config_update_topic: String = topic_ns.getattr(py, "CONFIG_UPDATE")?.extract(py)?;
-        let config_restart_topic: String = topic_ns.getattr(py, "CONFIG_RESTART")?.extract(py)?;
+        let base_topic: String = pyget!(global_config_py, py, "general", "base_topic").extract()?;
+        let start_ui_topic: String = topic_ns.bind(py).getattr(intern!(py, "START_UI"))?.extract()?;
+        let stop_ui_topic: String = topic_ns.bind(py).getattr(intern!(py, "STOP_UI"))?.extract()?;
+        let miniserver_startup_topic: String = topic_ns.bind(py).getattr(intern!(py, "MINISERVER_STARTUP_EVENT"))?.extract()?;
+        let config_get_topic: String = topic_ns.bind(py).getattr(intern!(py, "CONFIG_GET"))?.extract()?;
+        let config_response_topic: String = topic_ns.bind(py).getattr(intern!(py, "CONFIG_RESPONSE"))?.extract()?;
+        let config_set_topic: String = topic_ns.bind(py).getattr(intern!(py, "CONFIG_SET"))?.extract()?;
+        let config_add_topic: String = topic_ns.bind(py).getattr(intern!(py, "CONFIG_ADD"))?.extract()?;
+        let config_remove_topic: String = topic_ns.bind(py).getattr(intern!(py, "CONFIG_REMOVE"))?.extract()?;
+        let config_update_topic: String = topic_ns.bind(py).getattr(intern!(py, "CONFIG_UPDATE"))?.extract()?;
+        let config_restart_topic: String = topic_ns.bind(py).getattr(intern!(py, "CONFIG_RESTART"))?.extract()?;
 
         let topics = MqttTopics {
             start_ui_topic,
@@ -214,7 +214,7 @@ impl MiniserverDataProcessor {
             compiled_subscription_filter: compiled,
             do_not_forward_patterns: None,
             topic_whitelist: pyget!(global_config_py, py, "topics", "topic_whitelist")
-                .extract::<Vec<String>>(py)?
+                .extract::<Vec<String>>()?
                 .into_iter()
                 .collect(),
             convert_bool_cache: Mutex::new(LruCache::new(lru_size)),
@@ -346,7 +346,7 @@ impl MiniserverDataProcessor {
             }
         }
 
-        let expand = pyget!(self.global_config, py, "processing", "expand_json").extract(py)?;
+        let expand = pyget!(self.global_config, py, "processing", "expand_json").extract()?;
         debug!("Transforming data with expand_json={}", expand);
 
         let flattened: Vec<(String, String)> = if expand {
@@ -401,9 +401,11 @@ impl MiniserverDataProcessor {
             debug!("Topic '{}' passed all filters, sending to miniserver", t);
             let converted = self._convert_boolean(&v)?;
             if let Some(val) = converted {
-                let coro = self.http_handler_obj.call_method(py, "send_to_miniserver", (t, cur_t_normalized, val), None)?;
-                let coro_bound = coro.bind(py);
-                let fut = into_future(coro_bound.clone())?;
+                let coro = self
+                    .http_handler_obj
+                    .bind(py)
+                    .call_method1("send_to_miniserver", (t, cur_t_normalized, val))?;
+                let fut = into_future(coro.clone())?;
                 pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
                     if let Err(e) = fut.await {
                         error!("Error in send_to_miniserver async call: {:?}", e);
@@ -448,15 +450,14 @@ impl MiniserverDataProcessor {
         if topic.starts_with(&self.base_topic) {
         // Match the topic to whichever action it needs
             if topic == topics.miniserver_startup_topic {
-                if pyget!(self.global_config, py, "miniserver", "sync_with_miniserver").extract::<bool>(py)? {
+                if pyget!(self.global_config, py, "miniserver", "sync_with_miniserver").extract::<bool>()? {
                     info!("Miniserver startup detected, resyncing whitelist (from Rust)");
-                    let _ = self.relay_main_obj.call_method0(py, "schedule_miniserver_sync")?;
+                    let _ = self.relay_main_obj.bind(py).call_method0("schedule_miniserver_sync")?;
                 }
             }
             else if topic == topics.start_ui_topic {
-                let coro = self.relay_main_obj.call_method0(py, "start_ui")?;
-                let coro_bound = coro.bind(py);
-                let fut = into_future(coro_bound.clone())?;
+                let coro = self.relay_main_obj.bind(py).call_method0("start_ui")?;
+                let fut = into_future(coro.clone())?;
                 pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
                     if let Err(e) = fut.await {
                         error!("Error in start_ui async call: {:?}", e);
@@ -464,9 +465,8 @@ impl MiniserverDataProcessor {
                 });
             }
             else if topic == topics.stop_ui_topic {
-                let coro = self.relay_main_obj.call_method0(py, "stop_ui")?;
-                let coro_bound = coro.bind(py);
-                let fut = into_future(coro_bound.clone())?;
+                let coro = self.relay_main_obj.bind(py).call_method0("stop_ui")?;
+                let fut = into_future(coro.clone())?;
                 pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
                     if let Err(e) = fut.await {
                         error!("Error in stop_ui async call: {:?}", e);
@@ -476,13 +476,18 @@ impl MiniserverDataProcessor {
        
             else if topic == topics.config_get_topic {
                 // global_config.get_safe_config -> orjson.dumps -> publish
-                let global_config_py = self.relay_main_obj.getattr(py, "miniserver_data_processor")?
-                    .getattr(py, "global_config")?;
-                let safe_cfg = global_config_py.call_method0(py, "get_safe_config")?;
-                let serialized = self.orjson_obj.call_method1(py, "dumps", (safe_cfg,))?;
-                let coro = self.mqtt_client_obj.call_method(py, "publish", (topics.config_response_topic.clone(), serialized), None)?;
-                let coro_bound = coro.bind(py);
-                let fut = into_future(coro_bound.clone())?;
+                let global_config_py = self
+                    .relay_main_obj
+                    .bind(py)
+                    .getattr(intern!(py, "miniserver_data_processor"))?
+                    .getattr(intern!(py, "global_config"))?;
+                let safe_cfg = global_config_py.call_method0("get_safe_config")?;
+                let serialized = self.orjson_obj.bind(py).call_method1("dumps", (safe_cfg,))?;
+                let coro = self
+                    .mqtt_client_obj
+                    .bind(py)
+                    .call_method1("publish", (topics.config_response_topic.clone(), serialized))?;
+                let fut = into_future(coro.clone())?;
                 pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
                     if let Err(e) = fut.await {
                         error!("Error publishing config response: {:?}", e);
@@ -497,17 +502,20 @@ impl MiniserverDataProcessor {
                 } else {
                     "remove"
                 };
-                let load_res = self.orjson_obj.call_method1(py, "loads", (message.as_str(),));
+                let load_res = self.orjson_obj.bind(py).call_method1("loads", (message.as_str(),));
                 match load_res {
                     Ok(py_obj) => {
-                        let global_config_py = self.relay_main_obj.getattr(py, "miniserver_data_processor")?
-                            .getattr(py, "global_config")?;
-                        let update_res = global_config_py.call_method(py, "update_fields", (py_obj, update_mode), None);
+                        let global_config_py = self
+                            .relay_main_obj
+                            .bind(py)
+                            .getattr(intern!(py, "miniserver_data_processor"))?
+                            .getattr(intern!(py, "global_config"))?;
+                        let update_res = global_config_py.call_method1("update_fields", (py_obj, update_mode));
                         if let Err(e) = update_res {
                             error!("Error updating configuration: {:?}", e);
                         } else {
                             info!("Configuration updated via MQTT. Restarting program (from Rust).");
-                            let _ = self.relay_main_obj.call_method0(py, "restart_relay_incl_ui");
+                            let _ = self.relay_main_obj.bind(py).call_method0("restart_relay_incl_ui");
                         }
                     },
                     Err(e) => {
@@ -517,7 +525,7 @@ impl MiniserverDataProcessor {
             }
             else if topic == topics.config_update_topic || topic == topics.config_restart_topic {
                 info!("Reloading configuration. Restarting program (from Rust).");
-                let _ = self.relay_main_obj.call_method0(py, "restart_relay_incl_ui");
+                let _ = self.relay_main_obj.bind(py).call_method0("restart_relay_incl_ui");
             }
         }
         else {
@@ -582,13 +590,13 @@ fn init_rust_logger() {
 }
 
 #[pymodule]
-fn _loxmqttrelay(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()>{
+fn _loxmqttrelay(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()>{
     // Initialize the Tokio runtime for pyo3-asyncio.
     pyo3::prepare_freethreaded_python();
     let mut builder = pyo3_async_runtimes::tokio::re_exports::runtime::Builder::new_multi_thread();
     builder.enable_all();
     pyo3_async_runtimes::tokio::init(builder);
     m.add_class::<MiniserverDataProcessor>()?;
-    m.add_function(wrap_pyfunction!(init_rust_logger, m.to_owned())?)?;
+    m.add_function(wrap_pyfunction!(init_rust_logger, m)?)?;
     Ok(())
 }
