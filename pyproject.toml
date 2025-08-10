@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools", "setuptools-rust", "Cython>=3.0.0"]
+requires = ["setuptools", "setuptools-rust"]
 build-backend = "setuptools.build_meta"
 
 
@@ -17,7 +17,8 @@ dependencies = [
     "gmqtt>=0.7.0",
     "construct>=2.10.70",
     "tomlkit>=0.13.0",
-    "lxml>=6.0.0"
+    "lxml>=6.0.0",
+    "loxwebsocket>=0.5.1"
 ]
 
 [project.optional-dependencies]
@@ -35,8 +36,7 @@ dev = [
     "setuptools-rust>=1.10.0"
 ]
 build = [
-    "setuptools>=75.0.0", 
-    "Cython>=3.0.0",
+    "setuptools>=75.0.0",
     "setuptools-rust>=1.10.0"
 ]
 
@@ -45,7 +45,7 @@ native-tls = true
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["loxmqttrelay", "loxwebsocket"]
+packages = ["loxmqttrelay"]
 
 [project.scripts]
 loxmqttrelay = "loxmqttrelay.main:main"

@@ -2,11 +2,6 @@ from setuptools import find_packages, setup
 from setuptools_rust import Binding, RustExtension
 import platform
 import logging
-from setuptools.extension import Extension
-from Cython.Build import cythonize
-import shutil
-import os
-from setuptools.command.build_ext import build_ext
 
 # Logging konfigurieren
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -63,75 +58,11 @@ else:
     )
 
 ################################################################################
-# Cython Setup
+# Combined Setup call (Rust extensions only)
 ################################################################################
-
-# Define build variants based on architecture
-if arch in ("x86_64", "amd64"):
-    logger.info("Building Cython extensions for AMD64 architecture - optimized & compatible versions")
-    build_variants = {
-        "optimized": ["-O3", "-march=native", "-ffast-math"],
-        "compatible": ["-O2", "-mtune=generic"]
-    }
-else:
-    logger.info("Building Cython extensions for non-AMD64 architecture - compatible version only")
-    build_variants = {
-        "compatible": ["-O2", "-mtune=generic"]
-    }
-
-cython_extensions = []
-for variant, compile_args in build_variants.items():
-    ext_name = f"loxwebsocket.cython_modules.extractor_{variant}"
-    pyx_original = "src/loxwebsocket/cython_modules/extractor.pyx"
-    pyx_variant = f"src/loxwebsocket/cython_modules/extractor_{variant}.pyx"
-    
-    # Copy the original .pyx to a variant-specific file
-    shutil.copyfile(pyx_original, pyx_variant)
-
-    ext = Extension(
-        ext_name,
-        sources=[pyx_variant],
-        extra_compile_args=compile_args,
-        extra_link_args=compile_args,
-        define_macros=[("CYTHON_BUILD_VARIANT", f'"{variant}"')]
-    )
-    cy_ext = cythonize(
-        ext,
-        force=True,
-        cache=False,
-        language_level="3",
-        compiler_directives={
-            'boundscheck': False,
-            'wraparound': False,
-            'cdivision': True,
-            'nonecheck': False,
-            'initializedcheck': False,
-            'embedsignature': False,
-        }
-    )
-    cython_extensions.extend(cy_ext)
-
-################################################################################
-# Combined Setup call for both Rust and Cython parts
-################################################################################
-
-class CleanUpBuildExt(build_ext):
-    def run(self):
-        # Run the standard build_ext command
-        super().run()
-        # Remove the variant-specific .pyx files after compilation
-        for variant in ("optimized", "compatible"):
-            variant_file = os.path.join("src", "loxwebsocket", "cython_modules", f"extractor_{variant}.pyx")
-            if os.path.exists(variant_file):
-                os.remove(variant_file)
-                print(f"Removed variant-specific file: {variant_file}")
-
-cmdclass = {"build_ext": CleanUpBuildExt}
 
 setup(
     **base_setup,
     rust_extensions=rust_extensions,
-    ext_modules=cython_extensions,
-    cmdclass=cmdclass,
     zip_safe=False,
 )
