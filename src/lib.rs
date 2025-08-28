@@ -1,5 +1,5 @@
 use pyo3::{prelude::*, types::PyFrozenSet};
-use regex::Regex;
+use regex::{Regex, RegexSet};
 use pyo3::intern;
 
 use std::collections::HashSet;
@@ -9,8 +9,24 @@ use std::sync::Mutex;
 use lru::LruCache;
 use std::num::NonZeroUsize;
 
-// For JSON flattening
-use serde_json::Value;
+// For JSON flattening (borrowed parsing)
+use serde::Deserialize;
+use serde_json::de::Deserializer as JsonDeserializer;
+use serde_json_borrow::Value as BorrowValue;
+#[inline]
+fn parse_borrow_value(input: &str) -> Option<BorrowValue> {
+    let mut deserializer = JsonDeserializer::from_str(input);
+    BorrowValue::deserialize(&mut deserializer).ok()
+}
+#[inline]
+fn format_f64(n: f64) -> String {
+    // Fast path similar to serde_json's number formatting
+    if n.fract() == 0.0 {
+        format!("{:.1}", n)
+    } else {
+        n.to_string()
+    }
+}
 
 // For logging
 use log::{debug, error, info};
@@ -33,67 +49,76 @@ struct MqttTopics {
     config_restart_topic: String,
 }
 
-/// Convert a known boolean string to "1"/"0", or None if unrecognized.
-fn convert_boolean_str(input: &str) -> Option<&'static str> {
-    match input {
-        "true" | "yes" | "on" | "enabled" | "enable" | "1"
-        | "check" | "checked" | "select" | "selected" => Some("1"),
-        "false" | "no" | "off" | "disabled" | "disable" | "0" => Some("0"),
-        _ => None,
-    }
-}
+// removed legacy boolean mapping helper (now using allocation-free checks)
 
 /// Flatten a serde_json `Value` into `key/value` pairs using '/' as separator.
-fn flatten_json(obj: &Value, prefix: &str, acc: &mut Vec<(String, String)>) {
+fn flatten_json(obj: &BorrowValue, prefix: &str, acc: &mut Vec<(String, String)>) {
     match obj {
-        Value::Object(map) => {
-            for (k, v) in map {
-                let new_key = if prefix.is_empty() {
-                    k.clone()
+        BorrowValue::Object(map) => {
+            acc.reserve(map.len());
+            for (k, v) in map.iter() {
+                let key_str = k.to_string();
+                let mut new_key = String::with_capacity(prefix.len() + 1 + key_str.len());
+                if prefix.is_empty() {
+                    new_key.push_str(&key_str);
                 } else {
-                    format!("{}/{}", prefix, k)
-                };
+                    new_key.push_str(prefix);
+                    new_key.push('/');
+                    new_key.push_str(&key_str);
+                }
                 match v {
-                    Value::Object(_) | Value::Array(_) => {
+                    BorrowValue::Object(_) | BorrowValue::Array(_) => {
                         flatten_json(v, &new_key, acc);
                     }
-                    Value::String(s) => {
-                        acc.push((new_key, s.clone()));
-                    }
-                    Value::Number(num) => {
-                        acc.push((new_key, num.to_string()));
-                    }
-                    Value::Bool(b) => {
-                        acc.push((new_key, b.to_string()));
-                    }
-                    Value::Null => {
-                        acc.push((new_key, "null".to_string()));
+                    _ => {
+                        // Strings without quotes, numbers/bools as text, null as "null"
+                        if let Some(s) = v.as_str() {
+                            acc.push((new_key, s.to_owned()));
+                        } else if let Some(b) = v.as_bool() {
+                            acc.push((new_key, b.to_string()));
+                        } else if let Some(n) = v.as_i64() {
+                            acc.push((new_key, n.to_string()));
+                        } else if let Some(n) = v.as_u64() {
+                            acc.push((new_key, n.to_string()));
+                        } else if let Some(n) = v.as_f64() {
+                            acc.push((new_key, crate::format_f64(n)));
+                        } else {
+                            acc.push((new_key, "null".to_string()));
+                        }
                     }
                 }
             }
         }
-        Value::Array(arr) => {
+        BorrowValue::Array(arr) => {
+            acc.reserve(arr.len());
             for (i, item) in arr.iter().enumerate() {
-                let new_key = if prefix.is_empty() {
-                    i.to_string()
+                let idx = i.to_string();
+                let mut new_key = String::with_capacity(prefix.len() + 1 + idx.len());
+                if prefix.is_empty() {
+                    new_key.push_str(&idx);
                 } else {
-                    format!("{}/{}", prefix, i)
-                };
+                    new_key.push_str(prefix);
+                    new_key.push('/');
+                    new_key.push_str(&idx);
+                }
                 match item {
-                    Value::Object(_) | Value::Array(_) => {
+                    BorrowValue::Object(_) | BorrowValue::Array(_) => {
                         flatten_json(item, &new_key, acc);
                     }
-                    Value::String(s) => {
-                        acc.push((new_key, s.clone()));
-                    }
-                    Value::Number(num) => {
-                        acc.push((new_key, num.to_string()));
-                    }
-                    Value::Bool(b) => {
-                        acc.push((new_key, b.to_string()));
-                    }
-                    Value::Null => {
-                        acc.push((new_key, "null".to_string()));
+                    _ => {
+                        if let Some(s) = item.as_str() {
+                            acc.push((new_key, s.to_owned()));
+                        } else if let Some(b) = item.as_bool() {
+                            acc.push((new_key, b.to_string()));
+                        } else if let Some(n) = item.as_i64() {
+                            acc.push((new_key, n.to_string()));
+                        } else if let Some(n) = item.as_u64() {
+                            acc.push((new_key, n.to_string()));
+                        } else if let Some(n) = item.as_f64() {
+                            acc.push((new_key, crate::format_f64(n)));
+                        } else {
+                            acc.push((new_key, "null".to_string()));
+                        }
                     }
                 }
             }
@@ -110,11 +135,11 @@ macro_rules! pyget {
     }};
 }
 
-/// Private helper function to compile regex filters
-fn compile_filters(filters: Vec<String>) -> Option<Regex> {
+/// Private helper function to compile regex filters into a RegexSet and return the valid patterns
+fn compile_filters(filters: Vec<String>) -> (Option<RegexSet>, Vec<String>) {
     if filters.is_empty() {
         debug!("No filters provided.");
-        return None;
+        return (None, Vec::new());
     }
     let mut valid_filters = Vec::new();
     for flt in filters {
@@ -130,14 +155,13 @@ fn compile_filters(filters: Vec<String>) -> Option<Regex> {
     }
     if valid_filters.is_empty() {
         debug!("No valid filters found.");
-        return None;
+        return (None, Vec::new());
     }
-    let pattern = format!("({})", valid_filters.join("|"));
-    match Regex::new(&pattern) {
-        Ok(compiled_regex) => Some(compiled_regex),
+    match RegexSet::new(&valid_filters) {
+        Ok(compiled_set) => (Some(compiled_set), valid_filters),
         Err(e) => {
-            error!("Failed to compile combined regex '{}': {}", pattern, e);
-            None
+            error!("Failed to compile regex set: {}", e);
+            (None, Vec::new())
         }
     }
 }
@@ -147,9 +171,11 @@ pub struct MiniserverDataProcessor {
     #[pyo3(get)]
     global_config: PyObject,
 
-    compiled_subscription_filter: Option<Regex>,
+    compiled_subscription_filter: Option<RegexSet>,
+    subscription_filters_raw: Vec<String>,
     
-    do_not_forward_patterns: Option<Regex>,
+    do_not_forward_patterns: Option<RegexSet>,
+    do_not_forward_patterns_raw: Vec<String>,
 
     #[pyo3(get)]
     topic_whitelist: HashSet<String>,
@@ -176,7 +202,8 @@ impl MiniserverDataProcessor {
             pyget!(global_config_py, py, "general", "cache_size").extract::<i32>()?
         );
 
-        let compiled = compile_filters(pyget!(global_config_py, py, "topics", "subscription_filters").extract()?);
+        let (compiled, subs_raw) =
+            compile_filters(pyget!(global_config_py, py, "topics", "subscription_filters").extract()?);
         let cache_size = if pyget!(global_config_py, py, "general", "cache_size").extract::<i32>()? == 0 {
             64
         } else {
@@ -212,7 +239,9 @@ impl MiniserverDataProcessor {
 
         let processor = MiniserverDataProcessor {
             compiled_subscription_filter: compiled,
+            subscription_filters_raw: subs_raw,
             do_not_forward_patterns: None,
+            do_not_forward_patterns_raw: Vec::new(),
             topic_whitelist: pyget!(global_config_py, py, "topics", "topic_whitelist")
                 .extract::<Vec<String>>()?
                 .into_iter()
@@ -236,7 +265,9 @@ impl MiniserverDataProcessor {
     #[pyo3(text_signature = "(self, filters)")]
     fn update_subscription_filters(&mut self, filters: Vec<String>) {
         debug!("Updating subscription filters: {:?}", filters);
-        self.compiled_subscription_filter = compile_filters(filters);
+        let (compiled, raw) = compile_filters(filters);
+        self.compiled_subscription_filter = compiled;
+        self.subscription_filters_raw = raw;
     }
 
     #[pyo3(text_signature = "(self, whitelist)")]
@@ -249,28 +280,64 @@ impl MiniserverDataProcessor {
     #[pyo3(text_signature = "(self, filters)")]
     fn update_do_not_forward(&mut self, filters: Vec<String>) {
         debug!("Updating do_not_forward filters: {:?}", filters);
-        self.do_not_forward_patterns = compile_filters(filters);
+        let (compiled, raw) = compile_filters(filters);
+        self.do_not_forward_patterns = compiled;
+        self.do_not_forward_patterns_raw = raw;
     }
 
     
 
     #[pyo3(text_signature = "(self, val)")]
     fn _convert_boolean(&self, val: &str) -> PyResult<Option<String>> {
+        // Fast path: check cache first
         let mut cache = self.convert_bool_cache.lock().unwrap();
         if let Some(cached) = cache.get(val) {
             return Ok(Some(cached.clone()));
         }
         if val.is_empty() {
-            return Ok(Some(val.to_string()));
+            return Ok(Some(String::new()));
         }
-        let normalized = val.trim().to_lowercase();
-        if let Some(mapped) = convert_boolean_str(&normalized) {
-            cache.put(val.to_string(), mapped.to_string());
-            Ok(Some(mapped.to_string()))
-        } else {
-            cache.put(val.to_string(), val.to_string());
-            Ok(Some(val.to_string()))
+
+        let trimmed = val.trim();
+
+        // Direct numeric matches
+        if trimmed == "1" {
+            cache.put(val.to_string(), "1".to_string());
+            return Ok(Some("1".to_string()));
         }
+        if trimmed == "0" {
+            cache.put(val.to_string(), "0".to_string());
+            return Ok(Some("0".to_string()));
+        }
+
+        // Case-insensitive textual matches without allocating
+        let is_true = trimmed.eq_ignore_ascii_case("true")
+            || trimmed.eq_ignore_ascii_case("yes")
+            || trimmed.eq_ignore_ascii_case("on")
+            || trimmed.eq_ignore_ascii_case("enabled")
+            || trimmed.eq_ignore_ascii_case("enable")
+            || trimmed.eq_ignore_ascii_case("check")
+            || trimmed.eq_ignore_ascii_case("checked")
+            || trimmed.eq_ignore_ascii_case("select")
+            || trimmed.eq_ignore_ascii_case("selected");
+        if is_true {
+            cache.put(val.to_string(), "1".to_string());
+            return Ok(Some("1".to_string()));
+        }
+
+        let is_false = trimmed.eq_ignore_ascii_case("false")
+            || trimmed.eq_ignore_ascii_case("no")
+            || trimmed.eq_ignore_ascii_case("off")
+            || trimmed.eq_ignore_ascii_case("disabled")
+            || trimmed.eq_ignore_ascii_case("disable");
+        if is_false {
+            cache.put(val.to_string(), "0".to_string());
+            return Ok(Some("0".to_string()));
+        }
+
+        // Fallback: return original value
+        cache.put(val.to_string(), val.to_string());
+        Ok(Some(val.to_string()))
     }
 
     #[pyo3(text_signature = "(self, topic)")]
@@ -279,11 +346,19 @@ impl MiniserverDataProcessor {
         if let Some(cached) = cache.get(topic) {
             return Ok(cached.clone());
         }
-        if !topic.contains('/') && !topic.contains('%') {
+        // Fast path: nothing to replace
+        if !topic.as_bytes().contains(&b'/') && !topic.as_bytes().contains(&b'%') {
             cache.put(topic.to_string(), topic.to_string());
             return Ok(topic.to_string());
         }
-        let normalized = topic.replace('/', "_").replace('%', "_");
+        let mut normalized = String::with_capacity(topic.len());
+        for &b in topic.as_bytes() {
+            if b == b'/' || b == b'%' {
+                normalized.push('_');
+            } else {
+                normalized.push(b as char);
+            }
+        }
         cache.put(topic.to_string(), normalized.clone());
         Ok(normalized)
     }
@@ -295,23 +370,26 @@ impl MiniserverDataProcessor {
             let set = PyFrozenSet::new(py, &[tuple])?;
             return Ok(set.into());
         }
-        match serde_json::from_str::<Value>(val) {
-            Ok(json_val) => {
-                if !json_val.is_object() {
-                    let tuple = (topic.to_string(), val.to_string());
-                    let set = PyFrozenSet::new(py, &[tuple])?;
-                    return Ok(set.into());
+        match parse_borrow_value(val) {
+            Some(json_val) => {
+                match json_val {
+                    BorrowValue::Object(ref map) => {
+                        let mut flattened = Vec::with_capacity(map.len().saturating_mul(2));
+                        // Flatten with topic as base to avoid extra mapping allocations
+                        flatten_json(&json_val, topic, &mut flattened);
+                        // Build Python tuple array with reserved capacity, then frozenset
+                        let py_tuples: Vec<(String, String)> = flattened;
+                        let set = PyFrozenSet::new(py, &py_tuples)?;
+                        Ok(set.into())
+                    }
+                    _ => {
+                        let tuple = (topic.to_string(), val.to_string());
+                        let set = PyFrozenSet::new(py, &[tuple])?;
+                        Ok(set.into())
+                    }
                 }
-                let mut flattened = Vec::new();
-                flatten_json(&json_val, "", &mut flattened);
-                let results: Vec<(String, String)> = flattened
-                    .into_iter()
-                    .map(|(k, v)| (format!("{}/{}", topic, k), v))
-                    .collect();
-                let set = PyFrozenSet::new(py, &results)?;
-                Ok(set.into())
             }
-            Err(_) => {
+            None => {
                 let tuple = (topic.to_string(), val.to_string());
                 let set = PyFrozenSet::new(py, &[tuple])?;
                 Ok(set.into())
@@ -334,13 +412,11 @@ impl MiniserverDataProcessor {
     ) -> PyResult<()> {
         debug!("Processing data - topic: {}, message: {}", topic, message);
 
-        // Normalize topic for whitelist comparison right away
-        let normalized_topic = self.normalize_topic(topic)?;
-        debug!("Normalized topic for processing: '{}'", normalized_topic);
+        // Normalize only when needed later to reduce work on filtered-out topics
 
         // subscription filter (on original topic)
-        if let Some(ref regex) = self.compiled_subscription_filter {
-            if regex.is_match(topic) {
+        if let Some(ref regex_set) = self.compiled_subscription_filter {
+            if regex_set.is_match(topic) {
                 debug!("Topic '{}' filtered by subscription filter", topic);
                 return Ok(());
             }
@@ -350,17 +426,17 @@ impl MiniserverDataProcessor {
         debug!("Transforming data with expand_json={}", expand);
 
         let flattened: Vec<(String, String)> = if expand {
-            match serde_json::from_str::<Value>(message) {
-                Ok(json_val) => {
-                    if !json_val.is_object() {
-                        vec![(topic.to_string(), message.to_string())]
-                    } else {
-                        let mut flat_vec = Vec::new();
-                        flatten_json(&json_val, "", &mut flat_vec);
-                        flat_vec.into_iter().map(|(k, v)| (format!("{}/{}", topic, k), v)).collect()
+            match parse_borrow_value(message) {
+                Some(json_val) => match json_val {
+                    BorrowValue::Object(ref map) => {
+                        let mut flat_vec = Vec::with_capacity(map.len().saturating_mul(2));
+                        // Directly flatten into topic-based keys
+                        flatten_json(&json_val, topic, &mut flat_vec);
+                        flat_vec
                     }
-                }
-                Err(_) => vec![(topic.to_string(), message.to_string())],
+                    _ => vec![(topic.to_string(), message.to_string())],
+                },
+                None => vec![(topic.to_string(), message.to_string())],
             }
         } else {
             vec![(topic.to_string(), message.to_string())]
@@ -383,16 +459,16 @@ impl MiniserverDataProcessor {
             }
             
             // second pass subscription filter (on original topic)
-            if let Some(ref regex) = self.compiled_subscription_filter {
-                if regex.is_match(&t) {
+            if let Some(ref regex_set) = self.compiled_subscription_filter {
+                if regex_set.is_match(&t) {
                     debug!("Topic '{}' filtered by second pass", t);
                     continue;
                 }
             }
             
             // do_not_forward (on original topic)
-            if let Some(ref regex) = self.do_not_forward_patterns {
-                if regex.is_match(&t) {
+            if let Some(ref regex_set) = self.do_not_forward_patterns {
+                if regex_set.is_match(&t) {
                     debug!("Topic '{}' filtered by do_not_forward", t);
                     continue;
                 }
@@ -543,42 +619,12 @@ impl MiniserverDataProcessor {
 
     #[pyo3(text_signature = "(self)")]
     fn get_do_not_forward_patterns(&self) -> Vec<String> {
-        if let Some(ref regex) = self.do_not_forward_patterns {
-            // Convert the regex pattern back to individual patterns by:
-            // 1. Remove the outer parentheses
-            // 2. Split on the '|' character
-            let pattern = regex.as_str();
-            if pattern.starts_with('(') && pattern.ends_with(')') {
-                pattern[1..pattern.len()-1]
-                    .split('|')
-                    .map(String::from)
-                    .collect()
-            } else {
-                vec![pattern.to_string()]
-            }
-        } else {
-            Vec::new()
-        }
+        self.do_not_forward_patterns_raw.clone()
     }
 
     #[pyo3(text_signature = "(self)")]
     fn get_subscription_filters(&self) -> Vec<String> {
-        if let Some(ref regex) = self.compiled_subscription_filter {
-            // Convert the regex pattern back to individual patterns by:
-            // 1. Remove the outer parentheses
-            // 2. Split on the '|' character
-            let pattern = regex.as_str();
-            if pattern.starts_with('(') && pattern.ends_with(')') {
-                pattern[1..pattern.len()-1]
-                    .split('|')
-                    .map(String::from)
-                    .collect()
-            } else {
-                vec![pattern.to_string()]
-            }
-        } else {
-            Vec::new()
-        }
+        self.subscription_filters_raw.clone()
     }
 
 }
