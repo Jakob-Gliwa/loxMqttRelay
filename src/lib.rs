@@ -13,7 +13,8 @@ use std::num::NonZeroUsize;
 use serde_json::Value;
 
 // For logging
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
+use base64::{Engine, engine::general_purpose};
 
 // Import `into_future` from pyo3_async_runtimes and `spawn` from tokio
 use pyo3_async_runtimes::tokio::into_future;
@@ -439,7 +440,18 @@ impl MiniserverDataProcessor {
         topic: String,
         message_in: Vec<u8>
     ) -> PyResult<()> {
-        let message = String::from_utf8(message_in).unwrap();
+        // Try UTF-8 conversion, but don't crash on failure
+        let message = match String::from_utf8(message_in) {
+            Ok(s) => s,
+            Err(e) => {
+                // e.into_bytes() gives us the original bytes back
+                let original_bytes = e.into_bytes();
+                warn!("Received binary MQTT message on topic '{}': {} bytes. Encoding as base64 for exact preservation.", topic, original_bytes.len());
+                
+                // Encode binary data as base64 to preserve exact data
+                format!("[base64:{}]", general_purpose::STANDARD.encode(original_bytes))
+            }
+        };
 
         debug!("(Rust) handle_mqtt_message: {} => {}", topic, message);
 

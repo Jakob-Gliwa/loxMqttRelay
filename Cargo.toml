@@ -25,3 +25,4 @@ serde_json = "1.0.142"
 log = "0.4"
 env_logger = "0.10"     
 tokio = { version = "1.47.1", features = ["full"] }
+base64 = "0.22"

@@ -233,3 +233,227 @@ async def test_message_callback_error(mock_client, mqtt_client):
     result = await mqtt_client._on_message(mock_client, "test/topic1", message, 0, None)
     await asyncio.sleep(0.1)
     assert result == PubAckReasonCode.UNSPECIFIED_ERROR
+
+class TestDownstreamBinaryDataFlow:
+    """Test cases for complete downstream data flow with binary data in MQTT client"""
+    
+    @pytest.mark.asyncio
+    async def test_binary_data_flows_to_callback(self, mock_client, mqtt_client):
+        """Test that binary data flows correctly to the callback function"""
+        test_topics = ["test/binary_flow"]
+        callback = AsyncMock()
+        
+        await mqtt_client.connect(test_topics, callback)
+        
+        # Test with zlib compressed data (like the problematic data from the error)
+        binary_message = bytes([120, 156, 165, 125, 217, 142, 158, 201, 145, 221, 187, 212, 245, 47])
+        
+        await mqtt_client._on_message(mock_client, "test/binary_flow", binary_message, 0, None)
+        await asyncio.sleep(0.1)
+        
+        # Callback should be called with the exact binary data
+        callback.assert_called_once_with("test/binary_flow", binary_message)
+        
+        # Verify the binary data is preserved exactly
+        call_args = callback.call_args
+        assert call_args[0][1] == binary_message
+        assert len(call_args[0][1]) == len(binary_message)
+    
+    @pytest.mark.asyncio
+    async def test_binary_data_preserves_exact_bytes(self, mock_client, mqtt_client):
+        """Test that binary data preserves exact byte values through the pipeline"""
+        test_topics = ["test/byte_preservation"]
+        callback = AsyncMock()
+        
+        await mqtt_client.connect(test_topics, callback)
+        
+        # Create binary data with specific byte patterns
+        binary_data = bytes([0x00, 0xFF, 0x01, 0xFE, 0x02, 0xFD])
+        
+        await mqtt_client._on_message(mock_client, "test/byte_preservation", binary_data, 0, None)
+        await asyncio.sleep(0.1)
+        
+        # Verify exact byte preservation
+        call_args = callback.call_args
+        received_data = call_args[0][1]
+        
+        assert received_data == binary_data
+        assert received_data[0] == 0x00
+        assert received_data[1] == 0xFF
+        assert received_data[2] == 0x01
+        assert received_data[3] == 0xFE
+        assert received_data[4] == 0x02
+        assert received_data[5] == 0xFD
+    
+    @pytest.mark.asyncio
+    async def test_binary_data_with_null_bytes(self, mock_client, mqtt_client):
+        """Test that binary data with null bytes is handled correctly"""
+        test_topics = ["test/null_bytes"]
+        callback = AsyncMock()
+        
+        await mqtt_client.connect(test_topics, callback)
+        
+        # Binary data with null bytes
+        null_data = bytes([0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x00, 0x57, 0x6F, 0x72, 0x6C, 0x64])
+        
+        await mqtt_client._on_message(mock_client, "test/null_bytes", null_data, 0, None)
+        await asyncio.sleep(0.1)
+        
+        # Verify null bytes are preserved
+        call_args = callback.call_args
+        received_data = call_args[0][1]
+        
+        assert received_data == null_data
+        assert received_data[5] == 0x00  # null byte
+    
+    @pytest.mark.asyncio
+    async def test_binary_data_compression_signatures(self, mock_client, mqtt_client):
+        """Test that compression signatures are preserved exactly"""
+        test_topics = ["test/compression"]
+        callback = AsyncMock()
+        
+        await mqtt_client.connect(test_topics, callback)
+        
+        # Test various compression signatures
+        compression_signatures = {
+            "zlib": bytes([120, 156, 165, 125, 217, 142]),
+            "gzip": bytes([0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+            "png": bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
+            "jpeg": bytes([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46])
+        }
+        
+        for format_name, signature in compression_signatures.items():
+            callback.reset_mock()
+            
+            await mqtt_client._on_message(mock_client, f"test/{format_name}", signature, 0, None)
+            await asyncio.sleep(0.1)
+            
+            # Verify signature is preserved exactly
+            call_args = callback.call_args
+            received_data = call_args[0][1]
+            
+            assert received_data == signature, f"{format_name} signature not preserved"
+            assert len(received_data) == len(signature), f"{format_name} length mismatch"
+    
+    @pytest.mark.asyncio
+    async def test_binary_data_encryption_headers(self, mock_client, mqtt_client):
+        """Test that encryption headers are preserved exactly"""
+        test_topics = ["test/encryption"]
+        callback = AsyncMock()
+        
+        await mqtt_client.connect(test_topics, callback)
+        
+        # Simulate encrypted data with headers
+        encrypted_data = bytes([
+            0x45, 0x4E, 0x43, 0x52,  # "ENCR" header
+            0x01, 0x00,              # Version 1.0
+            0x00, 0x00, 0x00, 0x20,  # 32 bytes of encrypted data
+            0xDE, 0xAD, 0xBE, 0xEF,  # Sample encrypted bytes
+            0xCA, 0xFE, 0xBA, 0xBE,
+            0xDE, 0xAD, 0xBE, 0xEF,
+            0xCA, 0xFE, 0xBA, 0xBE,
+            0xDE, 0xAD, 0xBE, 0xEF,
+            0xCA, 0xFE, 0xBA, 0xBE,
+            0xDE, 0xAD, 0xBE, 0xEF,
+            0xCA, 0xFE, 0xBA, 0xBE
+        ])
+        
+        await mqtt_client._on_message(mock_client, "test/encryption", encrypted_data, 0, None)
+        await asyncio.sleep(0.1)
+        
+        # Verify encryption headers are preserved
+        call_args = callback.call_args
+        received_data = call_args[0][1]
+        
+        assert received_data == encrypted_data
+        assert received_data[:4] == b"ENCR"  # Header preserved
+        assert received_data[4:6] == bytes([0x01, 0x00])  # Version preserved
+        assert len(received_data) == 42  # Total length preserved
+    
+    @pytest.mark.asyncio
+    async def test_binary_data_protocol_buffers(self, mock_client, mqtt_client):
+        """Test that protocol buffer data is preserved exactly"""
+        test_topics = ["test/protobuf"]
+        callback = AsyncMock()
+        
+        await mqtt_client.connect(test_topics, callback)
+        
+        # Simulate protobuf data
+        protobuf_data = bytes([
+            0x08, 0x96, 0x01,        # Field 1, wire type 0, value 150
+            0x12, 0x07, 0x74, 0x65, 0x73, 0x74, 0x69, 0x6E, 0x67,  # Field 2, wire type 2, string "testing"
+            0x18, 0x01,               # Field 3, wire type 0, value 1
+            0x20, 0x00                # Field 4, wire type 0, value 0
+        ])
+        
+        await mqtt_client._on_message(mock_client, "test/protobuf", protobuf_data, 0, None)
+        await asyncio.sleep(0.1)
+        
+        # Verify protobuf data is preserved
+        call_args = callback.call_args
+        received_data = call_args[0][1]
+        
+        assert received_data == protobuf_data
+        assert received_data[0] == 0x08  # Field 1 tag
+        assert received_data[1] == 0x96  # Field 1 value
+        assert received_data[2] == 0x01  # Field 1 value (continued)
+    
+    @pytest.mark.asyncio
+    async def test_binary_data_messagepack(self, mock_client, mqtt_client):
+        """Test that MessagePack data is preserved exactly"""
+        test_topics = ["test/msgpack"]
+        callback = AsyncMock()
+        
+        await mqtt_client.connect(test_topics, callback)
+        
+        # Simulate MessagePack data
+        msgpack_data = bytes([
+            0x83,                     # Map with 3 key-value pairs
+            0xA3, 0x6B, 0x65, 0x79,  # String "key" (3 bytes)
+            0xA5, 0x76, 0x61, 0x6C, 0x75, 0x65,  # String "value" (5 bytes)
+            0xA4, 0x6E, 0x75, 0x6D, 0x62,  # String "numb" (4 bytes)
+            0x2A,                     # Integer 42
+            0xA4, 0x62, 0x6F, 0x6F, 0x6C,  # String "bool" (4 bytes)
+            0xC3                      # Boolean true
+        ])
+        
+        await mqtt_client._on_message(mock_client, "test/msgpack", msgpack_data, 0, None)
+        await asyncio.sleep(0.1)
+        
+        # Verify MessagePack data is preserved
+        call_args = callback.call_args
+        received_data = call_args[0][1]
+        
+        assert received_data == msgpack_data
+        assert received_data[0] == 0x83  # Map header
+        assert received_data[1] == 0xA3  # String "key" header
+        assert received_data[2:5] == b"key"  # String "key"
+    
+    @pytest.mark.asyncio
+    async def test_binary_data_flow_with_different_qos(self, mock_client, mqtt_client):
+        """Test that binary data flows correctly with different QoS levels"""
+        test_topics = ["test/qos_flow"]
+        callback = AsyncMock()
+        
+        await mqtt_client.connect(test_topics, callback)
+        
+        binary_message = bytes([120, 156, 165, 125, 217, 142])
+        
+        # Test QoS 0
+        await mqtt_client._on_message(mock_client, "test/qos_flow", binary_message, 0, None)
+        await asyncio.sleep(0.1)
+        
+        # Test QoS 1
+        await mqtt_client._on_message(mock_client, "test/qos_flow", binary_message, 1, None)
+        await asyncio.sleep(0.1)
+        
+        # Test QoS 2
+        await mqtt_client._on_message(mock_client, "test/qos_flow", binary_message, 2, None)
+        await asyncio.sleep(0.1)
+        
+        # Verify all calls preserved the binary data
+        assert callback.call_count == 3
+        for call_args in callback.call_args_list:
+            received_data = call_args[0][1]
+            assert received_data == binary_message
+            assert len(received_data) == len(binary_message)
