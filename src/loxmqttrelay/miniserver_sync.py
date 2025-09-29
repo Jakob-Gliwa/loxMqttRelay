@@ -9,12 +9,48 @@ from io import BytesIO
 from .config import global_config
 import re
 
+# LZ4 Import - wird als verfügbar angenommen
+import lz4.block as lz4b
+import lz4.frame as lz4f
+
 logger = logging.getLogger(__name__)
+
+def _is_lz4_frame(data: bytes) -> bool:
+    """
+    Extended LZ4 frame detection including skippable frames.
+    """
+    if len(data) < 4:
+        return False
+    m = int.from_bytes(data[:4], "little")
+    return m in (0x184D2204, 0x184C2102) or 0x184D2A50 <= m <= 0x184D2A5F
+
+def _decompress_loxcc_block_lz4(data: bytes, uncompressed_size: int) -> bytes:
+    """
+    LZ4 decompression function for LoxCC blocks.
+    Extended automatic detection of LZ4-Frame vs. LZ4-Block.
+    Extremely fast compared to the current implementation.
+    """
+    if _is_lz4_frame(data):
+        return lz4f.decompress(data)
+    try:
+        return lz4b.decompress(data, uncompressed_size=uncompressed_size)
+    except Exception as e:
+        # last attempt: possibly misidentified
+        try:
+            return lz4f.decompress(data)
+        except Exception:
+            raise ValueError(f"LZ4 decompression failed: {e}")
+
 
 def load_miniserver_config(ip: str, username: str, password: str) -> bytes:
     """
     Load the most recent version of the currently active configuration file
     from the Miniserver via FTP.
+    
+    Args:
+        ip: Miniserver IP address
+        username: FTP username
+        password: FTP password
     """
     try:
         logger.debug(f"Loading miniserver configuration from {ip} with username {username}")
@@ -62,48 +98,13 @@ def load_miniserver_config(ip: str, username: str, password: str) -> bytes:
             compressedSize, uncompressedSize, checksum, = struct.unpack('<LLL', f.read(12))
             data = f.read(compressedSize)
             
-            # Decompress the data
-            index = 0
-            resultStr = bytearray()
-            while index < len(data):
-                byte, = struct.unpack('<B', data[index:index+1])
-                index += 1
-                copyBytes = byte >> 4
-                byte &= 0xf
-                
-                if copyBytes == 15:
-                    while True:
-                        addByte = data[index]
-                        copyBytes += addByte
-                        index += 1
-                        if addByte != 0xff:
-                            break
-                            
-                if copyBytes > 0:
-                    resultStr += data[index:index+copyBytes]
-                    index += copyBytes
-                    
-                if index >= len(data):
-                    break
-                    
-                bytesBack, = struct.unpack('<H', data[index:index+2])
-                index += 2
-                bytesBackCopied = 4 + byte
-                
-                if byte == 15:
-                    while True:
-                        val, = struct.unpack('<B', data[index:index+1])
-                        bytesBackCopied += val
-                        index += 1
-                        if val != 0xff:
-                            break
-                            
-                while bytesBackCopied > 0:
-                    if -bytesBack+1 == 0:
-                        resultStr += resultStr[-bytesBack:]
-                    else:
-                        resultStr += resultStr[-bytesBack:-bytesBack+1]
-                    bytesBackCopied -= 1
+            # Strict payload length validation
+            if len(data) != compressedSize:
+                raise Exception(f"Payload length mismatch: got {len(data)}, expected {compressedSize}")
+            
+            # Decompression method - always LZ4
+            logger.debug("Using LZ4 decompression")
+            resultStr = _decompress_loxcc_block_lz4(data, uncompressedSize)
                     
             if checksum != zlib.crc32(resultStr):
                 raise Exception('Checksum verification failed')

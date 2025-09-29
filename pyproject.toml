@@ -18,7 +18,8 @@ dependencies = [
     "construct>=2.10.70",
     "tomlkit>=0.13.0",
     "lxml>=6.0.0",
-    "loxwebsocket>=0.5.1"
+    "loxwebsocket>=0.5.1",
+    "lz4>=4.4.4",
 ]
 
 [project.optional-dependencies]
