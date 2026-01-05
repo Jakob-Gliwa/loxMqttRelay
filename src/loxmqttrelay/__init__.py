@@ -7,9 +7,10 @@ communication between MQTT topics and Loxone controls.
 __version__ = "0.1.0"
 import platform
 import subprocess
-import logging
 
-logger = logging.getLogger(__name__)
+from loxmqttrelay.logging_config import get_lazy_logger
+
+logger = get_lazy_logger(__name__)
 
 # Determine which implementation to use based on CPU architecture and features
 if "arm" in platform.machine().lower():

@@ -14,7 +14,7 @@ jobs:
       image: ghcr.io/astral-sh/uv:python3.13-bookworm-slim
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install build dependencies
         run: |
@@ -28,7 +28,7 @@ jobs:
 
       # --- NEW STEP: Cache pip packages ---
       - name: Cache pip packages
-        uses: actions/cache@v3
+        uses: actions/cache@v5
         with:
           # caching the pip downloads/wheels
           path: ~/.cache/pip
@@ -44,7 +44,7 @@ jobs:
           pytest tests/ --cov=loxmqttrelay --cov-report=xml --cov-report=term
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coverage.xml
           path: coverage.xml
@@ -55,7 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up QEMU dependency
         uses: docker/setup-qemu-action@v3

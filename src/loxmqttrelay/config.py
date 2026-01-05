@@ -1,11 +1,13 @@
 import os
 import logging
-from dataclasses import dataclass, field, asdict, replace
+from dataclasses import dataclass, field, asdict, replace, fields
 import threading
 from typing import Dict, Any, List, Optional, Literal, get_type_hints, Set
 import tomlkit
 from enum import Enum
 
+# Use standard logging here to avoid circular imports
+# (logging_config might depend on modules that depend on config)
 logger = logging.getLogger(__name__)
 
 class ConfigSection(Enum):
@@ -73,11 +75,11 @@ class AppConfig:
     debug: DebugConfig = field(default_factory=DebugConfig)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {section: asdict(getattr(self, section)) for section in self.__annotations__}
+        return {f.name: asdict(getattr(self, f.name)) for f in fields(self)}
 
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> "AppConfig":
-        return cls(**{section: cls._create_section(section, config_dict) for section in cls.__annotations__})
+        return cls(**{f.name: cls._create_section(f.name, config_dict) for f in fields(cls)})
 
     @staticmethod
     def _create_section(section: str, config_dict: Dict[str, Any]) -> Any:

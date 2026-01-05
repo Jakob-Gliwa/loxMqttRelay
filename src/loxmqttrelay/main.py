@@ -1,5 +1,4 @@
 import asyncio
-import logging
 import types
 from typing import Dict, Any, Optional, Literal
 import sys
@@ -11,6 +10,7 @@ import typing
 import platform
 
 from loxmqttrelay.config import ConfigError, ConfigSection, global_config
+from loxmqttrelay.logging_config import get_lazy_logger
 from loxmqttrelay.mqtt_client import mqtt_client
 from loxmqttrelay.udp_handler import start_udp_server
 from loxmqttrelay.miniserver_sync import sync_miniserver_whitelist
@@ -34,7 +34,7 @@ TOPIC = types.SimpleNamespace(
     UI_STATUS = f"{global_config.general.base_topic}ui/status"
 )
 
-logger = logging.getLogger(__name__)
+logger = get_lazy_logger(__name__)
 
 # Initialize Rust logger
 init_rust_logger()
@@ -153,6 +153,9 @@ class MQTTRelay:
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
 def main():
+    # Initialize logging first
+    utils.setup_logging()
+    
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     relay = MQTTRelay()
     try:

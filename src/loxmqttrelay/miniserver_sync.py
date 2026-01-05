@@ -1,4 +1,3 @@
-import logging
 from lxml import etree
 from typing import List
 import ftplib
@@ -7,13 +6,14 @@ import zipfile
 import zlib
 from io import BytesIO
 from .config import global_config
+from .logging_config import get_lazy_logger
 import re
 
 # LZ4 Import - wird als verfügbar angenommen
 import lz4.block as lz4b
 import lz4.frame as lz4f
 
-logger = logging.getLogger(__name__)
+logger = get_lazy_logger(__name__)
 
 def _is_lz4_frame(data: bytes) -> bool:
     """

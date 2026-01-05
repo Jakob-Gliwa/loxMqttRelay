@@ -1,10 +1,10 @@
 import asyncio
-import logging
 from typing import Tuple, Optional
 from loxmqttrelay.config import global_config
+from loxmqttrelay.logging_config import get_lazy_logger
 from loxmqttrelay.mqtt_client import mqtt_client
 
-logger = logging.getLogger(__name__)
+logger = get_lazy_logger(__name__)
 
 def parse_udp_message(udpmsg: str) -> Optional[Tuple[str, str, str]]:
     """

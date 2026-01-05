@@ -1,13 +1,13 @@
 import asyncio
-import logging
 import time
 from typing import List, Callable, Awaitable
 from gmqtt import Client
 from gmqtt import constants as MQTTconstants
 from gmqtt.mqtt.constants import PubAckReasonCode
 from .config import global_config
+from .logging_config import get_lazy_logger
 
-logger = logging.getLogger(__name__)
+logger = get_lazy_logger(__name__)
 
 class MQTTClient:
     """
