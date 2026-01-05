@@ -146,7 +146,7 @@ fn compile_filters(filters: Vec<String>) -> Option<Regex> {
 #[pyclass]
 pub struct MiniserverDataProcessor {
     #[pyo3(get)]
-    global_config: PyObject,
+    global_config: Py<PyAny>,
 
     compiled_subscription_filter: Option<Regex>,
     
@@ -157,11 +157,11 @@ pub struct MiniserverDataProcessor {
     convert_bool_cache: Mutex<LruCache<String, String>>,
     normalize_topic_cache: Mutex<LruCache<String, String>>,
 
-    relay_main_obj: PyObject,
-    mqtt_client_obj: PyObject,
+    relay_main_obj: Py<PyAny>,
+    mqtt_client_obj: Py<PyAny>,
     #[pyo3(get)]
-    http_handler_obj: PyObject,
-    orjson_obj: PyObject,
+    http_handler_obj: Py<PyAny>,
+    orjson_obj: Py<PyAny>,
     mqtt_topics: Option<MqttTopics>,
     base_topic: String,
 }
@@ -171,7 +171,7 @@ impl MiniserverDataProcessor {
 
     #[new]
     #[pyo3(text_signature = "(self, global_config_py, relay_main_obj, mqtt_client_obj, http_handler_obj, orjson_obj)")]
-    fn new(py: Python, topic_ns: PyObject, global_config_py: PyObject, relay_main_obj: PyObject, mqtt_client_obj: PyObject, http_handler_obj: PyObject, orjson_obj: PyObject) -> PyResult<Self> {
+    fn new(py: Python, topic_ns: Py<PyAny>, global_config_py: Py<PyAny>, relay_main_obj: Py<PyAny>, mqtt_client_obj: Py<PyAny>, http_handler_obj: Py<PyAny>, orjson_obj: Py<PyAny>) -> PyResult<Self> {
         debug!(
             "Initializing MiniserverDataProcessor with cache_size={}",
             pyget!(global_config_py, py, "general", "cache_size").extract::<i32>()?
@@ -604,7 +604,7 @@ fn init_rust_logger() {
 #[pymodule]
 fn _loxmqttrelay(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()>{
     // Initialize the Tokio runtime for pyo3-asyncio.
-    pyo3::prepare_freethreaded_python();
+    Python::initialize();
     let mut builder = pyo3_async_runtimes::tokio::re_exports::runtime::Builder::new_multi_thread();
     builder.enable_all();
     pyo3_async_runtimes::tokio::init(builder);
