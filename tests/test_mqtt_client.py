@@ -22,17 +22,6 @@ def mock_args(monkeypatch):
     monkeypatch.setattr('loxmqttrelay.utils._args', mock_args)
     return mock_args
 
-@pytest.fixture(autouse=True)
-async def cleanup_tasks():
-    """Cleanup any pending tasks after each test"""
-    yield
-    # Get all tasks and cancel them
-    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-    for task in tasks:
-        task.cancel()
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-
 @pytest.fixture
 def mock_config(monkeypatch):
     config = AppConfig()

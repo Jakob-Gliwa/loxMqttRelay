@@ -13,16 +13,6 @@ from loxmqttrelay.config import Config, global_config, AppConfig
 from loxmqttrelay.compatible._loxmqttrelay import MiniserverDataProcessor
 
 @pytest.fixture(autouse=True)
-async def cleanup_tasks() -> AsyncGenerator[None, None]:
-    """Cleanup any pending tasks after each test"""
-    yield
-    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-    for task in tasks:
-        task.cancel()
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-@pytest.fixture(autouse=True)
 def reset_singletons() -> Generator[None, None, None]:
     """Reset all singletons before and after each test"""
     Config._instance = None

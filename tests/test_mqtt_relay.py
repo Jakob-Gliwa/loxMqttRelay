@@ -12,16 +12,6 @@ import typing
 from typing import AsyncGenerator, Generator, List
 
 @pytest.fixture(autouse=True)
-async def cleanup_tasks() -> typing.AsyncGenerator[None, None]:
-    """Cleanup any pending tasks after each test"""
-    yield
-    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-    for task in tasks:
-        task.cancel()
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-@pytest.fixture(autouse=True)
 def cleanup_singletons() -> typing.Generator[None, None, None]:
     """Ensure Config singleton is cleaned up before and after each test"""
     Config._instance = None
