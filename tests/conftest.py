@@ -1,6 +1,7 @@
 import os
 import sys
 import pytest
+import pytest_asyncio
 import asyncio
 from loxmqttrelay.config import AppConfig, global_config
 
@@ -16,7 +17,7 @@ def reset_global_config():
     global_config._config = original_config
 
 
-@pytest.fixture(autouse=True, scope="function")
+@pytest_asyncio.fixture(autouse=True, loop_scope="function")
 async def cleanup_tasks():
     """Cleanup any pending tasks after each async test"""
     yield

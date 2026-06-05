@@ -1,6 +1,7 @@
 import pytest
 import pytest_asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch, MagicMock
 from loxmqttrelay.config import Config, AppConfig, global_config
 import asyncio
@@ -48,8 +49,6 @@ def config_instance(temp_config_file):
     return global_config
 
 class DummyTopicNS:
-    START_UI = "dummy_start_ui"
-    STOP_UI = "dummy_stop_ui"
     MINISERVER_STARTUP_EVENT = "dummy_startup"
     CONFIG_GET = "dummy_config_get"
     CONFIG_RESPONSE = "dummy_config_response"
@@ -662,4 +661,109 @@ class TestDownstreamBinaryDataFlow:
             assert result is None  # handle_mqtt_message returns void
         except Exception as e:
             pytest.fail(f"End-to-end binary message handling failed with exception: {e}")
+
+
+# Topics must live under the test base_topic ("myrelay/") so they pass the
+# `topic.starts_with(base_topic)` gate inside the Rust handle_mqtt_message.
+class ControlTopicNS:
+    MINISERVER_STARTUP_EVENT = "myrelay/miniserverevent/startup"
+    CONFIG_GET = "myrelay/config/get"
+    CONFIG_RESPONSE = "myrelay/config/response"
+    CONFIG_SET = "myrelay/config/set"
+    CONFIG_ADD = "myrelay/config/add"
+    CONFIG_REMOVE = "myrelay/config/remove"
+    CONFIG_UPDATE = "myrelay/config/update"
+    CONFIG_RESTART = "myrelay/config/restart"
+
+
+class TestConfigControlTopics:
+    """Exercises the config/control-topic routing inside the Rust
+    handle_mqtt_message. Unlike the shared `processor` fixture, this keeps
+    references to the injected mocks so we can assert on the Python callbacks
+    that the Rust code triggers (relay_main, mqtt_client, orjson)."""
+
+    @pytest.fixture
+    def ctx(self, config_instance):
+        mock_http_handler = MagicMock()
+        mock_mqtt_client = MagicMock()
+        mock_relay_main = MagicMock()
+        mock_orjson = MagicMock()
+        topics = ControlTopicNS()
+        processor = MiniserverDataProcessor(
+            topics,
+            config_instance,
+            mock_relay_main,
+            mock_mqtt_client,
+            mock_http_handler,
+            mock_orjson,
+        )
+        return SimpleNamespace(
+            processor=processor,
+            topics=topics,
+            relay_main=mock_relay_main,
+            mqtt_client=mock_mqtt_client,
+            orjson=mock_orjson,
+            http_handler=mock_http_handler,
+        )
+
+    @pytest.mark.asyncio
+    async def test_config_get_serializes_and_publishes_safe_config(self, ctx):
+        # The response is published via pyo3 `into_future`, which needs a
+        # running event loop and a real awaitable returned by publish().
+        ctx.mqtt_client.publish = AsyncMock()
+        ctx.processor.handle_mqtt_message(ctx.topics.CONFIG_GET, b"")
+
+        # safe config is fetched, serialized and published to the response topic
+        ctx.relay_main.miniserver_data_processor.global_config.get_safe_config.assert_called_once()
+        ctx.orjson.dumps.assert_called_once()
+        ctx.mqtt_client.publish.assert_called_once()
+        published_topic = ctx.mqtt_client.publish.call_args[0][0]
+        assert published_topic == ctx.topics.CONFIG_RESPONSE
+        # config/get must never restart the relay
+        ctx.relay_main.restart_relay.assert_not_called()
+
+    @pytest.mark.parametrize("topic_attr,expected_mode", [
+        ("CONFIG_SET", "set"),
+        ("CONFIG_ADD", "add"),
+        ("CONFIG_REMOVE", "remove"),
+    ])
+    def test_config_modify_updates_fields_and_restarts(self, ctx, topic_attr, expected_mode):
+        topic = getattr(ctx.topics, topic_attr)
+        ctx.processor.handle_mqtt_message(topic, b'{"general": {"cache_size": 50}}')
+
+        ctx.orjson.loads.assert_called_once()
+        global_config_mock = ctx.relay_main.miniserver_data_processor.global_config
+        global_config_mock.update_fields.assert_called_once()
+        # second positional arg is the update mode ("set"/"add"/"remove")
+        assert global_config_mock.update_fields.call_args[0][1] == expected_mode
+        # a successful update restarts the relay (verifies the restart_relay rename)
+        ctx.relay_main.restart_relay.assert_called_once()
+
+    @pytest.mark.parametrize("topic_attr", ["CONFIG_UPDATE", "CONFIG_RESTART"])
+    def test_config_update_and_restart_only_restart(self, ctx, topic_attr):
+        topic = getattr(ctx.topics, topic_attr)
+        ctx.processor.handle_mqtt_message(topic, b"")
+
+        # verifies the restart_relay rename (old name would never be called)
+        ctx.relay_main.restart_relay.assert_called_once()
+        # plain update/restart must not mutate the config
+        ctx.relay_main.miniserver_data_processor.global_config.update_fields.assert_not_called()
+
+    def test_miniserver_startup_triggers_sync_when_enabled(self, ctx):
+        global_config.miniserver.sync_with_miniserver = True
+        ctx.processor.handle_mqtt_message(ctx.topics.MINISERVER_STARTUP_EVENT, b"")
+        ctx.relay_main.schedule_miniserver_sync.assert_called_once()
+
+    def test_miniserver_startup_skips_sync_when_disabled(self, ctx):
+        global_config.miniserver.sync_with_miniserver = False
+        ctx.processor.handle_mqtt_message(ctx.topics.MINISERVER_STARTUP_EVENT, b"")
+        ctx.relay_main.schedule_miniserver_sync.assert_not_called()
+
+    def test_data_topic_is_not_treated_as_control(self, ctx):
+        # A topic outside base_topic must take the data path, never the
+        # control branches (no restart, no config response published).
+        ctx.processor.handle_mqtt_message("some/data/topic", b"value")
+        ctx.relay_main.restart_relay.assert_not_called()
+        ctx.relay_main.schedule_miniserver_sync.assert_not_called()
+        ctx.mqtt_client.publish.assert_not_called()
 

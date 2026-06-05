@@ -55,12 +55,7 @@ def get_args() -> argparse.Namespace:
             choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
             help="Set the logging level (overrides config.json setting)"
         )
-        _parser.add_argument(
-            "--headless",
-            action="store_true",
-            help="Start the MQTT Relay without the UI"
-        )
-        
+
         # When running tests, ignore unknown arguments
         if 'pytest' in sys.modules:
             _args, _ = _parser.parse_known_args()

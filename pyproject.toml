@@ -5,45 +5,44 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "loxmqttrelay"
-version = "0.1.1"
+version = "0.2.0"
 description = "MQTT Relay for Loxone"
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 dependencies = [
-    "aiohttp>=3.13.3",
-    "orjson>=3.11.5",
-    "streamlit>=1.52.2",
+    "aiohttp>=3.14.0",
+    "orjson>=3.11.9",
     "pycryptodome>=3.23.0",
     "uvloop>=0.22.1",
     "gmqtt>=0.7.0",
     "construct>=2.10.70",
-    "tomlkit>=0.13.3",
-    "lxml>=6.0.2",
+    "tomlkit>=0.15.0",
+    "lxml>=6.1.1",
     "loxwebsocket>=0.5.2",
     "lz4>=4.4.5",
-    "pyarrow>=22.0.0",
+    "pygixml>=0.11.0",
 ]
 
 [project.optional-dependencies]
 test = [
-    "pytest>=8.3.0,<9.0",
-    "pytest-asyncio>=1.3.0",
-    "pytest-cov>=7.0.0"
+    "pytest>=9.0.0",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0"
 ]
 dev = [
-    "pytest>=8.3.0,<9.0",
-    "pytest-asyncio>=1.3.0",
-    "pytest-cov>=7.0.0",
+    "pytest>=9.0.0",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
     "pyinstrument>=5.1.2",
-    "setuptools>=80.9.0", 
-    "setuptools-rust>=1.12.0"
+    "setuptools>=82.0.1", 
+    "setuptools-rust>=1.12.1"
 ]
 build = [
-    "setuptools>=80.9.0",
-    "setuptools-rust>=1.12.0"
+    "setuptools>=82.0.1",
+    "setuptools-rust>=1.12.1"
 ]
 
 [tool.uv]
-native-tls = true
+system-certs = true
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -56,5 +55,8 @@ loxmqttrelay = "loxmqttrelay.main:main"
 pythonpath = ["src"]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = "-v --cov=. --cov-report=term-missing"
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --cov=loxmqttrelay --cov-report=term-missing"
 asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"

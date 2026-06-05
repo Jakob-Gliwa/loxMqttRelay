@@ -22,8 +22,6 @@ use pyo3_async_runtimes::tokio::into_future;
 /// A small struct to store all relevant MQTT topics in Rust, so we don't fetch them repeatedly
 #[derive(Clone, Debug)]
 struct MqttTopics {
-    start_ui_topic: String,
-    stop_ui_topic: String,
     miniserver_startup_topic: String,
     config_get_topic: String,
     config_response_topic: String,
@@ -185,8 +183,6 @@ impl MiniserverDataProcessor {
         };
         let lru_size = NonZeroUsize::new(cache_size).unwrap();
         let base_topic: String = pyget!(global_config_py, py, "general", "base_topic").extract()?;
-        let start_ui_topic: String = topic_ns.bind(py).getattr(intern!(py, "START_UI"))?.extract()?;
-        let stop_ui_topic: String = topic_ns.bind(py).getattr(intern!(py, "STOP_UI"))?.extract()?;
         let miniserver_startup_topic: String = topic_ns.bind(py).getattr(intern!(py, "MINISERVER_STARTUP_EVENT"))?.extract()?;
         let config_get_topic: String = topic_ns.bind(py).getattr(intern!(py, "CONFIG_GET"))?.extract()?;
         let config_response_topic: String = topic_ns.bind(py).getattr(intern!(py, "CONFIG_RESPONSE"))?.extract()?;
@@ -197,8 +193,6 @@ impl MiniserverDataProcessor {
         let config_restart_topic: String = topic_ns.bind(py).getattr(intern!(py, "CONFIG_RESTART"))?.extract()?;
 
         let topics = MqttTopics {
-            start_ui_topic,
-            stop_ui_topic,
             miniserver_startup_topic,
             config_get_topic,
             config_response_topic,
@@ -467,25 +461,6 @@ impl MiniserverDataProcessor {
                     let _ = self.relay_main_obj.bind(py).call_method0("schedule_miniserver_sync")?;
                 }
             }
-            else if topic == topics.start_ui_topic {
-                let coro = self.relay_main_obj.bind(py).call_method0("start_ui")?;
-                let fut = into_future(coro.clone())?;
-                pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
-                    if let Err(e) = fut.await {
-                        error!("Error in start_ui async call: {:?}", e);
-                    }
-                });
-            }
-            else if topic == topics.stop_ui_topic {
-                let coro = self.relay_main_obj.bind(py).call_method0("stop_ui")?;
-                let fut = into_future(coro.clone())?;
-                pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
-                    if let Err(e) = fut.await {
-                        error!("Error in stop_ui async call: {:?}", e);
-                    }
-                });
-            }
-       
             else if topic == topics.config_get_topic {
                 // global_config.get_safe_config -> orjson.dumps -> publish
                 let global_config_py = self
@@ -527,7 +502,7 @@ impl MiniserverDataProcessor {
                             error!("Error updating configuration: {:?}", e);
                         } else {
                             info!("Configuration updated via MQTT. Restarting program (from Rust).");
-                            let _ = self.relay_main_obj.bind(py).call_method0("restart_relay_incl_ui");
+                            let _ = self.relay_main_obj.bind(py).call_method0("restart_relay");
                         }
                     },
                     Err(e) => {
@@ -537,7 +512,7 @@ impl MiniserverDataProcessor {
             }
             else if topic == topics.config_update_topic || topic == topics.config_restart_topic {
                 info!("Reloading configuration. Restarting program (from Rust).");
-                let _ = self.relay_main_obj.bind(py).call_method0("restart_relay_incl_ui");
+                let _ = self.relay_main_obj.bind(py).call_method0("restart_relay");
             }
         }
         else {

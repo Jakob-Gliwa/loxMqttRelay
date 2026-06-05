@@ -1,4 +1,4 @@
-name: Main CI Pipeline
+name: Bugfix CI Pipeline
 
 on:
   workflow_dispatch:
@@ -6,84 +6,164 @@ on:
     branches:
       - bugfix
 
+# Cancel superseded runs on the same ref to save runner minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: ${{ vars.DOCKER_USERNAME }}/loxmqttrelay
+
 jobs:
   # --- TEST STAGE ---
   test:
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/astral-sh/uv:python3.13-bookworm-slim
     steps:
       - name: Check out source
         uses: actions/checkout@v6
 
-      - name: Install build dependencies
-        run: |
-          apt-get update
-          apt-get install -y gcc python3-dev curl build-essential rustc cargo
+      # setup-uv installs uv, manages the Python toolchain (per requires-python)
+      # and persists uv's real cache (~/.cache/uv) across runs out of the box.
+      - name: Install uv (with cache)
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
 
+      # Modern stable toolchain via rustup — understands Cargo.lock v4 and is
+      # needed to build the project's Rust extension.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: stable 
+        uses: dtolnay/rust-toolchain@stable
 
-      # --- NEW STEP: Cache pip packages ---
-      - name: Cache pip packages
-        uses: actions/cache@v5
-        with:
-          # caching the pip downloads/wheels
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('setup.py', 'requirements.txt', 'pyproject.toml') }}
-          restore-keys: ${{ runner.os }}-pip-
-    
-      - name: Install Python packages
-        run: |
-          uv pip install --system .[test]
+      - name: Sync dependencies (incl. test extras)
+        run: uv sync --extra test
 
       - name: Run tests with coverage
-        run: |
-          pytest tests/ --cov=loxmqttrelay --cov-report=xml --cov-report=term
+        run: uv run pytest --cov-report=xml
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: coverage.xml
           path: coverage.xml
 
-  # --- BUILD & PUSH DOCKER STAGE ---
-  docker-build:
+  # --- BUILD STAGE (one native runner per platform, no QEMU) ---
+  build:
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
     steps:
+      - name: Prepare platform pair
+        run: echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+        env:
+          platform: ${{ matrix.platform }}
+
       - name: Check out source
         uses: actions/checkout@v6
 
-      - name: Set up QEMU dependency
-        uses: docker/setup-qemu-action@v3
-
       - name: Extract Docker image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
-          images: ${{ vars.DOCKER_USERNAME }}/loxmqttrelay
+          images: ${{ env.IMAGE_NAME }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to Docker Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ vars.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
         with:
-          push: ${{ github.event_name != 'pull_request' }}
-          platforms: "linux/amd64,linux/arm64"
-          tags: |
-            ${{ vars.DOCKER_USERNAME }}/loxmqttrelay:experimental.${{ github.sha }}
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=true
           provenance: true
           sbom: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
+
+      - name: Export digest
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # --- MERGE STAGE (assemble the multi-arch manifest, tag & push) ---
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v7
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Extract Docker image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: index
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=experimental.${{ github.sha }}
+
+      - name: Log in to Docker Registry
+        uses: docker/login-action@v4
+        with:
+          username: ${{ vars.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          mapfile -t TAG_ARGS < <(jq -r '.tags[] | "-t\n" + .' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          mapfile -t ANN_ARGS < <(jq -r '.annotations[]? | "--annotation\n" + .' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          if [ "${#TAG_ARGS[@]}" -eq 0 ]; then
+            echo "No tags resolved. Nothing to push." >&2
+            exit 1
+          fi
+          SOURCES=()
+          for digest in *; do
+            SOURCES+=("${IMAGE_NAME}@sha256:${digest}")
+          done
+          docker buildx imagetools create "${TAG_ARGS[@]}" "${ANN_ARGS[@]}" "${SOURCES[@]}"
+
+      - name: Inspect image
+        run: |
+          set -euo pipefail
+          first_tag=$(jq -r '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          docker buildx imagetools inspect "$first_tag"
+        env:
+          DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta.outputs.json }}

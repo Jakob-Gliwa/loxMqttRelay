@@ -67,6 +67,20 @@ def config_instance(temp_config_file):
     config._config = config._load_config()
     return config
 
+def test_mqtt_version_defaults_to_mqtt3_when_absent(temp_config_file):
+    """A config without [broker] mqtt_version must resolve to MQTT 3.1.x."""
+    from loxmqttrelay.mqtt_client import resolve_mqtt_version
+    from gmqtt import constants as MQTTconstants
+
+    config = Config()
+    config.config_path = temp_config_file
+    config._config = config._load_config()
+
+    # The temp config file has a [broker] section but no mqtt_version key
+    assert config.broker.mqtt_version == "3.1"
+    assert resolve_mqtt_version(config.broker.mqtt_version) == MQTTconstants.MQTTv311
+
+
 def test_config_load(temp_config_file):
     """Test loading configuration from file"""
     config = Config()
@@ -84,6 +98,8 @@ def test_config_load(temp_config_file):
     assert config.broker.user == "test_user"
     assert config.broker.password == "test_pass"
     assert config.broker.client_id == "test_client"
+    # mqtt_version is not present in the config file -> default to "3.1"
+    assert config.broker.mqtt_version == "3.1"
     
     # Miniserver Config Assertions
     assert config.miniserver.miniserver_ip == "192.168.1.100"

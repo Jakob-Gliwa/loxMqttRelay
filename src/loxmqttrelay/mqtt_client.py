@@ -1,6 +1,6 @@
 import asyncio
 import time
-from typing import List, Callable, Awaitable
+from typing import List, Callable, Awaitable, Optional, Sequence, Tuple
 from gmqtt import Client
 from gmqtt import constants as MQTTconstants
 from gmqtt.mqtt.constants import PubAckReasonCode
@@ -8,6 +8,26 @@ from .config import global_config
 from .logging_config import get_lazy_logger
 
 logger = get_lazy_logger(__name__)
+
+
+def resolve_mqtt_version(version: Optional[str]) -> int:
+    """
+    Map a configured MQTT version string to the gmqtt protocol constant.
+
+    "3.1" / "3.1.1" / "311" / "4" / "" / None -> MQTTv311 (default)
+    "5" / "5.0" / "50"                         -> MQTTv50
+    anything else                              -> MQTTv311 (with warning)
+    """
+    normalized = (version or "").strip().lower()
+    if normalized in ("", "3.1", "3.1.1", "311", "4", "v3.1", "v3.1.1", "mqttv311"):
+        return MQTTconstants.MQTTv311
+    if normalized in ("5", "5.0", "50", "v5", "v5.0", "mqttv50"):
+        return MQTTconstants.MQTTv50
+    logger.warning(
+        f"Unknown mqtt_version '{version}', falling back to MQTT 3.1.x (MQTTv311)"
+    )
+    return MQTTconstants.MQTTv311
+
 
 class MQTTClient:
     """
@@ -19,6 +39,7 @@ class MQTTClient:
         unique_id = f"loxberry_{int(time.time())}"
         self.client = Client(client_id=unique_id, logger=logger)
         self.base_topic = global_config.general.base_topic
+        self._mqtt_version = resolve_mqtt_version(global_config.broker.mqtt_version)
         self._callback: Callable[[str, str], Awaitable[None]]
         self._max_reconnect_delay = 15 
         self._reconnect_attempt = 0
@@ -48,7 +69,7 @@ class MQTTClient:
                 await self.client.connect(
                     host=global_config.broker.host, 
                     port=global_config.broker.port, 
-                    version=MQTTconstants.MQTTv311
+                    version=self._mqtt_version
                     )
                 
                 return
@@ -80,13 +101,29 @@ class MQTTClient:
             return PubAckReasonCode.UNSPECIFIED_ERROR
         return PubAckReasonCode.SUCCESS
 
-    async def publish(self, topic: str, message: str | bytes, retain: bool = False) -> None:
+    async def publish(
+        self,
+        topic: str,
+        message: str | bytes,
+        retain: bool = False,
+        user_properties: Optional[Sequence[Tuple[str, str]]] = None,
+    ) -> None:
         try:
             if not self._conn.is_set():
                 logger.warning("MQTT publish attempted without connection")
                 return
 
-            self.client.publish(topic, message, qos=0, retain=retain)
+            kwargs = {}
+            if user_properties:
+                if self._mqtt_version == MQTTconstants.MQTTv50:
+                    # gmqtt serializes a list of (key, value) tuples as MQTT5 user properties
+                    kwargs["user_property"] = list(user_properties)
+                else:
+                    logger.warning(
+                        "User properties provided but MQTT5 is not enabled - ignoring them"
+                    )
+
+            self.client.publish(topic, message, qos=0, retain=retain, **kwargs)
             logger.debug(f"Published: {topic} = {message!r} (retain={retain})")
 
         except Exception as e:

@@ -1,13 +1,9 @@
 import asyncio
 import types
-from typing import Dict, Any, Optional, Literal
 import sys
 import os
 import orjson
-import subprocess
 import uvloop
-import typing
-import platform
 
 from loxmqttrelay.config import ConfigError, ConfigSection, global_config
 from loxmqttrelay.logging_config import get_lazy_logger
@@ -28,10 +24,7 @@ TOPIC = types.SimpleNamespace(
     CONFIG_RESTART = f"{global_config.general.base_topic}config/restart",
     CONFIG_GET = f"{global_config.general.base_topic}config/get",
     CONFIG_RESPONSE = f"{global_config.general.base_topic}config/response",
-    MINISERVER_STARTUP_EVENT = f"{global_config.general.base_topic}miniserverevent/startup",
-    START_UI = f"{global_config.general.base_topic}startui",
-    STOP_UI = f"{global_config.general.base_topic}stopui",
-    UI_STATUS = f"{global_config.general.base_topic}ui/status"
+    MINISERVER_STARTUP_EVENT = f"{global_config.general.base_topic}miniserverevent/startup"
 )
 
 logger = get_lazy_logger(__name__)
@@ -41,14 +34,12 @@ init_rust_logger()
 
 class MQTTRelay:
     def __init__(self):
-        self.ui_process: Optional[subprocess.Popen] = None
         self.miniserver_data_processor = MiniserverDataProcessor(TOPIC, global_config, self, mqtt_client, http_miniserver_handler, orjson)
 
     async def main(self):
         await self.connect_and_subscribe_mqtt()
         await self.handle_miniserver_sync()
         asyncio.create_task(start_udp_server())
-        await self.start_ui()
 
         logger.info("MQTT Relay started")
         await asyncio.Future()
@@ -62,7 +53,7 @@ class MQTTRelay:
         initial_whitelist = global_config.topics.topic_whitelist.copy()
 
         try:
-            inputs = sync_miniserver_whitelist()
+            inputs = await sync_miniserver_whitelist()
             global_config.update_config(ConfigSection.TOPICS, {'topic_whitelist': inputs})
             self.miniserver_data_processor.update_topic_whitelist(list(inputs))
             logger.info("Whitelist updated from miniserver configuration")
@@ -88,9 +79,7 @@ class MQTTRelay:
             TOPIC.CONFIG_UPDATE,
             TOPIC.CONFIG_RESTART,
             TOPIC.CONFIG_GET,
-            TOPIC.MINISERVER_STARTUP_EVENT,
-            TOPIC.START_UI,
-            TOPIC.STOP_UI
+            TOPIC.MINISERVER_STARTUP_EVENT
         ]
         
         try:
@@ -100,56 +89,7 @@ class MQTTRelay:
             logger.error(f"Failed to connect to MQTT broker: {e}")
             raise ConfigError(f"MQTT connection failed: {e}")
 
-    async def start_ui(self):
-        """Start the Streamlit UI if it's not already running."""
-        if utils.get_args().headless:
-            return
-            
-        if self.ui_process is None or self.ui_process.poll() is not None:
-            try:
-                # Start the UI using streamlit with absolute path
-                ui_path = os.path.join(os.path.dirname(__file__), "ui.py")
-                self.ui_process = subprocess.Popen(
-                    ["streamlit", "run", ui_path],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-                logger.info("UI started successfully")
-                await mqtt_client.publish(TOPIC.UI_STATUS, "UI started successfully")
-            except Exception as e:
-                error_msg = f"Failed to start UI: {e}"
-                logger.error(error_msg)
-                await mqtt_client.publish(TOPIC.UI_STATUS, error_msg)
-        else:
-            logger.info("UI is already running")
-            await mqtt_client.publish(TOPIC.UI_STATUS, "UI is already running")
-
-    async def stop_ui(self):
-        """Stop the Streamlit UI if it's running."""
-        if self.ui_process is not None:
-            try:
-                self.ui_process.terminate()
-                self.ui_process.wait(timeout=5)  # Wait up to 5 seconds for process to terminate
-                self.ui_process = None
-                logger.info("UI stopped successfully")
-                await mqtt_client.publish(TOPIC.UI_STATUS, "UI stopped successfully")
-            except subprocess.TimeoutExpired:
-                if self.ui_process is not None:
-                    self.ui_process.kill()  # Force kill if termination takes too long
-                self.ui_process = None
-                logger.warning("UI process killed after timeout")
-                await mqtt_client.publish(TOPIC.UI_STATUS, "UI process killed after timeout")
-            except Exception as e:
-                error_msg = f"Error stopping UI: {e}"
-                logger.error(error_msg)
-                await mqtt_client.publish(TOPIC.UI_STATUS, error_msg)
-        else:
-            logger.info("UI is not running")
-            await mqtt_client.publish(TOPIC.UI_STATUS, "UI is not running")
-
-    def restart_relay_incl_ui(self):
-        if self.ui_process:
-            self.ui_process.terminate()
+    def restart_relay(self):
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
 def main():

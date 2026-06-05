@@ -1,40 +1,71 @@
+# syntax=docker/dockerfile:1
 # -------------------------------------
 # 1) Build-Stage
 # -------------------------------------
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim as builder
+FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS builder
 
-# System-Tools für Build installieren
+# - UV_PYTHON_DOWNLOADS=0: use the image's system Python at
+#   /usr/local/bin/python3.14. That path is identical in the final
+#   python:3.14-slim image, so the copied venv stays valid.
+# - UV_COMPILE_BYTECODE=1: precompile .pyc for faster cold starts.
+# - UV_LINK_MODE=copy: materialize real files in the venv (do NOT hardlink into
+#   the cache mount, which is not part of the image layer).
+ENV UV_PYTHON_DOWNLOADS=0 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    VIRTUAL_ENV=/app/.venv \
+    CARGO_TARGET_DIR=/build/cargo-target \
+    PATH="/root/.cargo/bin:${PATH}"
+
+# Build toolchain: build-essential (gcc/g++ for the Rust ext + pygixml C++),
+# python headers and curl (for rustup).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc python3-dev curl build-essential
+        python3-dev curl build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install Rust toolchain
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal \
-&& echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
-
-ENV PATH="/root/.cargo/bin:${PATH}"
+# Modern stable Rust toolchain via rustup (understands Cargo.lock v4).
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --profile minimal
 
 WORKDIR /app
-COPY . .
+RUN uv venv
 
-# Create and use virtual environment with uv
-RUN uv venv && uv pip install -v . --only-binary=pandas
+# --- Layer A: third-party dependencies only (cache-friendly) ---
+# Re-runs only when pyproject.toml changes, so the expensive dependency install
+# (incl. the pygixml source build on arm64) is reused across source edits.
+COPY pyproject.toml ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -r pyproject.toml
+
+# --- Layer B: build & install our own project (Rust extension) ---
+# Non-editable, so the package (incl. the compiled extension) lands directly in
+# the venv's site-packages — the final image needs no source tree.
+COPY Cargo.toml ./
+COPY src ./src
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/build/cargo-target \
+    uv pip install --no-deps .
+
+# Strip debug symbols from native extensions to shrink the venv.
+RUN find /app/.venv -name '*.so' -exec strip --strip-unneeded {} + || true
 
 # -------------------------------------
-# 2) Final-Stage
+# 2) Final-Stage (no uv, no build tools)
 # -------------------------------------
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+FROM python:3.14-slim-bookworm
 WORKDIR /app
 
-# Only copy wheels and project files from the builder stage
-COPY --from=builder /app/pyproject.toml /app/pyproject.toml
-COPY --from=builder /app/Cargo.toml /app/Cargo.toml
-COPY --from=builder /app/src /app/src
+ENV LOG_LEVEL=INFO \
+    PATH="/app/.venv/bin:${PATH}"
+
+# The project is installed non-editably into the venv's site-packages, so the
+# runtime image only needs the venv — no source tree, pyproject or Cargo.toml.
 COPY --from=builder /app/.venv /app/.venv
 
-# ENV PYTHONPATH=/app/src
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-ENV HEADLESS=false
-ENV LOG_LEVEL=INFO
 EXPOSE 11884/udp
-EXPOSE 8501/tcp
-CMD . .venv/bin/activate && exec .venv/bin/loxmqttrelay $([ "$HEADLESS" = "true" ] && echo "--headless") $([ ! -z "$LOG_LEVEL" ] && echo "--log-level $LOG_LEVEL")
+ENTRYPOINT ["docker-entrypoint.sh"]

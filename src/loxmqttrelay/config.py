@@ -32,6 +32,8 @@ class BrokerConfig:
     user: Optional[str] = None
     password: Optional[str] = None
     client_id: str = "loxmqttrelay"
+    # MQTT protocol version: "3.1"/"3.1.1" -> MQTTv311 (default), "5" -> MQTTv50
+    mqtt_version: str = "3.1"
 
 @dataclass
 class MiniserverConfig:

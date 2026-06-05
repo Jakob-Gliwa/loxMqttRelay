@@ -3,12 +3,13 @@ import pytest_asyncio
 import asyncio
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch, call
-from loxmqttrelay.mqtt_client import MQTTClient
+from loxmqttrelay.mqtt_client import MQTTClient, resolve_mqtt_version
 from loxmqttrelay.config import (
     Config, BrokerConfig, AppConfig,
     GeneralConfig, global_config
 )
 from gmqtt import Client as GmqttClient
+from gmqtt import constants as MQTTconstants
 from gmqtt.mqtt.constants import PubAckReasonCode
 
 logger = logging.getLogger(__name__)
@@ -18,7 +19,6 @@ def mock_args(monkeypatch):
     """Mock command line arguments for all tests"""
     mock_args = MagicMock()
     mock_args.log_level = "DEBUG"
-    mock_args.headless = True
     monkeypatch.setattr('loxmqttrelay.utils._args', mock_args)
     return mock_args
 
@@ -150,6 +150,90 @@ async def test_publish(mock_client, mqtt_client):
     )
 
     await mqtt_client.disconnect()
+
+
+@pytest.mark.parametrize("version,expected", [
+    (None, MQTTconstants.MQTTv311),
+    ("", MQTTconstants.MQTTv311),
+    ("3.1", MQTTconstants.MQTTv311),
+    ("3.1.1", MQTTconstants.MQTTv311),
+    ("311", MQTTconstants.MQTTv311),
+    ("4", MQTTconstants.MQTTv311),
+    ("5", MQTTconstants.MQTTv50),
+    ("5.0", MQTTconstants.MQTTv50),
+    ("50", MQTTconstants.MQTTv50),
+    ("nonsense", MQTTconstants.MQTTv311),
+])
+def test_resolve_mqtt_version(version, expected):
+    assert resolve_mqtt_version(version) == expected
+
+
+@pytest.mark.asyncio
+async def test_publish_user_properties_ignored_in_mqtt3(mock_client, mqtt_client):
+    """In MQTT 3.1.x mode user properties are dropped (not passed to gmqtt)."""
+    test_topics = ["test/topic1"]
+    callback = AsyncMock()
+
+    await mqtt_client.connect(test_topics, callback)
+    mock_client.publish.reset_mock()
+
+    await mqtt_client.publish(
+        "test/topic", "test message",
+        user_properties=[("source", "loxone")]
+    )
+
+    mock_client.publish.assert_called_with(
+        "test/topic",
+        "test message",
+        qos=0,
+        retain=False
+    )
+
+    await mqtt_client.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_publish_user_properties_in_mqtt5(monkeypatch, mock_client):
+    """In MQTT 5 mode user properties are forwarded to gmqtt as user_property."""
+    config = AppConfig()
+    config.broker = BrokerConfig(
+        host="test.mosquitto.org",
+        port=1883,
+        user="testuser",
+        password="testpass",
+        mqtt_version="5",
+    )
+    config.general = GeneralConfig(base_topic="test/topic/", log_level="DEBUG")
+    monkeypatch.setattr('loxmqttrelay.mqtt_client.global_config', config)
+
+    client = MQTTClient()
+    client.base_topic = config.general.base_topic
+
+    async def mock_connect(*args, **kwargs):
+        client._on_connect(None, None, None, None)
+        return None
+    mock_client.connect = AsyncMock(side_effect=mock_connect)
+
+    await client.connect(["test/topic1"], AsyncMock())
+    mock_client.connect.assert_called_once_with(
+        host="test.mosquitto.org",
+        port=1883,
+        version=MQTTconstants.MQTTv50
+    )
+    mock_client.publish.reset_mock()
+
+    props = [("source", "loxone"), ("room", "kitchen")]
+    await client.publish("test/topic", "test message", user_properties=props)
+
+    mock_client.publish.assert_called_with(
+        "test/topic",
+        "test message",
+        qos=0,
+        retain=False,
+        user_property=props
+    )
+
+    await client.disconnect()
 
 @pytest.mark.asyncio
 async def test_publish_without_connection(mock_client, mqtt_client):

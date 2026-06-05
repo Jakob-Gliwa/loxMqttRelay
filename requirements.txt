@@ -1,13 +1,11 @@
-aiohttp>=3.13.3
-orjson>=3.11.5
-streamlit>=1.52.2
+aiohttp>=3.14.0
+orjson>=3.11.9
 uvloop>=0.22.1
 construct>=2.10.70
-tomlkit>=0.13.3
+tomlkit>=0.15.0
 gmqtt>=0.7.0
 pycryptodome>=3.23.0
 loxwebsocket>=0.5.2
-lxml>=6.0.2
+lxml>=6.1.1
 lz4>=4.4.5
-pyarrow>=22.0.0
 

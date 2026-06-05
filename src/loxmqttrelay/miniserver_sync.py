@@ -1,10 +1,10 @@
 from lxml import etree
 from typing import List
-import ftplib
 import struct
 import zipfile
 import zlib
 from io import BytesIO
+import aiohttp
 from .config import global_config
 from .logging_config import get_lazy_logger
 import re
@@ -14,6 +14,29 @@ import lz4.block as lz4b
 import lz4.frame as lz4f
 
 logger = get_lazy_logger(__name__)
+
+# Fast XML path: pygixml (pugixml-backed) + XPath on the @Title axis.
+# Guarded so the relay keeps working on platforms without a pygixml wheel
+# (e.g. linux/arm64) — extract_inputs then transparently uses the lxml path.
+try:
+    import pygixml
+    from pygixml import PygiXMLError
+
+    _VIC_TITLES_XPATH = pygixml.XPathQuery("//C[@Type='VirtualInCaption']//C/@Title")
+    _PYGIXML_AVAILABLE = True
+except Exception as _pygixml_import_error:  # pragma: no cover - platform dependent
+    pygixml = None
+    PygiXMLError = Exception  # type: ignore[assignment, misc]
+    _VIC_TITLES_XPATH = None
+    _PYGIXML_AVAILABLE = False
+    logger.info(
+        f"pygixml unavailable ({_pygixml_import_error}); extract_inputs uses the lxml path"
+    )
+
+# Matches the timestamped Loxone config archives in the /prog directory,
+# e.g. "sps_0252_20260430003125.zip". There is no fixed-name pointer to the
+# active config (confirmed by Loxone), so we list and pick the newest.
+_CONFIG_FILE_PATTERN = re.compile(r'(sps_\d+_\d+\.(?:zip|LoxCC))')
 
 def _is_lz4_frame(data: bytes) -> bool:
     """
@@ -42,122 +65,161 @@ def _decompress_loxcc_block_lz4(data: bytes, uncompressed_size: int) -> bytes:
             raise ValueError(f"LZ4 decompression failed: {e}")
 
 
-def load_miniserver_config(ip: str, username: str, password: str) -> bytes:
+def _build_base_url(ip: str, port: int) -> str:
+    """
+    Build the plain-HTTP base URL for the Miniserver filesystem API.
+
+    The fsget/fslist endpoints are only served as plaintext (they cannot be
+    command-encrypted), so we always use http here, mirroring the URL handling
+    in http_miniserver_handler.
+    """
+    if port not in (80, 443):
+        return f"http://{ip}:{port}"
+    return f"http://{ip}"
+
+
+def _decompress_loxcc(loxcc_zip: bytes) -> bytes:
+    """
+    Extract sps0.LoxCC from a Loxone config ZIP archive and decompress it to
+    the raw configuration XML bytes.
+
+    Validates the LoxCC header magic, payload length, CRC32 checksum and the
+    uncompressed size. Raw bytes are returned so the XML parser can perform its
+    own encoding detection.
+    """
+    zf = zipfile.ZipFile(BytesIO(loxcc_zip))
+    with zf.open('sps0.LoxCC') as f:
+        header, = struct.unpack('<L', f.read(4))
+        if header != 0xaabbccee:
+            raise Exception("Invalid file format")
+
+        compressedSize, uncompressedSize, checksum, = struct.unpack('<LLL', f.read(12))
+        data = f.read(compressedSize)
+
+        # Strict payload length validation
+        if len(data) != compressedSize:
+            raise Exception(f"Payload length mismatch: got {len(data)}, expected {compressedSize}")
+
+        # Decompression method - always LZ4
+        logger.debug("Using LZ4 decompression")
+        resultStr = _decompress_loxcc_block_lz4(data, uncompressedSize)
+
+        if checksum != zlib.crc32(resultStr):
+            raise Exception('Checksum verification failed')
+
+        if len(resultStr) != uncompressedSize:
+            raise Exception(f'Uncompressed filesize mismatch: {len(resultStr)} != {uncompressedSize}')
+
+        return bytes(resultStr)
+
+
+async def load_miniserver_config(ip: str, port: int, username: str, password: str) -> bytes:
     """
     Load the most recent version of the currently active configuration file
-    from the Miniserver via FTP.
-    
+    from the Miniserver via the HTTP filesystem API.
+
+    Lists ``/dev/fslist/prog/`` to find the newest ``sps_<ver>_<ts>.zip``
+    archive (there is no fixed-name pointer to the active config), downloads it
+    via ``/dev/fsget/prog/<file>`` and decompresses the contained sps0.LoxCC.
+
     Args:
         ip: Miniserver IP address
-        username: FTP username
-        password: FTP password
+        port: Miniserver HTTP port
+        username: Miniserver username (HTTP BasicAuth)
+        password: Miniserver password (HTTP BasicAuth)
     """
+    base_url = _build_base_url(ip, port)
+    auth = aiohttp.BasicAuth(username, password)
+    timeout = aiohttp.ClientTimeout(total=30)
     try:
-        logger.debug(f"Loading miniserver configuration from {ip} with username {username}")
-        ftp = ftplib.FTP(ip)
-        try:
-            ftp.login(username, password)
-            logger.debug(f"Logged in successfully - files/folders in root: {ftp.nlst()}")
-            ftp.cwd('prog')
-            filesInFolder = ftp.nlst()
-            logger.debug(f"Found files in prog folder: {filesInFolder}")
-        except ftplib.all_errors as e:
-            logger.error(f"Error with ftp login to miniserver during miniserver sync: {e}")
+        logger.debug(f"Loading miniserver configuration from {base_url} with username {username}")
+        async with aiohttp.ClientSession(auth=auth, timeout=timeout) as session:
+            # 1) List the /prog directory (plain-text listing, one entry per line)
+            async with session.get(f"{base_url}/dev/fslist/prog/") as resp:
+                resp.raise_for_status()
+                listing = await resp.text()
+            logger.debug(f"Received prog directory listing ({len(listing)} bytes)")
 
-        # Change to prog directory
-  
-        
-        # Find the most recent configuration file
-        filelist = []
-        pattern = r'(sps_\d+_\d+\.(?:zip|LoxCC))'
-        for line in ftp.nlst():
-            match = re.search(pattern, line)
-            if match:
-                filelist.append(match.group(1))
-        
-        if not filelist:
-            raise Exception("No configuration files found")
-        
-                    
-        filename = sorted(filelist)[-1]
-        logger.info(f"Selected configuration file: {filename}")
-        
-        # Download the file
-        download_file = BytesIO()
-        ftp.retrbinary(f"RETR /prog/{filename}", download_file.write)
-        download_file.seek(0)
-        ftp.quit()
+            # 2) Pick the newest configuration archive
+            filelist = sorted(set(_CONFIG_FILE_PATTERN.findall(listing)))
+            if not filelist:
+                raise Exception("No configuration files found")
 
-        # Extract and decompress the configuration
-        zf = zipfile.ZipFile(download_file)
-        with zf.open('sps0.LoxCC') as f:
-            header, = struct.unpack('<L', f.read(4))
-            if header != 0xaabbccee:
-                raise Exception("Invalid file format")
-                
-            compressedSize, uncompressedSize, checksum, = struct.unpack('<LLL', f.read(12))
-            data = f.read(compressedSize)
-            
-            # Strict payload length validation
-            if len(data) != compressedSize:
-                raise Exception(f"Payload length mismatch: got {len(data)}, expected {compressedSize}")
-            
-            # Decompression method - always LZ4
-            logger.debug("Using LZ4 decompression")
-            resultStr = _decompress_loxcc_block_lz4(data, uncompressedSize)
-                    
-            if checksum != zlib.crc32(resultStr):
-                raise Exception('Checksum verification failed')
-                
-            if len(resultStr) != uncompressedSize:
-                raise Exception(f'Uncompressed filesize mismatch: {len(resultStr)} != {uncompressedSize}')
-                
-            # Return raw bytes - let XML parser handle encoding detection
-            return bytes(resultStr)
-            
+            filename = filelist[-1]
+            logger.info(f"Selected configuration file: {filename}")
+
+            # 3) Download the selected archive
+            async with session.get(f"{base_url}/dev/fsget/prog/{filename}") as resp:
+                resp.raise_for_status()
+                raw = await resp.read()
+
+        # 4) Extract and decompress the configuration
+        return _decompress_loxcc(raw)
+
     except Exception as e:
         logger.error(f"Error loading miniserver configuration: {str(e)}")
         raise
 
+def _extract_inputs_lxml(config_xml: bytes) -> List[str]:
+    """
+    Robust extraction path using lxml's recovery parser.
+
+    Handles malformed Loxone configs (duplicate attributes, unclosed/mismatched
+    tags, encoding issues, ...) that the strict pygixml fast path rejects.
+    """
+    parser = etree.XMLParser(recover=True)
+    root = etree.fromstring(config_xml, parser)
+
+    titles: List[str] = []
+
+    def find_titles_under_virtual_in_caption(element):
+        if element.tag == "C" and element.get("Type") == "VirtualInCaption":
+            for child in element.findall(".//C"):
+                title = child.get("Title")
+                if title:
+                    titles.append(title)
+        for child in element:
+            find_titles_under_virtual_in_caption(child)
+
+    find_titles_under_virtual_in_caption(root)
+    return titles
+
+
 def extract_inputs(config_xml: bytes) -> List[str]:
     """
     Extract all possible inputs from the Loxone configuration XML.
+
+    Fast path: a strict pygixml parse + XPath directly on the ``@Title`` axis
+    (``//C[@Type='VirtualInCaption']//C/@Title``). On a strict-parse error
+    (structurally malformed XML) — or when pygixml is unavailable — it falls
+    back to the previous lxml ``recover=True`` walk, which produces identical
+    output for the normal case and tolerates the malformed cases pygixml does
+    not handle.
     """
-    # Try normal XML parsing first
-    try:
-        root = etree.fromstring(config_xml)
-        logger.info("XML parsed successfully with standard parser")
-    except etree.XMLSyntaxError as e:
-        logger.warning(f"Standard XML parsing failed: {str(e)}")
-        logger.warning("Attempting XML parsing with recovery mode for malformed XML")
-        
-        # Use lxml recovery mode for malformed XML (handles duplicate attributes, encoding issues, etc.)
-        parser = etree.XMLParser(recover=True)
-        root = etree.fromstring(config_xml, parser)
-        logger.warning("Successfully parsed malformed XML using lxml recovery mode")
-    
-    # Extract titles from parsed XML
-    try:
-        titles = []
+    if _PYGIXML_AVAILABLE:
+        try:
+            doc = pygixml.parse_string(config_xml.decode("utf-8", errors="replace"))
+            titles: List[str] = []
+            for node in _VIC_TITLES_XPATH.evaluate_node_set(doc.root):
+                attr = node.attribute
+                if attr is not None and attr.value:
+                    titles.append(attr.value)
+            logger.info(f"Extracted {len(titles)} inputs (pygixml fast path)")
+            return titles
+        except PygiXMLError as e:
+            logger.warning(
+                f"pygixml strict parse failed ({e}); falling back to lxml recover mode"
+            )
 
-        def find_titles_under_virtual_in_caption(element):
-            if element.tag == "C" and element.get("Type") == "VirtualInCaption":
-                for child in element.findall(".//C"):
-                    title = child.get("Title")
-                    if title:
-                        titles.append(title)
-            for child in element:
-                find_titles_under_virtual_in_caption(child)
-
-        find_titles_under_virtual_in_caption(root)
-        logger.info(f"Extracted {len(titles)} inputs from configuration")
+    try:
+        titles = _extract_inputs_lxml(config_xml)
+        logger.info(f"Extracted {len(titles)} inputs (lxml recover fallback)")
         return titles
-
     except Exception as e:
         logger.error(f"Error extracting inputs from configuration: {str(e)}")
         raise
 
-def sync_miniserver_whitelist() -> List[str]:
+async def sync_miniserver_whitelist() -> List[str]:
     """
     Sync the whitelist with the miniserver configuration.
     Uses Config singleton to access configuration values.
@@ -171,8 +233,9 @@ def sync_miniserver_whitelist() -> List[str]:
         ms_ip = global_config.miniserver.miniserver_ip.split(':')[0]
         
         # Load the configuration from miniserver
-        config_xml = load_miniserver_config(
+        config_xml = await load_miniserver_config(
             ms_ip,
+            global_config.miniserver.miniserver_port,
             global_config.miniserver.miniserver_user,
             global_config.miniserver.miniserver_pass
         )

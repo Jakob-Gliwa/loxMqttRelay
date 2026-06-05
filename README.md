@@ -17,7 +17,7 @@ The MQTT has been created with several goals in mind:
 To achieve these goals the MQTT Relay for Loxone uses more opionionted and minimalist approach:
 1. Inbound communication with the MQTT Relay is done exclusively via UDP, with a reduced featureset compared to Loxberry
 2. Outbound communication with the Miniserver is done exclusively via HTTP/Websocket (no UDP capability)
-3. Interaction with the MQTT Relay is done primarily via MQTT with just a minimal UI for configuration (and even here editing the config file is recommended), but no integrated functionality like MQTT-Finder, Incoming Message Overview 
+3. Interaction with the MQTT Relay is done primarily via MQTT, configuration is done exclusively via the `config.toml` file, but no integrated functionality like MQTT-Finder, Incoming Message Overview 
 4. Except for boolean mapping and JSON flatteining, no transformers
 5. No provisioning of an integrated packaged MQTT broker
 
@@ -45,16 +45,6 @@ docker run -d \
   --restart unless-stopped \
   -v $(pwd)/config:/app/config \
   -p 11884:11884/udp \
-  -p 8501:8501 \
-  acidcliff/loxmqttrelay
-
-# For headless mode (recommended for production):
-docker run -d \
-  --name loxmqttrelay \
-  --restart unless-stopped \
-  -v $(pwd)/config:/app/config \
-  -p 11884:11884/udp \
-  -e HEADLESS=true \
   acidcliff/loxmqttrelay
 
 Optionally set -e LOG_LEVEL=DEBUG for more detailed logging
@@ -121,8 +111,7 @@ graph LR
 - Automatic synchronization of whitelisted topics using the Miniserver configuration
 - Robust XML parsing with lxml recovery mode for malformed Loxone v16 configurations
 - Topic monitoring and processing feedback
-- Web-based configuration UI
-- UI & headless mode operation
+- Configuration via `config.toml`
 
 ## UDP Communication
 
@@ -153,16 +142,9 @@ home/kitchen/light off    # Will be published without retain
 
 ## Running the MQTT Relay
 
-The MQTT Relayy can be started in two modes:
-
-1. Normal mode (with UI):
+Start the MQTT Relay:
 ```bash
 python main.py
-```
-
-2. Headless mode (without UI):
-```bash
-python main.py --headless
 ```
 
 You can also set the logging level:
@@ -172,17 +154,15 @@ python main.py --log-level INFO
 
 ## Docker Deployment
 
-You can run the MQTT Relay using Docker. The image is configured to run either in normal mode (with UI) or headless mode, with configurable logging levels.
+You can run the MQTT Relay using Docker, with configurable logging levels.
 
 ### Basic Docker Run
 
 ```bash
 docker run -d \
   -v /path/to/your/config:/app/config \
-  -e HEADLESS=true \
   -e LOG_LEVEL=INFO \
   -p 11884:11884/udp \
-  -p 8501:8501 \
   mqttrelay
 ```
 
@@ -198,14 +178,8 @@ docker run -d \
   - Default is INFO if not specified
   - Example: `-e LOG_LEVEL=DEBUG` for detailed logging
 
-- **HEADLESS Mode**: Control whether the UI should be enabled:
-  - Set `HEADLESS=true` to run without UI (recommended for production)
-  - Set `HEADLESS=false` or omit to enable the UI
-  - When UI is enabled, port 8501 needs to be exposed to access it
-
 - **Ports**:
   - UDP port (default 11884) for receiving UDP messages
-  - Port 8501 for the web UI (only needed if not running in headless mode)
 
 ### Example docker-compose.yml
 
@@ -217,17 +191,15 @@ services:
     volumes:
       - ./config:/app/config
     environment:
-      - HEADLESS=true
       - LOG_LEVEL=INFO
     ports:
       - "11884:11884/udp"
-      - "8501:8501"  # Only needed if HEADLESS=false
     restart: unless-stopped
 ```
 
 ## Configuration
 
-The MQTT Relay can be configured through a `config.toml` file or using the web-based configuration UI. A default configuration file (`default_config.toml`) is provided as a starting point with sensible defaults.
+The MQTT Relay is configured through a `config.toml` file. A default configuration file (`default_config.toml`) is provided as a starting point with sensible defaults.
 
 ### Logging Configuration
 
@@ -258,38 +230,6 @@ Available log levels: DEBUG, INFO, WARNING, ERROR, CRITICAL
 
 If an invalid log level is provided, it will default to INFO with a warning message.
 
-### UI Control
-
-The web-based configuration UI can be controlled in several ways:
-
-1. Via MQTT:
-   - Start UI: Publish any message to `{base_topic}startui`
-   - Stop UI: Publish any message to `{base_topic}stopui`
-   - The relay will respond with status messages on `{base_topic}ui/status`
-   - If the UI is already running/stopped, you'll receive a message indicating that
-   - If there's an error starting/stopping the UI, you'll receive an error message with details
-
-2. Manually: Run `streamlit run ui.py` in the MQTT Relay directory
-
-The UI provides a user-friendly interface for:
-- Configuring MQTT broker settings
-- Managing topic subscriptions and filters
-- Setting up HTTP communication
-- Controlling boolean conversion and JSON expansion
-- Managing the topic whitelist
-- And more...
-
-When using the UI, you'll need to specify the path where your configuration file should be stored. The UI will:
-- Pre-fill the path with the default location (config/config.tomö) if a configuration exists there
-- Allow you to specify a custom path for your configuration file
-- Create the necessary directories when saving if they don't exist
-- Disable save operations until a valid configuration path is specified
-
-You can also upload an existing configuration file to pre-fill the UI fields without overwriting your actual configuration. This is useful when you want to:
-- Start from an existing configuration as a template
-- Test different configurations before saving
-- Import settings from another installation
-
 ### MQTT Broker Settings
 ```toml
 [broker]
@@ -298,7 +238,18 @@ port = 1884
 user = ""  # null becomes empty string in TOML
 password = ""  # null becomes empty string in TOML
 client_id = "loxmqttrelay"
+mqtt_version = "3.1"  # "3.1" (default) for MQTT 3.1.x, "5" for MQTT 5
 ```
+
+#### MQTT Protocol Version
+
+The relay supports both MQTT 3.1.x and MQTT 5. The version is selected via the
+`mqtt_version` option in the `[broker]` section:
+
+- `mqtt_version = "3.1"` (also accepts `"3.1.1"`) - use MQTT 3.1.x. **This is the default** and is also used when the option is missing entirely.
+- `mqtt_version = "5"` - use MQTT 5. This is required if you want to attach MQTT 5 user properties to messages coming from Loxone (see [MQTT5 User Properties](#mqtt5-user-properties)).
+
+If an unknown value is provided, the relay logs a warning and falls back to MQTT 3.1.x.
 
 ### Topic Management
 
@@ -458,8 +409,6 @@ Example response on `config/response`:
 
 - `{base_topic}/config/update`: Reload configuration from file
 - `{base_topic}/config/restart`: Restart the MQTT Relay application
-- `{base_topic}/startui`: Start the web-based configuration UI
-- `{base_topic}/stopui`: Stop the web-based configuration UI
 
 ## Miniserver Integration
 
@@ -514,13 +463,9 @@ The mock Miniserver functionality can be enabled/disabled without removing the I
 - Regular backups of your configuration file are recommended
 - Test configuration changes in a development environment first
 - Topic monitoring can increase MQTT traffic, enable only when needed
-- The UI can be started/stopped via MQTT or manually using streamlit
-- In headless mode, the UI can still be started via MQTT if needed
 - Live configuration updates via MQTT
 - Automatic synchronization of whitelisted topics using the Miniserver configuration
 - Topic monitoring and processing feedback
-- Web-based configuration UI
-- UI & headless mode operation
 
 ## UDP Communication
 
@@ -588,6 +533,31 @@ zigbee2mqtt/Living Room Light/set {"state": "ON", "brightness": 255}
 
 The JSON payload will be sent as-is with no validation or quoting of the JSON string.
 Everything before the first `{` is considered the topic.
+
+### MQTT5 User Properties
+
+When the relay runs in MQTT 5 mode (`mqtt_version = "5"` in the `[broker]` section), you can attach MQTT 5 user properties to a message coming from Loxone. Add an optional block in square brackets right after the (optional) command and before the topic:
+
+```
+[publish|retain] [key1=value1;key2=value2] topic payload
+```
+
+Rules:
+- The block is optional. It is only treated as user properties if it starts with `[`, has a closing `]`, and contains **at least one real `key=value` pair** (non-empty key, `=` present). Otherwise the `[...]` is treated as a normal part of the topic.
+- Pairs are separated by `;`, key and value by the first `=`. Values may contain spaces and additional `=` characters because the block is delimited by `]`.
+- Empty values are allowed (e.g. `[flag=]`). Multiple pairs, including duplicate keys, are allowed (MQTT 5 permits repeated user property keys).
+- Malformed segments (e.g. without `=` or with an empty key) are skipped with a warning.
+
+Examples:
+```
+publish [source=loxone;room=kitchen] home/light on
+[unit=celsius] home/temp 22.5
+retain [origin=ms1] home/status online
+```
+
+Notes:
+- User properties are only sent when MQTT 5 is enabled. If you provide them while running in MQTT 3.1.x mode, they are ignored (with a log warning).
+- Limitation: a topic must not start with a valid `[key=value;...]` block, since that prefix is interpreted as user properties.
 
 ### Common Examples
 
