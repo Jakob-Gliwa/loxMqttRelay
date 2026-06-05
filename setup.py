@@ -34,7 +34,10 @@ if arch in ("x86_64", "amd64"):
             "loxmqttrelay.optimized._loxmqttrelay",
             path="Cargo.toml",
             binding=Binding.PyO3,
-            rustc_flags=["-C", "opt-level=3", "-C", "target-cpu=native"]
+            # x86-64-v3 (AVX2/FMA/BMI) instead of native: portable across ALL
+            # AVX2-capable hosts. "native" tunes to the build machine's CPU and
+            # can crash with SIGILL on other amd64 CPUs in a distributed image.
+            rustc_flags=["-C", "opt-level=3", "-C", "target-cpu=x86-64-v3"]
         )
     )
     

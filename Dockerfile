@@ -40,7 +40,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # --- Layer B: build & install our own project (Rust extension) ---
 # Non-editable, so the package (incl. the compiled extension) lands directly in
 # the venv's site-packages — the final image needs no source tree.
-COPY Cargo.toml ./
+# setup.py is REQUIRED: the Rust extensions are declared there (not in
+# pyproject.toml). Without it the build silently produces a pure-Python wheel
+# with no .so, and importing loxmqttrelay.{optimized,compatible} fails at runtime.
+COPY setup.py Cargo.toml ./
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cargo/registry \
@@ -50,6 +53,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Strip debug symbols from native extensions to shrink the venv.
 RUN find /app/.venv -name '*.so' -exec strip --strip-unneeded {} + || true
+
+# Fail the build early if the expected native extensions for this architecture
+# are missing or unloadable (e.g. an accidental pure-Python wheel). Uses the
+# venv interpreter so it inspects what actually got installed.
+COPY scripts/verify_extensions.py ./scripts/verify_extensions.py
+RUN /app/.venv/bin/python scripts/verify_extensions.py
 
 # -------------------------------------
 # 2) Final-Stage (no uv, no build tools)

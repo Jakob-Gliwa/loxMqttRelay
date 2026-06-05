@@ -21,6 +21,7 @@ if "arm" in platform.machine().lower():
     logger.info("Using ARM compatible implementation")
 else:
     system = platform.system()
+    output = ""
     try:
         if system == "Linux":
             output = subprocess.check_output("lscpu", shell=True, text=True)
@@ -28,26 +29,27 @@ else:
             output = subprocess.check_output("sysctl -a | grep machdep.cpu", shell=True, text=True)
         elif system == "Windows":
             output = subprocess.check_output("wmic cpu get Caption", shell=True, text=True)
-            
-        if output and ("avx" in output.lower() and "avx2" in output.lower()):
-            from loxmqttrelay.optimized._loxmqttrelay import (
-                MiniserverDataProcessor,
-                init_rust_logger
-            )
-            logger.info("Using optimized implementation with AVX/AVX2 support")
-        else:
-            from loxmqttrelay.compatible._loxmqttrelay import (
-                MiniserverDataProcessor,
-                init_rust_logger
-            )
-            logger.info("Using compatible implementation (AVX/AVX2 not detected)")
-
     except subprocess.CalledProcessError:
         logger.error("Error checking CPU features. Using compatible implementation.")
+        output = ""
+
+    use_optimized = bool(output) and "avx" in output.lower() and "avx2" in output.lower()
+
+    if use_optimized:
+        # No silent fallback: on an AVX2 host the optimized extension MUST be
+        # present (the build verifies this). If it is missing, surface the
+        # packaging bug loudly instead of masking it behind the slower build.
+        from loxmqttrelay.optimized._loxmqttrelay import (
+            MiniserverDataProcessor,
+            init_rust_logger
+        )
+        logger.info("Using optimized implementation with AVX/AVX2 support")
+    else:
         from loxmqttrelay.compatible._loxmqttrelay import (
             MiniserverDataProcessor,
             init_rust_logger
         )
+        logger.info("Using compatible implementation (AVX/AVX2 not detected)")
 
 from loxmqttrelay.config import global_config
 from .utils import setup_logging
