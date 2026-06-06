@@ -29,7 +29,9 @@ TOPIC = types.SimpleNamespace(
 
 logger = get_lazy_logger(__name__)
 
-# Initialize Rust logger
+# Initialize Rust logger (native call — log a breadcrumb so a hard crash here
+# is preceded by a traceable log line).
+logger.info("Initializing Rust logger ...")
 init_rust_logger()
 
 class MQTTRelay:

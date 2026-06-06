@@ -27,6 +27,9 @@ from loxmqttrelay.utils import can_load_x86_avx2_wheel
 # Active XML parser is recorded here and reported once at startup by
 # utils.log_runtime_environment() (this runs before logging is set up).
 if can_load_x86_avx2_wheel():
+    # Breadcrumb before the native import: if the pygixml wheel still SIGILLs
+    # (e.g. CPU misdetection), this is the last log line before the hard crash.
+    logger.info("Importing pygixml (AVX2-safe path) ...")
     try:
         import pygixml
         from pygixml import PygiXMLError

@@ -85,6 +85,30 @@ async def processor(config_instance):
     test_processor = TestMiniserverDataProcessor(config_instance)
     return test_processor.processor
 
+
+@pytest.mark.parametrize("whitelist", [
+    {"set/topic/a", "set/topic/b"},  # real default config type (Set[str])
+    set(),                            # empty set
+    ["list/topic"],                   # list still works
+])
+def test_construct_accepts_set_or_list_whitelist(config_instance, whitelist):
+    """Regression: topic_whitelist is a Python set in the default config.
+
+    pyo3 0.28 rejects ``Vec`` extraction from a set ("not a Sequence"), so the
+    Rust constructor must accept any iterable. Tests elsewhere only ever pass
+    lists, which is why this crashed at runtime but not in CI.
+    """
+    config_instance.topics.topic_whitelist = whitelist
+    proc = MiniserverDataProcessor(
+        DummyTopicNS(),
+        config_instance,
+        AsyncMock(),
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+    )
+    assert proc.topic_whitelist == set(whitelist)
+
 @pytest.mark.parametrize("input_val,expected", [
     ("true", "1"),
     ("TRUE", "1"),

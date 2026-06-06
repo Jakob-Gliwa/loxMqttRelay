@@ -205,13 +205,18 @@ impl MiniserverDataProcessor {
         // processor.mqtt_topics = Some(topics);
 
 
+        // topic_whitelist may be a Python set, frozenset or list depending on how
+        // config built it. pyo3's Vec extraction rejects sets ("not a Sequence"),
+        // so iterate any iterable and collect into the HashSet field.
+        let mut topic_whitelist = HashSet::new();
+        for item in pyget!(global_config_py, py, "topics", "topic_whitelist").try_iter()? {
+            topic_whitelist.insert(item?.extract::<String>()?);
+        }
+
         let processor = MiniserverDataProcessor {
             compiled_subscription_filter: compiled,
             do_not_forward_patterns: None,
-            topic_whitelist: pyget!(global_config_py, py, "topics", "topic_whitelist")
-                .extract::<Vec<String>>()?
-                .into_iter()
-                .collect(),
+            topic_whitelist,
             convert_bool_cache: Mutex::new(LruCache::new(lru_size)),
             normalize_topic_cache: Mutex::new(LruCache::new(lru_size)),
             global_config: global_config_py,
