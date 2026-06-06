@@ -18,20 +18,37 @@ logger = get_lazy_logger(__name__)
 # Fast XML path: pygixml (pugixml-backed) + XPath on the @Title axis.
 # Guarded so the relay keeps working on platforms without a pygixml wheel
 # (e.g. linux/arm64) — extract_inputs then transparently uses the lxml path.
-try:
-    import pygixml
-    from pygixml import PygiXMLError
+#
+# IMPORTANT: the published x86_64 pygixml wheel is compiled with AVX2
+# unconditionally (no runtime CPU dispatch), so even importing it SIGILLs on
+# x86_64 CPUs without AVX2. can_load_x86_avx2_wheel() centralizes that decision.
+from loxmqttrelay.utils import can_load_x86_avx2_wheel
 
-    _VIC_TITLES_XPATH = pygixml.XPathQuery("//C[@Type='VirtualInCaption']//C/@Title")
-    _PYGIXML_AVAILABLE = True
-except Exception as _pygixml_import_error:  # pragma: no cover - platform dependent
+# Active XML parser is recorded here and reported once at startup by
+# utils.log_runtime_environment() (this runs before logging is set up).
+if can_load_x86_avx2_wheel():
+    try:
+        import pygixml
+        from pygixml import PygiXMLError
+
+        _VIC_TITLES_XPATH = pygixml.XPathQuery("//C[@Type='VirtualInCaption']//C/@Title")
+        _PYGIXML_AVAILABLE = True
+        ACTIVE_XML_PARSER = "pygixml"
+        XML_PARSER_REASON = "fast path"
+    except Exception as _pygixml_import_error:  # pragma: no cover - platform dependent
+        pygixml = None
+        PygiXMLError = Exception  # type: ignore[assignment, misc]
+        _VIC_TITLES_XPATH = None
+        _PYGIXML_AVAILABLE = False
+        ACTIVE_XML_PARSER = "lxml"
+        XML_PARSER_REASON = f"pygixml import failed: {_pygixml_import_error}"
+else:
     pygixml = None
     PygiXMLError = Exception  # type: ignore[assignment, misc]
     _VIC_TITLES_XPATH = None
     _PYGIXML_AVAILABLE = False
-    logger.info(
-        f"pygixml unavailable ({_pygixml_import_error}); extract_inputs uses the lxml path"
-    )
+    ACTIVE_XML_PARSER = "lxml"
+    XML_PARSER_REASON = "x86_64 host without AVX2; AVX2-only pygixml wheel skipped"
 
 # Matches the timestamped Loxone config archives in the /prog directory,
 # e.g. "sps_0252_20260430003125.zip". There is no fixed-name pointer to the

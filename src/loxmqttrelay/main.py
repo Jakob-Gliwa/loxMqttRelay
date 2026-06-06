@@ -95,7 +95,11 @@ class MQTTRelay:
 def main():
     # Initialize logging first
     utils.setup_logging()
-    
+
+    # Report the active build / parser / deps right away, so any later failure
+    # can be traced back to the exact runtime configuration.
+    utils.log_runtime_environment()
+
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     relay = MQTTRelay()
     try:

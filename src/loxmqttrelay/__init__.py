@@ -5,51 +5,28 @@ This package provides a bridge between MQTT and Loxone Miniserver, allowing bidi
 communication between MQTT topics and Loxone controls.
 """
 __version__ = "0.1.0"
-import platform
-import subprocess
 
-from loxmqttrelay.logging_config import get_lazy_logger
+from loxmqttrelay.utils import prefer_optimized_build
 
-logger = get_lazy_logger(__name__)
-
-# Determine which implementation to use based on CPU architecture and features
-if "arm" in platform.machine().lower():
+# Pick the native build from a single, centralized CPU decision. On an AVX2 host
+# the optimized extension MUST be present (the build verifies this) — no silent
+# fallback, so a packaging bug surfaces loudly instead of being masked.
+# The selection is recorded here (not logged: this runs before logging is set
+# up) and reported once at startup by utils.log_runtime_environment().
+if prefer_optimized_build():
+    from loxmqttrelay.optimized._loxmqttrelay import (
+        MiniserverDataProcessor,
+        init_rust_logger
+    )
+    ACTIVE_RUST_BUILD = "optimized"
+    ACTIVE_RUST_MODULE = "loxmqttrelay.optimized._loxmqttrelay"
+else:
     from loxmqttrelay.compatible._loxmqttrelay import (
         MiniserverDataProcessor,
         init_rust_logger
     )
-    logger.info("Using ARM compatible implementation")
-else:
-    system = platform.system()
-    output = ""
-    try:
-        if system == "Linux":
-            output = subprocess.check_output("lscpu", shell=True, text=True)
-        elif system == "Darwin":  # macOS
-            output = subprocess.check_output("sysctl -a | grep machdep.cpu", shell=True, text=True)
-        elif system == "Windows":
-            output = subprocess.check_output("wmic cpu get Caption", shell=True, text=True)
-    except subprocess.CalledProcessError:
-        logger.error("Error checking CPU features. Using compatible implementation.")
-        output = ""
-
-    use_optimized = bool(output) and "avx" in output.lower() and "avx2" in output.lower()
-
-    if use_optimized:
-        # No silent fallback: on an AVX2 host the optimized extension MUST be
-        # present (the build verifies this). If it is missing, surface the
-        # packaging bug loudly instead of masking it behind the slower build.
-        from loxmqttrelay.optimized._loxmqttrelay import (
-            MiniserverDataProcessor,
-            init_rust_logger
-        )
-        logger.info("Using optimized implementation with AVX/AVX2 support")
-    else:
-        from loxmqttrelay.compatible._loxmqttrelay import (
-            MiniserverDataProcessor,
-            init_rust_logger
-        )
-        logger.info("Using compatible implementation (AVX/AVX2 not detected)")
+    ACTIVE_RUST_BUILD = "compatible"
+    ACTIVE_RUST_MODULE = "loxmqttrelay.compatible._loxmqttrelay"
 
 from loxmqttrelay.config import global_config
 from .utils import setup_logging
@@ -62,5 +39,7 @@ setup_logging()
 __all__ = [
     'global_config',
     'MiniserverDataProcessor',
-    'init_rust_logger'
+    'init_rust_logger',
+    'ACTIVE_RUST_BUILD',
+    'ACTIVE_RUST_MODULE',
 ]
