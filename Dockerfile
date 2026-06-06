@@ -32,10 +32,18 @@ RUN uv venv
 
 # --- Layer A: third-party dependencies only (cache-friendly) ---
 # Re-runs only when pyproject.toml changes, so the expensive dependency install
-# (incl. the pygixml source build on arm64) is reused across source edits.
+# (incl. the pygixml source build) is reused across source edits.
+#
+# pygixml has no arm64 wheel and its x86_64 wheel is compiled with AVX2 (no
+# runtime CPU dispatch); the arm64 source build otherwise bakes in -march=native
+# tuned to the build host. Both SIGILL (exit 132) on weaker CPUs — non-AVX2 x86
+# and Raspberry Pi. Build pygixml PORTABLY so one binary runs on every CPU of the
+# image's architecture:
+#   * --no-binary pygixml  -> force a source build (skip the prebuilt AVX2 wheel)
+#   * CI=1                  -> pygixml's Optimize.cmake then omits -march=native
 COPY pyproject.toml ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r pyproject.toml
+    CI=1 uv pip install -r pyproject.toml --no-binary pygixml
 
 # --- Layer B: build & install our own project (Rust extension) ---
 # Non-editable, so the package (incl. the compiled extension) lands directly in

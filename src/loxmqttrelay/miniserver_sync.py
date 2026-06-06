@@ -16,20 +16,25 @@ import lz4.frame as lz4f
 logger = get_lazy_logger(__name__)
 
 # Fast XML path: pygixml (pugixml-backed) + XPath on the @Title axis.
-# Guarded so the relay keeps working on platforms without a pygixml wheel
-# (e.g. linux/arm64) — extract_inputs then transparently uses the lxml path.
+# Falls back to lxml (extract_inputs does this transparently) whenever pygixml
+# cannot be used on this host.
 #
-# IMPORTANT: the published x86_64 pygixml wheel is compiled with AVX2
-# unconditionally (no runtime CPU dispatch), so even importing it SIGILLs on
-# x86_64 CPUs without AVX2. can_load_x86_avx2_wheel() centralizes that decision.
-from loxmqttrelay.utils import can_load_x86_avx2_wheel
+# pygixml ships a per-host native build with NO runtime CPU dispatch: on a CPU
+# lacking an instruction it was compiled for, even importing it raises SIGILL
+# (exit 132) and kills the process. Our image builds pygixml PORTABLY (baseline
+# arch), so it normally loads everywhere — but we still VERIFY it in a throwaway
+# subprocess first (cheap, cached), so a non-portable build that slips in (e.g. a
+# local AVX2 wheel on a non-AVX2 dev box) degrades to lxml instead of crashing.
+from loxmqttrelay.utils import native_import_runs
+
+# Probe mirrors the module's own load-time work (import + compile an XPath), so a
+# passing probe means the in-process import below is safe on this CPU.
+_PYGIXML_PROBE = "import pygixml; pygixml.XPathQuery('//C')"
 
 # Active XML parser is recorded here and reported once at startup by
 # utils.log_runtime_environment() (this runs before logging is set up).
-if can_load_x86_avx2_wheel():
-    # Breadcrumb before the native import: if the pygixml wheel still SIGILLs
-    # (e.g. CPU misdetection), this is the last log line before the hard crash.
-    logger.info("Importing pygixml (AVX2-safe path) ...")
+if native_import_runs(_PYGIXML_PROBE):
+    logger.info("pygixml load probe passed; importing pygixml ...")
     try:
         import pygixml
         from pygixml import PygiXMLError
@@ -37,7 +42,7 @@ if can_load_x86_avx2_wheel():
         _VIC_TITLES_XPATH = pygixml.XPathQuery("//C[@Type='VirtualInCaption']//C/@Title")
         _PYGIXML_AVAILABLE = True
         ACTIVE_XML_PARSER = "pygixml"
-        XML_PARSER_REASON = "fast path"
+        XML_PARSER_REASON = "fast path (load probe passed)"
     except Exception as _pygixml_import_error:  # pragma: no cover - platform dependent
         pygixml = None
         PygiXMLError = Exception  # type: ignore[assignment, misc]
@@ -51,7 +56,7 @@ else:
     _VIC_TITLES_XPATH = None
     _PYGIXML_AVAILABLE = False
     ACTIVE_XML_PARSER = "lxml"
-    XML_PARSER_REASON = "x86_64 host without AVX2; AVX2-only pygixml wheel skipped"
+    XML_PARSER_REASON = "pygixml load probe failed (would SIGILL/import error); using lxml"
 
 # Matches the timestamped Loxone config archives in the /prog directory,
 # e.g. "sps_0252_20260430003125.zip". There is no fixed-name pointer to the

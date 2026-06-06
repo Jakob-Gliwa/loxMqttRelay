@@ -18,10 +18,9 @@ P = ParamSpec('P')
 ################################################################################
 # CPU / architecture detection
 #
-# Single source of truth for "which native code may run on this host":
-#   * which Rust extension to load (optimized vs compatible), and
-#   * whether the AVX2-only x86_64 pygixml wheel is safe to import (it is built
-#     with AVX2 unconditionally and SIGILLs on x86_64 CPUs without AVX2).
+# Decides which Rust extension to load (optimized vs compatible). pygixml is no
+# longer gated here: it ships as a portable build and is instead verified at
+# runtime by native_import_runs() below.
 #
 # Dependency-free and avoids external tools like ``lscpu`` (absent from slim
 # images): reads ``/proc/cpuinfo`` on Linux and ``sysctl`` on macOS, defaulting
@@ -74,13 +73,27 @@ def prefer_optimized_build() -> bool:
     return is_x86() and has_avx2()
 
 
-def can_load_x86_avx2_wheel() -> bool:
-    """Whether an AVX2-compiled x86 wheel (e.g. pygixml) is safe to import here.
+@functools.lru_cache(maxsize=None)
+def native_import_runs(probe_code: str) -> bool:
+    """True iff *probe_code* runs to completion in a fresh subprocess on THIS CPU.
 
-    Safe when we are not on x86 at all (a different, non-AVX2 wheel is installed)
-    or when the x86 CPU actually has AVX2.
+    Gate for native deps that ship CPU-specific code with NO runtime dispatch:
+    pygixml is compiled per build host (``-march=native``/AVX2), so on a CPU
+    missing an instruction it was built for even importing it raises SIGILL
+    (exit 132) and takes the whole process down — uncatchable in-process. Running
+    the risky import in a throwaway child turns that hard crash into a boolean,
+    so we can fall back (e.g. to lxml) instead of dying. Result is cached.
     """
-    return not is_x86() or has_avx2()
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", probe_code],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
 
 
 def log_performance(name: Optional[str] = None, severity: Optional[int] = logging.DEBUG):
