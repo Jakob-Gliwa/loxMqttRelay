@@ -224,13 +224,17 @@ async def test_process_data_single_filter_pass(processor, filters, topic, messag
         processor.http_handler_obj.send_to_miniserver.assert_not_called()
 
 @pytest.mark.asyncio
-async def test_process_data_filter_second_pass_after_flatten(processor, monkeypatch):
+async def test_process_data_filter_second_pass_after_flatten(config_instance, monkeypatch):
     """Test that filter works after JSON flattening."""
     topic = "original/topic"
     message = '{"key1": "val1", "ignore": {"nested": "val2"}}'
 
-    processor.update_subscription_filters([r"ignore\/.*"])
+    # expand_json is read once at construction (config is immutable between
+    # restarts), so enable it BEFORE building the processor.
     monkeypatch.setattr(global_config.processing, 'expand_json', True)
+    processor = TestMiniserverDataProcessor(config_instance).processor
+
+    processor.update_subscription_filters([r"ignore\/.*"])
 
     processor.process_data(topic, message)
     calls = processor.http_handler_obj.send_to_miniserver.call_args_list
@@ -281,7 +285,7 @@ async def test_process_data_with_do_not_forward(processor):
     processor.http_handler_obj.send_to_miniserver.assert_not_called()
 
 @pytest.mark.asyncio
-async def test_process_data_order_of_filters(processor, monkeypatch):
+async def test_process_data_order_of_filters(config_instance, monkeypatch):
     topic_messages = [
         ("ignore/before/foo", "val1"),
         ("json/topic", '{"ignore":{"after":{"bar":"val2"}}}'),
@@ -290,10 +294,13 @@ async def test_process_data_order_of_filters(processor, monkeypatch):
         ("normal/publish", "val6")
     ]
 
+    # expand_json is read once at construction, so enable it before building.
+    monkeypatch.setattr(global_config.processing, 'expand_json', True)
+    processor = TestMiniserverDataProcessor(config_instance).processor
+
     processor.update_subscription_filters([r"^ignore\/before\/.*", r"^ignore\/after\/.*"])
     processor.update_topic_whitelist(["whitelisted_foo", "normal_publish"])
     processor.update_do_not_forward([r"^dnf\/.*"])
-    monkeypatch.setattr(global_config.processing, 'expand_json', True)
 
     for topic, message in topic_messages:
         processor.process_data(topic, message)

@@ -124,7 +124,7 @@ class MQTTClient:
                     )
 
             self.client.publish(topic, message, qos=0, retain=retain, **kwargs)
-            logger.debug(f"Published: {topic} = {message!r} (retain={retain})")
+            logger.debug("Published: %s = %r (retain=%s)", topic, message, retain)
 
         except Exception as e:
             logger.error(f"Fatal error during publish: {e}")

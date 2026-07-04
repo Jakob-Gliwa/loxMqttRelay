@@ -162,6 +162,10 @@ pub struct MiniserverDataProcessor {
     orjson_obj: Py<PyAny>,
     mqtt_topics: Option<MqttTopics>,
     base_topic: String,
+    // Cached once at construction. Config is immutable between restarts (a config
+    // change re-execs the process), so the per-message hot path needs no getattr
+    // back into Python for this flag.
+    expand_json: bool,
 }
 
 #[pymethods]
@@ -183,6 +187,7 @@ impl MiniserverDataProcessor {
         };
         let lru_size = NonZeroUsize::new(cache_size).unwrap();
         let base_topic: String = pyget!(global_config_py, py, "general", "base_topic").extract()?;
+        let expand_json: bool = pyget!(global_config_py, py, "processing", "expand_json").extract()?;
         let miniserver_startup_topic: String = topic_ns.bind(py).getattr(intern!(py, "MINISERVER_STARTUP_EVENT"))?.extract()?;
         let config_get_topic: String = topic_ns.bind(py).getattr(intern!(py, "CONFIG_GET"))?.extract()?;
         let config_response_topic: String = topic_ns.bind(py).getattr(intern!(py, "CONFIG_RESPONSE"))?.extract()?;
@@ -226,6 +231,7 @@ impl MiniserverDataProcessor {
             http_handler_obj,
             orjson_obj,
             base_topic:base_topic,
+            expand_json,
         };
 
   
@@ -346,7 +352,7 @@ impl MiniserverDataProcessor {
             }
         }
 
-        let expand = pyget!(self.global_config, py, "processing", "expand_json").extract()?;
+        let expand = self.expand_json;
         debug!("Transforming data with expand_json={}", expand);
 
         let flattened: Vec<(String, String)> = if expand {

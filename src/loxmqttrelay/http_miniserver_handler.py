@@ -16,6 +16,9 @@ class HttpMiniserverHandler:
     ms_port = global_config.miniserver.miniserver_port
     ms_user = global_config.miniserver.miniserver_user
     ms_pass = global_config.miniserver.miniserver_pass
+    # Read once at import; config is immutable between restarts (a config change
+    # re-execs the process), so the per-message send path needs no live lookup.
+    use_websocket = global_config.miniserver.use_websocket
     enable_mock_miniserver=global_config.debug.enable_mock
     mock_ms_ip=global_config.debug.mock_ip
     connection_semaphore = asyncio.Semaphore(global_config.miniserver.miniserver_max_parallel_connections)  # Default to 5 parallel connections
@@ -48,7 +51,7 @@ class HttpMiniserverHandler:
         Returns a dictionary with results for each topic.
         """
         # Determine target IP
-        logger.debug(f"Using miniserver address: {self.target_ip} {'(mock)' if (self.mock_ms_ip and self.enable_mock_miniserver) else '(real)'}")
+        logger.debug("Using miniserver address: %s %s", self.target_ip, '(mock)' if (self.mock_ms_ip and self.enable_mock_miniserver) else '(real)')
 
         ws_client = loxwebsocket
         if "CONNECTED" not in ws_client.state:
@@ -56,7 +59,7 @@ class HttpMiniserverHandler:
 
         try:
             await ws_client.send_websocket_command(normalized_topic, str(value))
-            logger.debug(f"Sent {topic} (as {normalized_topic})={value} to Miniserver successfully via WebSocket.")
+            logger.debug("Sent %s (as %s)=%s to Miniserver successfully via WebSocket.", topic, normalized_topic, value)
             return 
         except Exception as e:
             error_msg = f"Error sending {topic} (as {normalized_topic})={value} to Miniserver via WebSocket: {str(e)}"
@@ -76,14 +79,14 @@ class HttpMiniserverHandler:
         Returns a dictionary with results for each topic.
         """
         # Use mock miniserver IP only if both provided and enabled
-        logger.debug(f"Using miniserver address: {self.target_ip} {'(mock)' if (self.mock_ms_ip and self.enable_mock_miniserver) else '(real)'}")
+        logger.debug("Using miniserver address: %s %s", self.target_ip, '(mock)' if (self.mock_ms_ip and self.enable_mock_miniserver) else '(real)')
 
         async with aiohttp.ClientSession(auth=self.auth, timeout=self.timeout) as session:
             # Ensure value is converted to string
             safe_value = str(value)
             # Use pre-built HTTP base URL
             url = f"{self.http_base_url}/dev/sps/io/{normalized_topic}/{safe_value}"
-            logger.debug(f"Sending to {url}")
+            logger.debug("Sending to %s", url)
             
             try:
                 # Use semaphore to limit concurrent connections
@@ -92,7 +95,7 @@ class HttpMiniserverHandler:
                         if resp.status != 200:
                             logger.warning(f"Miniserver returned {resp.status} for topic {topic} (URL: {url})")
                         else:
-                            logger.debug(f"Sent {topic}={value} to Miniserver successfully.")
+                            logger.debug("Sent %s=%s to Miniserver successfully.", topic, value)
                         return { 'code': resp.status }
             except asyncio.TimeoutError:
                 error_msg = f" Error 408: Timeout while sending {topic} (as {normalized_topic})={value} to Miniserver (URL: {url}): request timed out after 10 seconds"
@@ -131,9 +134,9 @@ class HttpMiniserverHandler:
         Returns:
             None
         """
-        logger.debug(f"Sending {topic} (as {normalized_topic})={value} to Miniserver")
+        logger.debug("Sending %s (as %s)=%s to Miniserver", topic, normalized_topic, value)
         # Send to Miniserver using WebSocket or HTTP based on config
-        if global_config.miniserver.use_websocket:
+        if self.use_websocket:
             await self.send_to_minisever_via_websocket(topic, normalized_topic, value)
         else:
             await self.send_to_miniserver_via_http(topic, normalized_topic, value)

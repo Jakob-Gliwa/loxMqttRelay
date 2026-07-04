@@ -214,7 +214,7 @@ async def _handle_mqtt3(udpmsg: str, addr) -> None:
 
     command, topic, message = result
     retain = command == "retain"
-    logger.debug(f"Publishing{' (retain)' if retain else ''}: '{topic}'='{message}'")
+    logger.debug("Publishing%s: '%s'='%s'", ' (retain)' if retain else '', topic, message)
     await mqtt_client.publish(topic, message, retain)
 
 
@@ -228,8 +228,8 @@ async def _handle_mqtt5(udpmsg: str, addr) -> None:
     command, topic, message, user_properties = result
     retain = command == "retain"
     logger.debug(
-        f"Publishing{' (retain)' if retain else ''}: '{topic}'='{message}' "
-        f"properties={user_properties}"
+        "Publishing%s: '%s'='%s' properties=%s",
+        ' (retain)' if retain else '', topic, message, user_properties,
     )
     await mqtt_client.publish(topic, message, retain, user_properties)
 
