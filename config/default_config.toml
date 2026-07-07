@@ -34,6 +34,10 @@ convert_booleans = false
 [udp]
 udp_in_port = 11884
 
+[http]
+http_api_enabled = true
+http_api_port = 11885
+
 [debug]
 mock_ip = ""
 enable_mock = false

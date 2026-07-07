@@ -45,6 +45,7 @@ docker run -d \
   --restart unless-stopped \
   -v $(pwd)/config:/app/config \
   -p 11884:11884/udp \
+  -p 11885:11885/tcp \
   acidcliff/loxmqttrelay
 
 Optionally set -e LOG_LEVEL=DEBUG for more detailed logging
@@ -163,6 +164,7 @@ docker run -d \
   -v /path/to/your/config:/app/config \
   -e LOG_LEVEL=INFO \
   -p 11884:11884/udp \
+  -p 11885:11885/tcp \
   mqttrelay
 ```
 
@@ -180,6 +182,7 @@ docker run -d \
 
 - **Ports**:
   - UDP port (default 11884) for receiving UDP messages
+  - TCP port (default 11885) for the read-only HTTP API (see [HTTP API](#http-api))
 
 ### Example docker-compose.yml
 
@@ -194,6 +197,7 @@ services:
       - LOG_LEVEL=INFO
     ports:
       - "11884:11884/udp"
+      - "11885:11885/tcp"
     restart: unless-stopped
 ```
 
@@ -430,6 +434,34 @@ Caution: This function will assume that every Virtual Input is a possible target
 ### Trigger Manual Sync
 
 Configure your Miniserver to publish any message to `{base_topic}/miniserverevent/startup` on startup to trigger an automatic resync with the Miniserver configuration.
+
+## HTTP API
+
+The relay exposes a small, read-only HTTP API (in addition to the UDP input) for inspecting its runtime state.
+
+```toml
+[http]
+http_api_enabled = true   # start the HTTP API server (default: true)
+http_api_port = 11885     # TCP port to listen on (default: 11885)
+```
+
+### `GET /vi_names`
+
+Returns a JSON object mapping each whitelisted MQTT topic to the **Virtual Input name** it is forwarded to on the Miniserver. The Virtual Input name is the *normalized* topic (`/` and `%` replaced by `_`) — exactly the name the relay uses when writing to `/dev/sps/io/<name>/<value>` — so this tells you how each Virtual Input has to be named in Loxone Config.
+
+```bash
+curl http://<relay-host>:11885/vi_names
+```
+
+```json
+{
+  "device/status": "device_status",
+  "home/living%room/temp": "home_living_room_temp",
+  "sensor_data": "sensor_data"
+}
+```
+
+The list reflects the current whitelist, whether it was loaded from `config.toml` or synced from the Miniserver (see [Automatic Configuration Sync](#automatic-configuration-sync)).
 
 ## Testing Setup
 

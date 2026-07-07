@@ -11,6 +11,7 @@ from loxmqttrelay.mqtt_client import mqtt_client
 from loxmqttrelay.udp_handler import start_udp_server
 from loxmqttrelay.miniserver_sync import sync_miniserver_whitelist
 from loxmqttrelay.http_miniserver_handler import http_miniserver_handler
+from loxmqttrelay.http_api_server import HttpApiServer
 import loxmqttrelay.utils as utils
 
 # The imports are now handled by __init__.py
@@ -37,14 +38,23 @@ init_rust_logger()
 class MQTTRelay:
     def __init__(self):
         self.miniserver_data_processor = MiniserverDataProcessor(TOPIC, global_config, self, mqtt_client, http_miniserver_handler, orjson)
+        self.http_api_server = HttpApiServer(self.miniserver_data_processor)
 
     async def main(self):
         await self.connect_and_subscribe_mqtt()
         await self.handle_miniserver_sync()
         asyncio.create_task(start_udp_server())
+        await self.start_http_api()
 
         logger.info("MQTT Relay started")
         await asyncio.Future()
+
+    async def start_http_api(self):
+        """Start the read-only HTTP API server if enabled in the config."""
+        if not global_config.http.http_api_enabled:
+            logger.info("HTTP-API disabled by config")
+            return
+        await self.http_api_server.start()
 
     async def handle_miniserver_sync(self):
         """Attempt to sync whitelist with miniserver if enabled"""        

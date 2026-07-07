@@ -85,4 +85,5 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 11884/udp
+EXPOSE 11885/tcp
 ENTRYPOINT ["docker-entrypoint.sh"]

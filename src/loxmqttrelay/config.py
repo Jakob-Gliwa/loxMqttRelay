@@ -17,6 +17,7 @@ class ConfigSection(Enum):
     TOPICS = "topics"
     PROCESSING = "processing"
     UDP = "udp"
+    HTTP = "http"
     DEBUG = "debug"
 
 @dataclass
@@ -62,6 +63,11 @@ class UdpConfig:
     udp_in_port: int = 11884
 
 @dataclass
+class HttpConfig:
+    http_api_enabled: bool = True
+    http_api_port: int = 11885
+
+@dataclass
 class DebugConfig:
     mock_ip: str = ""
     enable_mock: bool = False
@@ -74,6 +80,7 @@ class AppConfig:
     topics: TopicsConfig = field(default_factory=TopicsConfig)
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
     udp: UdpConfig = field(default_factory=UdpConfig)
+    http: HttpConfig = field(default_factory=HttpConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -263,6 +270,10 @@ class Config:
     @property
     def udp(self) -> UdpConfig:
         return self._config.udp
+
+    @property
+    def http(self) -> HttpConfig:
+        return self._config.http
 
     @property
     def debug(self) -> DebugConfig:

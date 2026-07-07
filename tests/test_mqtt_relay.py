@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 import logging
 import json
 from loxmqttrelay.main import MQTTRelay, TOPIC
@@ -44,6 +44,28 @@ def mock_logger() -> typing.Generator[MagicMock, None, None]:
     """Creates a mocked logger."""
     with patch('loxmqttrelay.main.logger', new_callable=MagicMock) as mock_logger:
         yield mock_logger
+
+@pytest.mark.asyncio
+async def test_start_http_api_enabled(config_instance: Config) -> None:
+    """When enabled, start_http_api starts the HTTP API server."""
+    config_instance._config.http.http_api_enabled = True
+    with patch.object(config_instance, '_load_config', return_value=None):
+        relay = MQTTRelay()
+        relay.http_api_server.start = AsyncMock()
+        await relay.start_http_api()
+        relay.http_api_server.start.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_start_http_api_disabled(config_instance: Config) -> None:
+    """When disabled, start_http_api does not start the server."""
+    config_instance._config.http.http_api_enabled = False
+    with patch.object(config_instance, '_load_config', return_value=None):
+        relay = MQTTRelay()
+        relay.http_api_server.start = AsyncMock()
+        await relay.start_http_api()
+        relay.http_api_server.start.assert_not_awaited()
+
 
 @pytest.mark.asyncio
 async def test_whitelist_loading_sequence(config_instance: Config, mock_logger: MagicMock) -> None:
