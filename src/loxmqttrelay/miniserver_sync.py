@@ -58,10 +58,14 @@ else:
     ACTIVE_XML_PARSER = "lxml"
     XML_PARSER_REASON = "pygixml load probe failed (would SIGILL/import error); using lxml"
 
-# Matches the timestamped Loxone config archives in the /prog directory,
-# e.g. "sps_0252_20260430003125.zip". There is no fixed-name pointer to the
-# active config (confirmed by Loxone), so we list and pick the newest.
-_CONFIG_FILE_PATTERN = re.compile(r'(sps_\d+_\d+\.(?:zip|LoxCC))')
+# Matches the timestamped Loxone config files in the /prog directory, e.g.
+# "sps_0252_20260430003125.zip" or "sps_0272_20260727223721.LoxCC". There is no
+# fixed-name pointer to the active config (confirmed by Loxone), so we list and
+# pick the newest by (config version, timestamp).
+_CONFIG_FILE_PATTERN = re.compile(r'sps_(\d+)_(\d+)\.(?:zip|LoxCC)')
+
+_LOXCC_MAGIC = 0xaabbccee
+_ZIP_MAGIC = b'PK'
 
 def _is_lz4_frame(data: bytes) -> bool:
     """
@@ -103,39 +107,76 @@ def _build_base_url(ip: str, port: int) -> str:
     return f"http://{ip}"
 
 
-def _decompress_loxcc(loxcc_zip: bytes) -> bytes:
+def _read_loxcc_stream(f) -> bytes:
     """
-    Extract sps0.LoxCC from a Loxone config ZIP archive and decompress it to
-    the raw configuration XML bytes.
+    Read a LoxCC container from a binary stream and decompress it to the raw
+    configuration XML bytes.
 
     Validates the LoxCC header magic, payload length, CRC32 checksum and the
     uncompressed size. Raw bytes are returned so the XML parser can perform its
     own encoding detection.
     """
-    zf = zipfile.ZipFile(BytesIO(loxcc_zip))
-    with zf.open('sps0.LoxCC') as f:
-        header, = struct.unpack('<L', f.read(4))
-        if header != 0xaabbccee:
-            raise Exception("Invalid file format")
+    header, = struct.unpack('<L', f.read(4))
+    if header != _LOXCC_MAGIC:
+        raise Exception("Invalid file format")
 
-        compressedSize, uncompressedSize, checksum, = struct.unpack('<LLL', f.read(12))
-        data = f.read(compressedSize)
+    compressedSize, uncompressedSize, checksum, = struct.unpack('<LLL', f.read(12))
+    data = f.read(compressedSize)
 
-        # Strict payload length validation
-        if len(data) != compressedSize:
-            raise Exception(f"Payload length mismatch: got {len(data)}, expected {compressedSize}")
+    # Strict payload length validation
+    if len(data) != compressedSize:
+        raise Exception(f"Payload length mismatch: got {len(data)}, expected {compressedSize}")
 
-        # Decompression method - always LZ4
-        logger.debug("Using LZ4 decompression")
-        resultStr = _decompress_loxcc_block_lz4(data, uncompressedSize)
+    # Decompression method - always LZ4
+    logger.debug("Using LZ4 decompression")
+    resultStr = _decompress_loxcc_block_lz4(data, uncompressedSize)
 
-        if checksum != zlib.crc32(resultStr):
-            raise Exception('Checksum verification failed')
+    if checksum != zlib.crc32(resultStr):
+        raise Exception('Checksum verification failed')
 
-        if len(resultStr) != uncompressedSize:
-            raise Exception(f'Uncompressed filesize mismatch: {len(resultStr)} != {uncompressedSize}')
+    if len(resultStr) != uncompressedSize:
+        raise Exception(f'Uncompressed filesize mismatch: {len(resultStr)} != {uncompressedSize}')
 
-        return bytes(resultStr)
+    return bytes(resultStr)
+
+
+def _decompress_loxcc(payload: bytes) -> bytes:
+    """
+    Decompress a downloaded Loxone configuration file to the raw config XML.
+
+    Two layouts occur in /prog and are told apart by their magic bytes:
+    ``sps_<ver>_<ts>.zip`` is the deployment archive holding sps0.LoxCC, while
+    ``sps_<ver>_<ts>.LoxCC`` (written by the Miniserver since firmware 17) is a
+    bare LoxCC container. Both yield the same set of virtual inputs.
+    """
+    if payload[:2] == _ZIP_MAGIC:
+        with zipfile.ZipFile(BytesIO(payload)) as zf:
+            with zf.open('sps0.LoxCC') as f:
+                return _read_loxcc_stream(f)
+
+    if len(payload) >= 4 and struct.unpack_from('<L', payload)[0] == _LOXCC_MAGIC:
+        return _read_loxcc_stream(BytesIO(payload))
+
+    raise Exception(
+        f"Unexpected configuration payload: {len(payload)} bytes starting with {payload[:32]!r}"
+    )
+
+
+def _select_newest_config(listing: str) -> str:
+    """
+    Pick the most recent configuration file from a /prog directory listing.
+
+    Sorts numerically by (config version, timestamp) so the choice does not
+    depend on the file extension sorting lexicographically after the digits.
+    """
+    candidates = [
+        (int(m.group(1)), int(m.group(2)), m.group(0))
+        for m in _CONFIG_FILE_PATTERN.finditer(listing)
+    ]
+    if not candidates:
+        raise Exception("No configuration files found")
+
+    return max(candidates)[2]
 
 
 async def load_miniserver_config(ip: str, port: int, username: str, password: str) -> bytes:
@@ -143,9 +184,9 @@ async def load_miniserver_config(ip: str, port: int, username: str, password: st
     Load the most recent version of the currently active configuration file
     from the Miniserver via the HTTP filesystem API.
 
-    Lists ``/dev/fslist/prog/`` to find the newest ``sps_<ver>_<ts>.zip``
-    archive (there is no fixed-name pointer to the active config), downloads it
-    via ``/dev/fsget/prog/<file>`` and decompresses the contained sps0.LoxCC.
+    Lists ``/dev/fslist/prog/`` to find the newest ``sps_<ver>_<ts>`` file
+    (there is no fixed-name pointer to the active config), downloads it via
+    ``/dev/fsget/prog/<file>`` and decompresses it.
 
     Args:
         ip: Miniserver IP address
@@ -165,12 +206,8 @@ async def load_miniserver_config(ip: str, port: int, username: str, password: st
                 listing = await resp.text()
             logger.debug(f"Received prog directory listing ({len(listing)} bytes)")
 
-            # 2) Pick the newest configuration archive
-            filelist = sorted(set(_CONFIG_FILE_PATTERN.findall(listing)))
-            if not filelist:
-                raise Exception("No configuration files found")
-
-            filename = filelist[-1]
+            # 2) Pick the newest configuration file
+            filename = _select_newest_config(listing)
             logger.info(f"Selected configuration file: {filename}")
 
             # 3) Download the selected archive

@@ -9,7 +9,8 @@ from loxmqttrelay import miniserver_sync
 from loxmqttrelay.miniserver_sync import (
     load_miniserver_config,
     extract_inputs,
-    sync_miniserver_whitelist
+    sync_miniserver_whitelist,
+    _select_newest_config
 )
 from loxmqttrelay.config import (
     AppConfig, global_config
@@ -66,15 +67,19 @@ def _patch_session(responses):
     )
 
 
-def _build_config_zip(xml_bytes: bytes) -> bytes:
-    """Build a valid Loxone config ZIP (sps0.LoxCC, LZ4-block compressed)."""
+def _build_loxcc(xml_bytes: bytes) -> bytes:
+    """Build a bare LoxCC container (LZ4-block compressed)."""
     compressed = lz4b.compress(xml_bytes, store_size=False)
     loxcc = struct.pack('<L', 0xaabbccee)
     loxcc += struct.pack('<LLL', len(compressed), len(xml_bytes), zlib.crc32(xml_bytes))
-    loxcc += compressed
+    return loxcc + compressed
+
+
+def _build_config_zip(xml_bytes: bytes) -> bytes:
+    """Build a valid Loxone config ZIP (sps0.LoxCC, LZ4-block compressed)."""
     buf = BytesIO()
     with zipfile.ZipFile(buf, 'w') as zf:
-        zf.writestr('sps0.LoxCC', loxcc)
+        zf.writestr('sps0.LoxCC', _build_loxcc(xml_bytes))
     return buf.getvalue()
 
 
@@ -84,6 +89,18 @@ _SAMPLE_LISTING = (
     "- 405797 Oct 26 21:38 sps_0248_20241026213840.zip\n"
     "- 425720 Jan 04 12:14 sps_0252_20260104121455.zip\n"
     "- 420877 Jul 08 22:06 sps_0252_20250708220631.zip\n"
+)
+
+# Firmware 17 keeps the deployment archive and, a few seconds later, the
+# running program as a bare .LoxCC. Emergency.LoxCC must never be picked.
+_FW17_LISTING = (
+    "d      0 Jul 27 22:37 .\n"
+    "d      0 Jan 01 01:00 ..\n"
+    "- 429913 Jun 30 17:12 sps_0252_20260630171238.zip\n"
+    "- 437279 Jul 27 22:35 sps_0272_20260727223718.zip\n"
+    "- 409799 Jul 27 22:37 sps_0272_20260727223721.LoxCC\n"
+    "-  77943 Jul 27 22:37 Emergency.LoxCC\n"
+    "-      2 Jul 27 22:37 Music.json\n"
 )
 
 @pytest.fixture
@@ -167,6 +184,44 @@ async def test_load_miniserver_config_selects_newest_and_decompresses(sample_con
         config_xml = await load_miniserver_config("192.168.1.1", 80, "user", "pass")
     assert config_xml == sample_config_xml
     assert set(extract_inputs(config_xml)) == {"Input1", "Input2", "Input3"}
+
+@pytest.mark.asyncio
+async def test_load_miniserver_config_handles_bare_loxcc(sample_config_xml):
+    """Firmware 17 writes the running program as a bare .LoxCC next to the ZIP."""
+    responses = {
+        "/dev/fslist/prog/": _FakeResponse(text=_FW17_LISTING),
+        "/dev/fsget/prog/sps_0272_20260727223721.LoxCC": _FakeResponse(
+            data=_build_loxcc(sample_config_xml)
+        ),
+    }
+    with _patch_session(responses):
+        config_xml = await load_miniserver_config("192.168.1.1", 80, "user", "pass")
+    assert config_xml == sample_config_xml
+
+@pytest.mark.asyncio
+async def test_load_miniserver_config_rejects_unexpected_payload():
+    """A Loxone error body (HTTP 200) must not surface as a cryptic zip error."""
+    responses = {
+        "/dev/fslist/prog/": _FakeResponse(text=_SAMPLE_LISTING),
+        "/dev/fsget/prog/": _FakeResponse(data=b'{"LL":{"control":"dev/fsget","Code":"403"}}'),
+    }
+    with _patch_session(responses):
+        with pytest.raises(Exception, match="Unexpected configuration payload"):
+            await load_miniserver_config("192.168.1.1", 80, "user", "pass")
+
+def test_select_newest_config_prefers_newest_timestamp():
+    assert _select_newest_config(_FW17_LISTING) == "sps_0272_20260727223721.LoxCC"
+
+def test_select_newest_config_compares_versions_numerically():
+    listing = (
+        "- 100 Jan 01 00:00 sps_9_20260101000000.zip\n"
+        "- 100 Jan 01 00:00 sps_10_20250101000000.zip\n"
+    )
+    assert _select_newest_config(listing) == "sps_10_20250101000000.zip"
+
+def test_select_newest_config_without_candidates():
+    with pytest.raises(Exception, match="No configuration files found"):
+        _select_newest_config("d 0 Apr 30 00:31 .\nMusic.json\n")
 
 @pytest.fixture(autouse=True)
 def setup_global_config():
