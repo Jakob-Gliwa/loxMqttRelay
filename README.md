@@ -427,6 +427,12 @@ When enabled, the relay will:
 
 Caution: This function will assume that every Virtual Input is a possible target for forwarding mqtt messaages.
 
+### Automatic Resync After a Miniserver Restart
+
+When the websocket connection to the Miniserver is lost and later re-established, the relay resyncs the whitelist automatically. A restart is the usual consequence of uploading a new configuration, so this keeps the whitelist in step without any extra setup.
+
+This requires `use_websocket = true` — a plain HTTP setup has no persistent connection whose loss could be observed. The websocket itself is opened as soon as the first message is forwarded to the Miniserver.
+
 ### Trigger Manual Sync
 
 Configure your Miniserver to publish any message to `{base_topic}/miniserverevent/startup` on startup to trigger an automatic resync with the Miniserver configuration.

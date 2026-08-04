@@ -43,9 +43,10 @@ config/config.toml
 src/loxwebsocket/cython_modules/extractor.c
 target/
 benchmark.py
+newbench.py
+benchmarks/
 Cargo.lock
 lib copy.rs
 src/loxwebsocket/cython_modules/extractor_compatible.c
 src/loxwebsocket/cython_modules/extractor_optimized.c
-newbench.py
 config/sps0.LoxCC

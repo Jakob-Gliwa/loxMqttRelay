@@ -11,6 +11,7 @@ from loxmqttrelay.mqtt_client import mqtt_client
 from loxmqttrelay.udp_handler import start_udp_server
 from loxmqttrelay.miniserver_sync import sync_miniserver_whitelist
 from loxmqttrelay.http_miniserver_handler import http_miniserver_handler
+from loxwebsocket.lox_ws_api import loxwebsocket
 import loxmqttrelay.utils as utils
 
 # The imports are now handled by __init__.py
@@ -41,6 +42,9 @@ class MQTTRelay:
     async def main(self):
         await self.connect_and_subscribe_mqtt()
         await self.handle_miniserver_sync()
+        # A websocket reconnect means the Miniserver went away and came back,
+        # which usually follows a configuration upload - so resync the whitelist.
+        loxwebsocket.add_event_callback(self.handle_miniserver_sync, [loxwebsocket.EventType.RECONNECTED])
         asyncio.create_task(start_udp_server())
 
         logger.info("MQTT Relay started")

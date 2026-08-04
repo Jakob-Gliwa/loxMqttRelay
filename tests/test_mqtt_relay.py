@@ -1,7 +1,8 @@
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 import logging
 import json
+from loxwebsocket.lox_ws_api import loxwebsocket
 from loxmqttrelay.main import MQTTRelay, TOPIC
 from loxmqttrelay.config import (
     Config, AppConfig, GeneralConfig,
@@ -133,3 +134,51 @@ async def test_whitelist_sync_on_miniserver_startup(config_instance: Config, moc
 
             # Neue Whitelist sollte wieder "synced_topic1", "synced_topic2" enthalten
             assert global_config.topics.topic_whitelist == ["synced_topic1", "synced_topic2"]
+
+@pytest.mark.asyncio
+async def test_whitelist_sync_on_websocket_reconnect(config_instance: Config, mock_logger: MagicMock) -> None:
+    """Test: Ein Websocket-Reconnect löst einen erneuten Sync aus."""
+    with patch.object(config_instance, '_load_config', return_value=None):
+        relay = MQTTRelay()
+        with patch('loxmqttrelay.main.sync_miniserver_whitelist', return_value=["reconnect_topic"]) as mock_sync, \
+             patch.object(relay, 'connect_and_subscribe_mqtt', new=AsyncMock()), \
+             patch('loxmqttrelay.main.start_udp_server', new=AsyncMock()):
+            main_task = asyncio.create_task(relay.main())
+            try:
+                # main() läuft bis zum abschließenden await asyncio.Future()
+                await asyncio.sleep(0.1)
+
+                # Reset, damit nur der Reconnect-Sync gezählt wird
+                mock_sync.reset_mock()
+
+                await loxwebsocket.send_event(loxwebsocket.EventType.RECONNECTED)
+                await asyncio.sleep(0.1)
+            finally:
+                main_task.cancel()
+                # _event_callbacks ist ein Klassenattribut und würde sonst in andere Tests lecken
+                loxwebsocket._event_callbacks.pop(relay.handle_miniserver_sync, None)
+
+            mock_sync.assert_called_once()
+            assert global_config.topics.topic_whitelist == ["reconnect_topic"]
+
+@pytest.mark.asyncio
+async def test_no_sync_on_other_websocket_events(config_instance: Config, mock_logger: MagicMock) -> None:
+    """Test: Nur RECONNECTED synct - der erste Connect hat das bereits erledigt."""
+    with patch.object(config_instance, '_load_config', return_value=None):
+        relay = MQTTRelay()
+        with patch('loxmqttrelay.main.sync_miniserver_whitelist', return_value=["reconnect_topic"]) as mock_sync, \
+             patch.object(relay, 'connect_and_subscribe_mqtt', new=AsyncMock()), \
+             patch('loxmqttrelay.main.start_udp_server', new=AsyncMock()):
+            main_task = asyncio.create_task(relay.main())
+            try:
+                await asyncio.sleep(0.1)
+                mock_sync.reset_mock()
+
+                await loxwebsocket.send_event(loxwebsocket.EventType.CONNECTED)
+                await loxwebsocket.send_event(loxwebsocket.EventType.CONNECTION_CLOSED)
+                await asyncio.sleep(0.1)
+            finally:
+                main_task.cancel()
+                loxwebsocket._event_callbacks.pop(relay.handle_miniserver_sync, None)
+
+            mock_sync.assert_not_called()
