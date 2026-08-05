@@ -29,10 +29,6 @@ use crate::MiniserverDataProcessor;
 /// window and our handoff buffer stay aligned.
 const INBOUND_CAPACITY: usize = 4096;
 
-/// Messages handled per GIL acquisition. Batching amortizes `Python::attach`,
-/// which would otherwise dominate the per-message cost on the worker thread.
-const INGRESS_BATCH: usize = 64;
-
 /// Application-to-write-task admission. Glide defaults to 32, which is aimed at
 /// many light connections rather than one busy relay.
 const COMMAND_CAPACITY: usize = 1024;
@@ -214,32 +210,22 @@ async fn resubscribe_loop(
 
 /// Drains the inbound channel and drives the Rust message handler.
 ///
+/// One `Python::attach` per message. Batching attaches was measured at ~0.03 µs
+/// saved per message against a ~0.28 µs handle path — not worth the complexity.
+///
 /// Runs inside a `pyo3_async_runtimes::tokio::scope` so the task locals of the
 /// asyncio loop are available when the handler hands coroutines back to Python.
 async fn ingress_worker(
     mut rx: mpsc::Receiver<PublishMessage>,
     processor: Py<MiniserverDataProcessor>,
 ) {
-    let mut batch: Vec<PublishMessage> = Vec::with_capacity(INGRESS_BATCH);
-
-    while let Some(first) = rx.recv().await {
-        batch.push(first);
-        while batch.len() < INGRESS_BATCH {
-            match rx.try_recv() {
-                Ok(message) => batch.push(message),
-                Err(_) => break,
-            }
-        }
-
+    while let Some(message) = rx.recv().await {
+        let topic = String::from(message.topic);
+        let payload = message.payload.to_vec();
         Python::attach(|py| {
             let bound = processor.bind(py);
-            let handler = bound.borrow();
-            for message in batch.drain(..) {
-                let topic = String::from(message.topic);
-                let payload = message.payload.to_vec();
-                if let Err(e) = handler.handle_mqtt_message(py, topic, payload) {
-                    error!("handle_mqtt_message failed: {e}");
-                }
+            if let Err(e) = bound.borrow().handle_mqtt_message(py, topic, payload) {
+                error!("handle_mqtt_message failed: {e}");
             }
         });
     }
