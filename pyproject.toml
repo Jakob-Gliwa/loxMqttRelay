@@ -13,7 +13,6 @@ dependencies = [
     "orjson>=3.11.9",
     "pycryptodome>=3.23.0",
     "uvloop>=0.22.1",
-    "gmqtt>=0.7.0",
     "construct>=2.10.70",
     "tomlkit>=0.15.0",
     "lxml>=6.1.1",

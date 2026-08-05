@@ -26,3 +26,7 @@ log = "0.4.32"
 env_logger = "0.11.10"     
 tokio = { version = "1.52.3", features = ["full"] }
 base64 = "0.22.1"
+# Pin the rustls crypto provider explicitly: exactly one is required, and `ring`
+# builds without cmake/NASM on the ARM targets this ships to.
+mqtt-glide = { version = "0.1.1", default-features = false, features = ["tls-rustls-ring"] }
+arc-swap = "1.9"

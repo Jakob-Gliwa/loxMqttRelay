@@ -21,6 +21,9 @@ use base64::{Engine, engine::general_purpose};
 // Import `into_future` from pyo3_async_runtimes and `spawn` from tokio
 use pyo3_async_runtimes::tokio::into_future;
 
+mod mqtt;
+use mqtt::{MqttClient, MqttShared};
+
 /// A small struct to store all relevant MQTT topics in Rust, so we don't fetch them repeatedly
 #[derive(Clone, Debug)]
 struct MqttTopics {
@@ -528,7 +531,9 @@ pub struct MiniserverDataProcessor {
     shape_cache_enabled: bool,
 
     relay_main_obj: Py<PyAny>,
-    mqtt_client_obj: Py<PyAny>,
+    // Shared with the Python-facing MqttClient so config responses publish
+    // straight from Rust instead of calling back into Python.
+    mqtt_shared: Arc<MqttShared>,
     #[pyo3(get)]
     http_handler_obj: Py<PyAny>,
     orjson_obj: Py<PyAny>,
@@ -544,8 +549,8 @@ pub struct MiniserverDataProcessor {
 impl MiniserverDataProcessor {
 
     #[new]
-    #[pyo3(text_signature = "(self, global_config_py, relay_main_obj, mqtt_client_obj, http_handler_obj, orjson_obj)")]
-    fn new(py: Python, topic_ns: Py<PyAny>, global_config_py: Py<PyAny>, relay_main_obj: Py<PyAny>, mqtt_client_obj: Py<PyAny>, http_handler_obj: Py<PyAny>, orjson_obj: Py<PyAny>) -> PyResult<Self> {
+    #[pyo3(text_signature = "(self, topic_ns, global_config_py, relay_main_obj, mqtt_client, http_handler_obj, orjson_obj)")]
+    fn new(py: Python, topic_ns: Py<PyAny>, global_config_py: Py<PyAny>, relay_main_obj: Py<PyAny>, mqtt_client: PyRef<'_, MqttClient>, http_handler_obj: Py<PyAny>, orjson_obj: Py<PyAny>) -> PyResult<Self> {
         debug!(
             "Initializing MiniserverDataProcessor with cache_size={}",
             pyget!(global_config_py, py, "general", "cache_size").extract::<i32>()?
@@ -604,7 +609,7 @@ impl MiniserverDataProcessor {
             global_config: global_config_py,
             mqtt_topics: Some(topics),
             relay_main_obj,
-            mqtt_client_obj,
+            mqtt_shared: mqtt_client.shared(),
             http_handler_obj,
             orjson_obj,
             base_topic:base_topic,
@@ -766,7 +771,7 @@ impl MiniserverDataProcessor {
     ///    asyncio.create_task(callback(topic, message))
     #[pyo3(text_signature = "(self,topic, message)")]
     #[allow(clippy::too_many_arguments)]
-    fn handle_mqtt_message(
+    pub(crate) fn handle_mqtt_message(
         &self,
         py: Python<'_>,
         topic: String,
@@ -808,16 +813,10 @@ impl MiniserverDataProcessor {
                     .getattr(intern!(py, "global_config"))?;
                 let safe_cfg = global_config_py.call_method0("get_safe_config")?;
                 let serialized = self.orjson_obj.bind(py).call_method1("dumps", (safe_cfg,))?;
-                let coro = self
-                    .mqtt_client_obj
-                    .bind(py)
-                    .call_method1("publish", (topics.config_response_topic.clone(), serialized))?;
-                let fut = into_future(coro.clone())?;
-                pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
-                    if let Err(e) = fut.await {
-                        error!("Error publishing config response: {:?}", e);
-                    }
-                });
+                self.mqtt_shared.publish_detached(
+                    topics.config_response_topic.clone(),
+                    serialized.extract::<Vec<u8>>()?,
+                );
             }
             else if topic == topics.config_set_topic || topic == topics.config_add_topic || topic == topics.config_remove_topic {
                 let update_mode = if topic == topics.config_set_topic {
@@ -1224,6 +1223,7 @@ fn _loxmqttrelay(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()>{
     builder.enable_all();
     pyo3_async_runtimes::tokio::init(builder);
     m.add_class::<MiniserverDataProcessor>()?;
+    m.add_class::<MqttClient>()?;
     m.add_function(wrap_pyfunction!(init_rust_logger, m)?)?;
     Ok(())
 }

@@ -238,18 +238,17 @@ port = 1884
 user = ""  # null becomes empty string in TOML
 password = ""  # null becomes empty string in TOML
 client_id = "loxmqttrelay"
-mqtt_version = "3.1"  # "3.1" (default) for MQTT 3.1.x, "5" for MQTT 5
 ```
+
+`client_id` is used as a prefix; the relay appends a random suffix so that
+reconnects and restarts never collide with a stale session on the broker.
 
 #### MQTT Protocol Version
 
-The relay supports both MQTT 3.1.x and MQTT 5. The version is selected via the
-`mqtt_version` option in the `[broker]` section:
-
-- `mqtt_version = "3.1"` (also accepts `"3.1.1"`) - use MQTT 3.1.x. **This is the default** and is also used when the option is missing entirely.
-- `mqtt_version = "5"` - use MQTT 5. This is required if you want to attach MQTT 5 user properties to messages coming from Loxone (see [MQTT5 User Properties](#mqtt5-user-properties)).
-
-If an unknown value is provided, the relay logs a warning and falls back to MQTT 3.1.x.
+The relay speaks MQTT 5 exclusively. Support for MQTT 3.1.x was removed together
+with the Python MQTT client; the client is now implemented in Rust on top of
+[mqtt-glide](https://crates.io/crates/mqtt-glide). MQTT 5 user properties are
+therefore always available (see [MQTT5 User Properties](#mqtt5-user-properties)).
 
 ### Topic Management
 
@@ -542,7 +541,7 @@ Everything before the first `{` is considered the topic.
 
 ### MQTT5 User Properties
 
-When the relay runs in MQTT 5 mode (`mqtt_version = "5"` in the `[broker]` section), you can attach MQTT 5 user properties to a message coming from Loxone. Add an optional block in square brackets right after the (optional) command and before the topic:
+You can attach MQTT 5 user properties to a message coming from Loxone. Add an optional block in square brackets right after the (optional) command and before the topic:
 
 ```
 [publish|retain] [key1=value1;key2=value2] topic payload

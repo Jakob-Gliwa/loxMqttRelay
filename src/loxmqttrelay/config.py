@@ -32,8 +32,6 @@ class BrokerConfig:
     user: Optional[str] = None
     password: Optional[str] = None
     client_id: str = "loxmqttrelay"
-    # MQTT protocol version: "3.1"/"3.1.1" -> MQTTv311 (default), "5" -> MQTTv50
-    mqtt_version: str = "3.1"
 
 @dataclass
 class MiniserverConfig:
@@ -51,6 +49,11 @@ class TopicsConfig:
     subscription_filters: List[str] = field(default_factory=list)
     topic_whitelist: Set[str] = field(default_factory=set)
     do_not_forward: List[str] = field(default_factory=list)
+
+    def __post_init__(self):
+        # TOML has no set type, so a loaded config hands in a list here. Runs on
+        # dataclasses.replace() too, which is how update_config() mutates.
+        self.topic_whitelist = set(self.topic_whitelist)
 
 @dataclass
 class ProcessingConfig:
@@ -77,7 +80,20 @@ class AppConfig:
     debug: DebugConfig = field(default_factory=DebugConfig)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {f.name: asdict(getattr(self, f.name)) for f in fields(self)}
+        """Sections as plain dicts, ready to serialize.
+
+        Set-valued fields (topic_whitelist) become sorted lists: neither TOML
+        nor JSON has a set type, so both save_config() and get_safe_config()
+        would otherwise fail on the default config. Sorting keeps the written
+        file and the config/response payload stable across runs.
+        """
+        return {
+            f.name: {
+                key: sorted(value) if isinstance(value, (set, frozenset)) else value
+                for key, value in asdict(getattr(self, f.name)).items()
+            }
+            for f in fields(self)
+        }
 
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> "AppConfig":
@@ -188,7 +204,9 @@ class Config:
                 if list_mode == "set":
                     new_value = list(value) if isinstance(value, list) else [value]
                 elif list_mode == "add":
-                    new_value = list(set(current_value + (value if isinstance(value, list) else [value])))
+                    # dict.fromkeys dedupes but keeps insertion order; a set would
+                    # scramble the user's config file on every add.
+                    new_value = list(dict.fromkeys(current_value + (value if isinstance(value, list) else [value])))
                 elif list_mode == "remove":
                     new_value = [item for item in current_value if item not in (value if isinstance(value, list) else [value])]
             value = new_value
@@ -216,7 +234,9 @@ class Config:
                     if list_mode == "set":
                         new_value = list(value) if isinstance(value, list) else [value]
                     elif list_mode == "add":
-                        new_value = list(set(current_value + (value if isinstance(value, list) else [value])))
+                        # dict.fromkeys dedupes but keeps insertion order; a set would
+                        # scramble the user's config file on every add.
+                        new_value = list(dict.fromkeys(current_value + (value if isinstance(value, list) else [value])))
                     elif list_mode == "remove":
                         new_value = [item for item in current_value if item not in (value if isinstance(value, list) else [value])]
                 updates[field_name] = new_value

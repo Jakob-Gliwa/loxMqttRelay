@@ -3,7 +3,6 @@ orjson>=3.11.9
 uvloop>=0.22.1
 construct>=2.10.70
 tomlkit>=0.15.0
-gmqtt>=0.7.0
 pycryptodome>=3.23.0
 loxwebsocket>=0.5.2
 lxml>=6.1.1

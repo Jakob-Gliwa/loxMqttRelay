@@ -1,9 +1,7 @@
 import asyncio
-from typing import Callable, List, Optional, Tuple
-from gmqtt import constants as MQTTconstants
+from typing import List, Optional, Tuple
 from loxmqttrelay.config import global_config
 from loxmqttrelay.logging_config import get_lazy_logger
-from loxmqttrelay.mqtt_client import mqtt_client, resolve_mqtt_version
 
 logger = get_lazy_logger(__name__)
 
@@ -168,22 +166,6 @@ def _extract_property_block(rest: str) -> Tuple[Optional[UserProperties], str]:
     return properties, remaining
 
 
-def parse_udp_message_mqtt3(udpmsg: str) -> Optional[Tuple[str, str, str]]:
-    """
-    MQTT 3.1.x fast-path parser: (command, topic, message). No user properties.
-    """
-    parsed = _parse_command(udpmsg)
-    if parsed is None:
-        return None
-    command, rest = parsed
-
-    topic_payload = _parse_topic_payload(rest)
-    if topic_payload is None:
-        return None
-    topic, message = topic_payload
-    return command, topic, message
-
-
 def parse_udp_message_mqtt5(
     udpmsg: str,
 ) -> Optional[Tuple[str, str, str, Optional[UserProperties]]]:
@@ -205,21 +187,8 @@ def parse_udp_message_mqtt5(
     return command, topic, message, user_properties
 
 
-async def _handle_mqtt3(udpmsg: str, addr) -> None:
-    """Handle an incoming UDP message on the MQTT 3.1.x fast path."""
-    logger.info(f"UDP IN: {addr}: {udpmsg}")
-    result = parse_udp_message_mqtt3(udpmsg)
-    if result is None:
-        return
-
-    command, topic, message = result
-    retain = command == "retain"
-    logger.debug("Publishing%s: '%s'='%s'", ' (retain)' if retain else '', topic, message)
-    await mqtt_client.publish(topic, message, retain)
-
-
-async def _handle_mqtt5(udpmsg: str, addr) -> None:
-    """Handle an incoming UDP message including optional MQTT5 user properties."""
+async def handle_udp_message(mqtt_client, udpmsg: str, addr) -> None:
+    """Parse one UDP datagram and forward it to MQTT."""
     logger.info(f"UDP IN: {addr}: {udpmsg}")
     result = parse_udp_message_mqtt5(udpmsg)
     if result is None:
@@ -235,29 +204,19 @@ async def _handle_mqtt5(udpmsg: str, addr) -> None:
 
 
 class UDPProtocol(asyncio.DatagramProtocol):
-    def __init__(self, handler: Callable):
-        self._handler = handler
+    def __init__(self, mqtt_client):
+        self._mqtt_client = mqtt_client
 
     def datagram_received(self, data, addr):
         msg = data.decode('utf-8', errors='ignore')
-        asyncio.create_task(self._handler(msg, addr))
+        asyncio.create_task(handle_udp_message(self._mqtt_client, msg, addr))
 
 
-def _select_handler() -> Callable:
-    """Pick the UDP handler once based on the configured MQTT version."""
-    if resolve_mqtt_version(global_config.broker.mqtt_version) == MQTTconstants.MQTTv50:
-        logger.info("UDP handler running in MQTT5 mode (user properties enabled)")
-        return _handle_mqtt5
-    logger.info("UDP handler running in MQTT 3.1.x mode")
-    return _handle_mqtt3
-
-
-async def start_udp_server():
+async def start_udp_server(mqtt_client):
     udpport = global_config.udp.udp_in_port
-    handler = _select_handler()
     loop = asyncio.get_running_loop()
     transport, protocol = await loop.create_datagram_endpoint(
-        lambda: UDPProtocol(handler),
+        lambda: UDPProtocol(mqtt_client),
         local_addr=("0.0.0.0", udpport)
     )
     logger.info(f"UDP-IN listening on port {udpport}")

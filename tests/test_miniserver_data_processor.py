@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch, MagicMock
 from loxmqttrelay.config import Config, AppConfig, global_config
 import asyncio
-from loxmqttrelay.compatible._loxmqttrelay import MiniserverDataProcessor  # Assuming 'librs' is the compiled Rust module
+from loxmqttrelay.compatible._loxmqttrelay import MiniserverDataProcessor, MqttClient  # Assuming 'librs' is the compiled Rust module
 
 TOPIC = 'mock/topic'  # Define a mock or placeholder for the TOPIC variable
 
@@ -62,7 +62,9 @@ class TestMiniserverDataProcessor:
     def __init__(self, config_instance):
         """Initialize required mocks and processor instance."""
         self.mock_http_handler = MagicMock()
-        self.mock_mqtt_client = MagicMock()
+        # The processor shares the client's connection state, so this has to be
+        # the real Rust class rather than a mock.
+        self.mock_mqtt_client = MqttClient(config_instance)
         self.mock_relay_main = AsyncMock()
         self.mock_orjson = MagicMock()
 
@@ -116,7 +118,7 @@ def test_construct_accepts_set_or_list_whitelist(config_instance, whitelist):
         DummyTopicNS(),
         config_instance,
         AsyncMock(),
-        MagicMock(),
+        MqttClient(config_instance),
         MagicMock(),
         MagicMock(),
     )
@@ -723,12 +725,13 @@ class TestConfigControlTopics:
     """Exercises the config/control-topic routing inside the Rust
     handle_mqtt_message. Unlike the shared `processor` fixture, this keeps
     references to the injected mocks so we can assert on the Python callbacks
-    that the Rust code triggers (relay_main, mqtt_client, orjson)."""
+    that the Rust code triggers (relay_main, orjson). Publishing no longer
+    crosses into Python, so it is observed via the client's undelivered ring."""
 
     @pytest.fixture
     def ctx(self, config_instance):
         mock_http_handler = MagicMock()
-        mock_mqtt_client = MagicMock()
+        mock_mqtt_client = MqttClient(config_instance)
         mock_relay_main = MagicMock()
         mock_orjson = MagicMock()
         topics = ControlTopicNS()
@@ -749,19 +752,18 @@ class TestConfigControlTopics:
             http_handler=mock_http_handler,
         )
 
-    @pytest.mark.asyncio
-    async def test_config_get_serializes_and_publishes_safe_config(self, ctx):
-        # The response is published via pyo3 `into_future`, which needs a
-        # running event loop and a real awaitable returned by publish().
-        ctx.mqtt_client.publish = AsyncMock()
+    def test_config_get_serializes_and_publishes_safe_config(self, ctx):
+        ctx.orjson.dumps.return_value = b'{"general": {}}'
         ctx.processor.handle_mqtt_message(ctx.topics.CONFIG_GET, b"")
 
         # safe config is fetched, serialized and published to the response topic
         ctx.relay_main.miniserver_data_processor.global_config.get_safe_config.assert_called_once()
         ctx.orjson.dumps.assert_called_once()
-        ctx.mqtt_client.publish.assert_called_once()
-        published_topic = ctx.mqtt_client.publish.call_args[0][0]
-        assert published_topic == ctx.topics.CONFIG_RESPONSE
+        # The client is not connected, so the publish lands in the undelivered
+        # ring - which is where the target topic becomes observable.
+        assert ctx.mqtt_client.take_undelivered() == [
+            (ctx.topics.CONFIG_RESPONSE, b'{"general": {}}')
+        ]
         # config/get must never restart the relay
         ctx.relay_main.restart_relay.assert_not_called()
 
@@ -808,5 +810,5 @@ class TestConfigControlTopics:
         ctx.processor.handle_mqtt_message("some/data/topic", b"value")
         ctx.relay_main.restart_relay.assert_not_called()
         ctx.relay_main.schedule_miniserver_sync.assert_not_called()
-        ctx.mqtt_client.publish.assert_not_called()
+        assert ctx.mqtt_client.take_undelivered() == []
 

@@ -23,6 +23,7 @@ if prefer_optimized_build():
     logger.info("Loading Rust extension: optimized build (x86_64 + AVX2) ...")
     from loxmqttrelay.optimized._loxmqttrelay import (
         MiniserverDataProcessor,
+        MqttClient,
         init_rust_logger
     )
     ACTIVE_RUST_BUILD = "optimized"
@@ -31,6 +32,7 @@ else:
     logger.info("Loading Rust extension: compatible build (arm64 or no AVX2) ...")
     from loxmqttrelay.compatible._loxmqttrelay import (
         MiniserverDataProcessor,
+        MqttClient,
         init_rust_logger
     )
     ACTIVE_RUST_BUILD = "compatible"
@@ -45,6 +47,7 @@ from .config import AppConfig, GeneralConfig, TopicsConfig, ProcessingConfig, De
 __all__ = [
     'global_config',
     'MiniserverDataProcessor',
+    'MqttClient',
     'init_rust_logger',
     'ACTIVE_RUST_BUILD',
     'ACTIVE_RUST_MODULE',

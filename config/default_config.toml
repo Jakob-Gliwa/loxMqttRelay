@@ -9,8 +9,6 @@ port = 1884
 user = ""  # null becomes empty string in TOML
 password = ""  # null becomes empty string in TOML
 client_id = "loxmqttrelay"
-# MQTT protocol version: "3.1" (default) for MQTT 3.1.x, "5" for MQTT 5
-mqtt_version = "3.1"
 
 [miniserver]
 miniserver_ip = "127.0.0.1"

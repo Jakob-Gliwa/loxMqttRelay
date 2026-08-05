@@ -67,20 +67,6 @@ def config_instance(temp_config_file):
     config._config = config._load_config()
     return config
 
-def test_mqtt_version_defaults_to_mqtt3_when_absent(temp_config_file):
-    """A config without [broker] mqtt_version must resolve to MQTT 3.1.x."""
-    from loxmqttrelay.mqtt_client import resolve_mqtt_version
-    from gmqtt import constants as MQTTconstants
-
-    config = Config()
-    config.config_path = temp_config_file
-    config._config = config._load_config()
-
-    # The temp config file has a [broker] section but no mqtt_version key
-    assert config.broker.mqtt_version == "3.1"
-    assert resolve_mqtt_version(config.broker.mqtt_version) == MQTTconstants.MQTTv311
-
-
 def test_config_load(temp_config_file):
     """Test loading configuration from file"""
     config = Config()
@@ -98,8 +84,6 @@ def test_config_load(temp_config_file):
     assert config.broker.user == "test_user"
     assert config.broker.password == "test_pass"
     assert config.broker.client_id == "test_client"
-    # mqtt_version is not present in the config file -> default to "3.1"
-    assert config.broker.mqtt_version == "3.1"
     
     # Miniserver Config Assertions
     assert config.miniserver.miniserver_ip == "192.168.1.100"
@@ -113,7 +97,8 @@ def test_config_load(temp_config_file):
     # Topics Config Assertions
     assert config.topics.subscriptions == ["topic1", "topic2"]
     assert config.topics.subscription_filters == ["^ignore/before/.*"]
-    assert config.topics.topic_whitelist == ["whitelist_topic"]
+    # A TOML list, but the field is declared (and normalized) as a set
+    assert config.topics.topic_whitelist == {"whitelist_topic"}
     assert config.topics.do_not_forward == ["do_not_forward_topic"]
     
     # Processing Config Assertions
@@ -202,7 +187,7 @@ def test_config_update(config_instance):
         {"subscriptions": ["topic4"]},
         list_mode="add"
     )
-    assert set(config_instance.topics.subscriptions) == {"topic3", "topic4"}
+    assert config_instance.topics.subscriptions == ["topic3", "topic4"]
     
     # Update Topics Config - remove mode
     config_instance.update_config(
@@ -259,6 +244,84 @@ def test_config_safe_config(config_instance):
     # Ensure non-sensitive data remains
     assert 'host' in broker_config
     assert 'miniserver_ip' in miniserver_config
+
+
+def test_safe_config_is_json_serializable(config_instance):
+    """topic_whitelist is a set in memory, which orjson cannot serialize.
+
+    config/get dumps this payload straight onto MQTT, so it has to come out as
+    a plain list - sorted, so the response does not churn between runs.
+    """
+    import orjson
+
+    config_instance.topics.topic_whitelist = {"zeta/topic", "alpha/topic"}
+
+    safe_config = config_instance.get_safe_config()
+
+    assert safe_config['topics']['topic_whitelist'] == ["alpha/topic", "zeta/topic"]
+    assert orjson.loads(orjson.dumps(safe_config))['topics']['topic_whitelist'] == [
+        "alpha/topic", "zeta/topic"
+    ]
+
+
+def test_save_config_writes_set_valued_fields(tmp_path, config_instance):
+    """TOML has no set type either, so saving must not choke on the whitelist."""
+    save_path = tmp_path / "saved_config.toml"
+    config_instance.config_path = str(save_path)
+    config_instance.topics.topic_whitelist = {"zeta/topic", "alpha/topic"}
+
+    config_instance.save_config()
+
+    # Sorted on disk, so restarts do not churn the file
+    assert 'topic_whitelist = ["alpha/topic", "zeta/topic"]' in save_path.read_text()
+
+    new_config = Config()
+    new_config.config_path = str(save_path)
+    new_config._config = new_config._load_config()
+    assert new_config.topics.topic_whitelist == {"alpha/topic", "zeta/topic"}
+
+
+def test_topic_whitelist_is_normalized_to_a_set(temp_config_file):
+    """The field is declared Set[str], but TOML can only express a list.
+
+    Without normalization the runtime type depends on whether a config file was
+    present, and update_field() branches on exactly that type.
+    """
+    config = Config()
+    config.config_path = temp_config_file
+    config._config = config._load_config()
+
+    assert isinstance(config.topics.topic_whitelist, set)
+    # Duplicates in the file collapse instead of being carried around
+    assert AppConfig.from_dict(
+        {"topics": {"topic_whitelist": ["a", "a", "b"]}}
+    ).topics.topic_whitelist == {"a", "b"}
+
+
+def test_config_add_preserves_list_order(config_instance):
+    """'add' must not reshuffle list fields.
+
+    The old implementation round-tripped through a set, so every config/add
+    rewrote the user's config file in an arbitrary, run-dependent order.
+    """
+    config_instance.update_config(
+        ConfigSection.TOPICS,
+        {"subscriptions": ["alpha", "beta", "gamma"]},
+        list_mode="set",
+    )
+    config_instance.update_config(
+        ConfigSection.TOPICS,
+        {"subscriptions": ["delta", "beta"]},
+        list_mode="add",
+    )
+
+    # delta appended, beta deduped in place
+    assert config_instance.topics.subscriptions == ["alpha", "beta", "gamma", "delta"]
+
+    config_instance.update_field("do_not_forward", ["one", "two"], list_mode="set")
+    config_instance.update_field("do_not_forward", ["three", "one"], list_mode="add")
+    assert config_instance.topics.do_not_forward == ["one", "two", "three"]
+
 
 def test_save_config(tmp_path, config_instance):
     """Test saving the configuration to a file"""

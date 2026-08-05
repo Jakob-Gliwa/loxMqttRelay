@@ -22,7 +22,7 @@ def cleanup_singletons() -> typing.Generator[None, None, None]:
 @pytest.fixture
 def mock_config() -> typing.Generator[AppConfig, None, None]:
     config = AppConfig()
-    config.topics.topic_whitelist = ["initial_topic1", "initial_topic2"]
+    config.topics.topic_whitelist = {"initial_topic1", "initial_topic2"}
     config.topics.subscription_filters = ["filter1"]
     config.miniserver.miniserver_ip = "192.168.1.1"
     config.miniserver.miniserver_user = "user"
@@ -63,7 +63,7 @@ async def test_whitelist_loading_sequence(config_instance: Config, mock_logger: 
             assert any("Whitelist updated from miniserver configuration" in m for m in info_msgs)
 
             # Test 2: Finale Whitelist?
-            assert global_config.topics.topic_whitelist == ["synced_topic1", "synced_topic2"]
+            assert global_config.topics.topic_whitelist == {"synced_topic1", "synced_topic2"}
 
 @pytest.mark.asyncio
 async def test_whitelist_loading_with_sync_failure(config_instance: Config, mock_logger: MagicMock) -> None:
@@ -84,7 +84,7 @@ async def test_whitelist_loading_with_sync_failure(config_instance: Config, mock
             assert any("Keeping whitelist from config" in m for m in info_msgs)
 
             # Whitelist muss unverändert sein
-            assert global_config.topics.topic_whitelist == ["initial_topic1", "initial_topic2"]
+            assert global_config.topics.topic_whitelist == {"initial_topic1", "initial_topic2"}
 
 @pytest.mark.asyncio
 async def test_whitelist_loading_with_sync_disabled(config_instance: Config, mock_logger: MagicMock) -> None:
@@ -100,13 +100,17 @@ async def test_whitelist_loading_with_sync_disabled(config_instance: Config, moc
             mock_sync.assert_not_called()
 
             # Whitelist bleibt bei den Config-Werten
-            assert global_config.topics.topic_whitelist == ["initial_topic1", "initial_topic2"]
+            assert global_config.topics.topic_whitelist == {"initial_topic1", "initial_topic2"}
 
 @pytest.mark.asyncio
 async def test_whitelist_sync_on_miniserver_startup(config_instance: Config, mock_logger: MagicMock) -> None:
     """Test: Bei miniserverevent/startup wird erneut gesynct."""
     with patch.object(config_instance, '_load_config', return_value=None):
         relay = MQTTRelay()
+        # The startup event normally arrives from the Rust ingress thread, so the
+        # relay schedules onto a loop it captured in main(). This test drives it
+        # directly and has to supply that loop itself.
+        relay._loop = asyncio.get_running_loop()
         with patch('loxmqttrelay.main.sync_miniserver_whitelist', return_value=["synced_topic1", "synced_topic2"]) as mock_sync:
             # Erstmalig syncen
             await relay.handle_miniserver_sync()
@@ -133,7 +137,7 @@ async def test_whitelist_sync_on_miniserver_startup(config_instance: Config, moc
             assert any("Miniserver startup detected, resyncing whitelist" in m for m in info_msgs)
 
             # Neue Whitelist sollte wieder "synced_topic1", "synced_topic2" enthalten
-            assert global_config.topics.topic_whitelist == ["synced_topic1", "synced_topic2"]
+            assert global_config.topics.topic_whitelist == {"synced_topic1", "synced_topic2"}
 
 @pytest.mark.asyncio
 async def test_whitelist_sync_on_websocket_reconnect(config_instance: Config, mock_logger: MagicMock) -> None:
@@ -159,7 +163,7 @@ async def test_whitelist_sync_on_websocket_reconnect(config_instance: Config, mo
                 loxwebsocket._event_callbacks.pop(relay.handle_miniserver_sync, None)
 
             mock_sync.assert_called_once()
-            assert global_config.topics.topic_whitelist == ["reconnect_topic"]
+            assert global_config.topics.topic_whitelist == {"reconnect_topic"}
 
 @pytest.mark.asyncio
 async def test_no_sync_on_other_websocket_events(config_instance: Config, mock_logger: MagicMock) -> None:

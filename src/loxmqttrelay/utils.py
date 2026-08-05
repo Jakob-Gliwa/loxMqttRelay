@@ -183,7 +183,6 @@ _KEY_PACKAGES = (
     "orjson",
     "pycryptodome",
     "uvloop",
-    "gmqtt",
     "lxml",
     "pygixml",
     "lz4",

@@ -142,7 +142,7 @@ def derive_whitelist(mode: str | None, targets: list[str]) -> list[str] | None:
 
 def make_processor(config, expand_json: bool, shape_cache: bool = True):
     """Build a processor with the config knobs the Rust side reads once."""
-    from loxmqttrelay.compatible._loxmqttrelay import MiniserverDataProcessor
+    from loxmqttrelay.compatible._loxmqttrelay import MiniserverDataProcessor, MqttClient
 
     config.processing.expand_json = expand_json
     config.general.base_topic = BASE_TOPIC
@@ -156,7 +156,7 @@ def make_processor(config, expand_json: bool, shape_cache: bool = True):
         TopicNS(),
         config,
         AsyncMock(),
-        MagicMock(),
+        MqttClient(config),
         recorder,
         MagicMock(),
     )

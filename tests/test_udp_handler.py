@@ -3,10 +3,8 @@ import pytest_asyncio
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 from loxmqttrelay.udp_handler import (
-    parse_udp_message_mqtt3,
     parse_udp_message_mqtt5,
-    _handle_mqtt3,
-    _handle_mqtt5,
+    handle_udp_message,
     UDPProtocol,
     start_udp_server,
 )
@@ -79,23 +77,13 @@ from loxmqttrelay.udp_handler import (
     ("a/b c/d e f", ("publish", "a/b c/d", "e f")),
     ("publish Home/Automation/Light/Control {\"mode\": \"auto on\"}", ("publish", "Home/Automation/Light/Control", "{\"mode\": \"auto on\"}")),
 ])
-def test_parse_udp_message_mqtt3(udp_message, expected):
-    result = parse_udp_message_mqtt3(udp_message)
-    assert result == expected
-
-
-def test_mqtt3_parser_ignores_property_block():
-    # In MQTT3 mode the '[...]' block is NOT special - it stays part of the topic
-    result = parse_udp_message_mqtt3("publish [source=loxone] home/light on")
-    assert result == ("publish", "[source=loxone] home/light", "on")
+def test_parse_udp_message_without_property_block(udp_message, expected):
+    """Messages without a '[key=value]' block yield no user properties."""
+    result = parse_udp_message_mqtt5(udp_message)
+    assert result == (expected + (None,) if expected is not None else None)
 
 
 @pytest.mark.parametrize("udp_message,expected", [
-    # Without a property block -> properties are None, behaves like the v3 parser
-    ("publish topic1 message1", ("publish", "topic1", "message1", None)),
-    ("topic3 message3", ("publish", "topic3", "message3", None)),
-    ("retain topic2 message2", ("retain", "topic2", "message2", None)),
-
     # Single valid property
     ("publish [source=loxone] home/light on",
      ("publish", "home/light", "on", [("source", "loxone")])),
@@ -149,92 +137,16 @@ def test_parse_udp_message_mqtt5(udp_message, expected):
 
 
 @pytest.fixture
-def mock_mqtt_client(monkeypatch):
+def mock_mqtt_client():
     mock_client = AsyncMock()
     mock_client.publish = AsyncMock()
-    monkeypatch.setattr('loxmqttrelay.udp_handler.mqtt_client', mock_client)
     return mock_client
 
 
 @pytest.mark.asyncio
-async def test_handle_mqtt3_publish(mock_mqtt_client):
-    await _handle_mqtt3(
-        "publish test/topic test message",
-        ("127.0.0.1", 1234)
-    )
-
-    mock_mqtt_client.publish.assert_called_once_with(
-        "test/topic",
-        "test message",
-        False
-    )
-
-
-@pytest.mark.asyncio
-async def test_handle_mqtt3_retain(mock_mqtt_client):
-    await _handle_mqtt3(
-        "retain test/topic test message",
-        ("127.0.0.1", 1234)
-    )
-
-    mock_mqtt_client.publish.assert_called_once_with(
-        "test/topic",
-        "test message",
-        True
-    )
-
-
-@pytest.mark.asyncio
-async def test_handle_mqtt3_default_publish(mock_mqtt_client):
-    await _handle_mqtt3(
-        "test/topic test message",
-        ("127.0.0.1", 1234)
-    )
-
-    mock_mqtt_client.publish.assert_called_once_with(
-        "test/topic",
-        "test message",
-        False
-    )
-
-
-@pytest.mark.asyncio
-async def test_handle_mqtt3_invalid(mock_mqtt_client):
-    await _handle_mqtt3(
-        "invalid",  # Single word message should be treated as invalid
-        ("127.0.0.1", 1234)
-    )
-
-    mock_mqtt_client.publish.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_handle_mqtt3_empty(mock_mqtt_client):
-    await _handle_mqtt3(
-        "",
-        ("127.0.0.1", 1234)
-    )
-
-    mock_mqtt_client.publish.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_handle_mqtt3_with_special_chars(mock_mqtt_client):
-    await _handle_mqtt3(
-        "publish test/topic/path message/with/slashes",
-        ("127.0.0.1", 1234)
-    )
-
-    mock_mqtt_client.publish.assert_called_once_with(
-        "test/topic/path",
-        "message/with/slashes",
-        False
-    )
-
-
-@pytest.mark.asyncio
-async def test_handle_mqtt5_without_properties(mock_mqtt_client):
-    await _handle_mqtt5(
+async def test_handle_udp_message_publish(mock_mqtt_client):
+    await handle_udp_message(
+        mock_mqtt_client,
         "publish test/topic test message",
         ("127.0.0.1", 1234)
     )
@@ -248,8 +160,79 @@ async def test_handle_mqtt5_without_properties(mock_mqtt_client):
 
 
 @pytest.mark.asyncio
-async def test_handle_mqtt5_with_properties(mock_mqtt_client):
-    await _handle_mqtt5(
+async def test_handle_udp_message_retain(mock_mqtt_client):
+    await handle_udp_message(
+        mock_mqtt_client,
+        "retain test/topic test message",
+        ("127.0.0.1", 1234)
+    )
+
+    mock_mqtt_client.publish.assert_called_once_with(
+        "test/topic",
+        "test message",
+        True,
+        None
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_udp_message_default_publish(mock_mqtt_client):
+    await handle_udp_message(
+        mock_mqtt_client,
+        "test/topic test message",
+        ("127.0.0.1", 1234)
+    )
+
+    mock_mqtt_client.publish.assert_called_once_with(
+        "test/topic",
+        "test message",
+        False,
+        None
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_udp_message_invalid(mock_mqtt_client):
+    await handle_udp_message(
+        mock_mqtt_client,
+        "invalid",  # Single word message should be treated as invalid
+        ("127.0.0.1", 1234)
+    )
+
+    mock_mqtt_client.publish.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_udp_message_empty(mock_mqtt_client):
+    await handle_udp_message(
+        mock_mqtt_client,
+        "",
+        ("127.0.0.1", 1234)
+    )
+
+    mock_mqtt_client.publish.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_udp_message_with_special_chars(mock_mqtt_client):
+    await handle_udp_message(
+        mock_mqtt_client,
+        "publish test/topic/path message/with/slashes",
+        ("127.0.0.1", 1234)
+    )
+
+    mock_mqtt_client.publish.assert_called_once_with(
+        "test/topic/path",
+        "message/with/slashes",
+        False,
+        None
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_udp_message_with_properties(mock_mqtt_client):
+    await handle_udp_message(
+        mock_mqtt_client,
         "publish [source=loxone;room=kitchen] test/topic test message",
         ("127.0.0.1", 1234)
     )
@@ -263,8 +246,9 @@ async def test_handle_mqtt5_with_properties(mock_mqtt_client):
 
 
 @pytest.mark.asyncio
-async def test_handle_mqtt5_retain_with_properties(mock_mqtt_client):
-    await _handle_mqtt5(
+async def test_handle_udp_message_retain_with_properties(mock_mqtt_client):
+    await handle_udp_message(
+        mock_mqtt_client,
         "retain [origin=ms1] test/topic online",
         ("127.0.0.1", 1234)
     )
@@ -278,16 +262,20 @@ async def test_handle_mqtt5_retain_with_properties(mock_mqtt_client):
 
 
 @pytest.mark.asyncio
-async def test_udp_protocol_uses_injected_handler(mock_mqtt_client):
-    handler = AsyncMock()
-    protocol = UDPProtocol(handler)
+async def test_udp_protocol_publishes_via_injected_client(mock_mqtt_client):
+    protocol = UDPProtocol(mock_mqtt_client)
     test_data = "publish test/topic test message".encode('utf-8')
     test_addr = ("127.0.0.1", 1234)
 
     protocol.datagram_received(test_data, test_addr)
     await asyncio.sleep(0.1)  # Give time for the async task to complete
 
-    handler.assert_called_once_with("publish test/topic test message", test_addr)
+    mock_mqtt_client.publish.assert_called_once_with(
+        "test/topic",
+        "test message",
+        False,
+        None
+    )
 
 
 @pytest.mark.asyncio
@@ -301,7 +289,7 @@ async def test_start_udp_server(mock_mqtt_client):
             return_value=(mock_transport, mock_protocol)
         )
 
-        transport, protocol = await start_udp_server()
+        transport, protocol = await start_udp_server(mock_mqtt_client)
 
         assert transport == mock_transport
         assert protocol == mock_protocol

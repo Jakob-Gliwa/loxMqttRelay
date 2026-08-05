@@ -7,7 +7,6 @@ import uvloop
 
 from loxmqttrelay.config import ConfigError, ConfigSection, global_config
 from loxmqttrelay.logging_config import get_lazy_logger
-from loxmqttrelay.mqtt_client import mqtt_client
 from loxmqttrelay.udp_handler import start_udp_server
 from loxmqttrelay.miniserver_sync import sync_miniserver_whitelist
 from loxmqttrelay.http_miniserver_handler import http_miniserver_handler
@@ -15,7 +14,7 @@ from loxwebsocket.lox_ws_api import loxwebsocket
 import loxmqttrelay.utils as utils
 
 # The imports are now handled by __init__.py
-from loxmqttrelay import MiniserverDataProcessor, init_rust_logger
+from loxmqttrelay import MiniserverDataProcessor, MqttClient, init_rust_logger
 
 TOPIC = types.SimpleNamespace(
     CONFIG_SET = f"{global_config.general.base_topic}config/set",
@@ -37,18 +36,29 @@ init_rust_logger()
 
 class MQTTRelay:
     def __init__(self):
-        self.miniserver_data_processor = MiniserverDataProcessor(TOPIC, global_config, self, mqtt_client, http_miniserver_handler, orjson)
+        # The client owns the connection state that the Rust processor shares,
+        # so it has to exist before the processor is built.
+        self.mqtt_client = MqttClient(global_config)
+        self.miniserver_data_processor = MiniserverDataProcessor(TOPIC, global_config, self, self.mqtt_client, http_miniserver_handler, orjson)
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def main(self):
+        # The Rust ingress worker calls back from a tokio thread, so anything it
+        # triggers must be scheduled onto this loop explicitly.
+        self._loop = asyncio.get_running_loop()
+
         await self.connect_and_subscribe_mqtt()
         await self.handle_miniserver_sync()
         # A websocket reconnect means the Miniserver went away and came back,
         # which usually follows a configuration upload - so resync the whitelist.
         loxwebsocket.add_event_callback(self.handle_miniserver_sync, [loxwebsocket.EventType.RECONNECTED])
-        asyncio.create_task(start_udp_server())
+        asyncio.create_task(start_udp_server(self.mqtt_client))
 
         logger.info("MQTT Relay started")
         await asyncio.Future()
+
+    async def shutdown(self):
+        await self.mqtt_client.disconnect()
 
     async def handle_miniserver_sync(self):
         """Attempt to sync whitelist with miniserver if enabled"""        
@@ -73,7 +83,11 @@ class MQTTRelay:
     def schedule_miniserver_sync(self):
         """Schedule the asynchronous handle_miniserver_sync in the event loop."""
         logger.info("Miniserver startup detected, resyncing whitelist")
-        asyncio.create_task(self.handle_miniserver_sync())
+        if self._loop is None:
+            logger.error("Cannot resync whitelist: event loop not running")
+            return
+        # Reached from the Rust ingress worker, i.e. off the event loop thread.
+        asyncio.run_coroutine_threadsafe(self.handle_miniserver_sync(), self._loop)
 
     async def connect_and_subscribe_mqtt(self):
         """Ensure MQTT client is connected with all required subscriptions."""
@@ -89,8 +103,9 @@ class MQTTRelay:
         ]
         
         try:
-            # Connect with all required subscriptions
-            await mqtt_client.connect(all_topics, self.miniserver_data_processor.handle_mqtt_message)
+            # Connect with all required subscriptions. The processor is handed
+            # over whole so the Rust side can dispatch without a Python callback.
+            await self.mqtt_client.connect(all_topics, self.miniserver_data_processor)
         except Exception as e:
             logger.error(f"Failed to connect to MQTT broker: {e}")
             raise ConfigError(f"MQTT connection failed: {e}")
@@ -111,7 +126,10 @@ def main():
     try:
         asyncio.run(relay.main())
     except KeyboardInterrupt:
-        pass
+        try:
+            asyncio.run(relay.shutdown())
+        except Exception:
+            logger.warning("Error during MQTT shutdown", exc_info=True)
     finally:
         logger.info("MQTT Relay exited")
 
