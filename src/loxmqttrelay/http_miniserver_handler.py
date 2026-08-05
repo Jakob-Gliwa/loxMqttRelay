@@ -1,5 +1,6 @@
 import asyncio
 import aiohttp
+from collections.abc import Sequence
 from typing import Any 
 from loxmqttrelay.config import global_config
 from loxmqttrelay.logging_config import get_lazy_logger
@@ -142,5 +143,43 @@ class HttpMiniserverHandler:
             await self.send_to_miniserver_via_http(topic, normalized_topic, value)
 
         return 
+
+    async def send_batch_to_miniserver(
+        self,
+        items: Sequence[tuple[str, str, Any]],
+    ) -> None:
+        """
+        Send every value expanded out of a single MQTT message.
+
+        The Rust side hands the whole message over in one call instead of one
+        call per JSON leaf, which is where the crossing cost used to pile up.
+
+        WebSocket mode walks the batch sequentially: all values share one
+        connection, so sending them in order also removes the race where several
+        concurrent values each found the socket disconnected and opened it.
+        HTTP mode keeps the requests concurrent - they are independent round
+        trips, still bounded by ``connection_semaphore``.
+        """
+        if not items:
+            return
+
+        if self.use_websocket:
+            for topic, normalized_topic, value in items:
+                await self.send_to_miniserver(topic, normalized_topic, value)
+            return
+
+        results = await asyncio.gather(
+            *(
+                self.send_to_miniserver(topic, normalized_topic, value)
+                for topic, normalized_topic, value in items
+            ),
+            return_exceptions=True,
+        )
+        for (topic, normalized_topic, value), result in zip(items, results):
+            if isinstance(result, BaseException):
+                logger.error(
+                    "Error sending %s (as %s)=%s to Miniserver: %s",
+                    topic, normalized_topic, value, result,
+                )
 
 http_miniserver_handler = HttpMiniserverHandler()

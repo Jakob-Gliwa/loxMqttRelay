@@ -86,6 +86,19 @@ async def processor(config_instance):
     return test_processor.processor
 
 
+def handed_over(http_handler):
+    """The (topic, normalized_topic, value) triples the Rust side handed over.
+
+    A message is passed across in one batched call, so the assertions below
+    flatten the recorded batches back into individual values.
+    """
+    return [
+        tuple(item)
+        for call in http_handler.send_batch_to_miniserver.call_args_list
+        for item in call[0][0]
+    ]
+
+
 @pytest.mark.parametrize("whitelist", [
     {"set/topic/a", "set/topic/b"},  # real default config type (Set[str])
     set(),                            # empty set
@@ -219,9 +232,9 @@ async def test_process_data_single_filter_pass(processor, filters, topic, messag
     processor.process_data(topic, message)
     
     if should_stay:
-        processor.http_handler_obj.send_to_miniserver.assert_called()
+        assert handed_over(processor.http_handler_obj)
     else:
-        processor.http_handler_obj.send_to_miniserver.assert_not_called()
+        assert not handed_over(processor.http_handler_obj)
 
 @pytest.mark.asyncio
 async def test_process_data_filter_second_pass_after_flatten(config_instance, monkeypatch):
@@ -237,8 +250,7 @@ async def test_process_data_filter_second_pass_after_flatten(config_instance, mo
     processor.update_subscription_filters([r"ignore\/.*"])
 
     processor.process_data(topic, message)
-    calls = processor.http_handler_obj.send_to_miniserver.call_args_list
-    processed_topics = [call[0][0] for call in calls]
+    processed_topics = [t for t, _, _ in handed_over(processor.http_handler_obj)]
 
     assert "original/topic/ignore/nested" not in processed_topics
     assert "original/topic/key1" in processed_topics
@@ -251,10 +263,10 @@ async def test_process_data_with_whitelist(processor):
     message = "value"
     processor.update_topic_whitelist(whitelist)
     processor.process_data(topic, message)
-    processor.http_handler_obj.send_to_miniserver.assert_not_called()
+    assert not handed_over(processor.http_handler_obj)
     
     # Test passing case - reset mock first
-    processor.http_handler_obj.send_to_miniserver.reset_mock()
+    processor.http_handler_obj.send_batch_to_miniserver.reset_mock()
     
     # Get the normalized version of the topic we'll send
     test_topic = "some/allowed/topic"
@@ -271,9 +283,9 @@ async def test_process_data_with_whitelist(processor):
     
     # Debug prints after processing
     print(f"Whitelist after: {processor.topic_whitelist}")
-    print(f"Mock calls: {processor.http_handler_obj.send_to_miniserver.mock_calls}")
+    print(f"Handed over: {handed_over(processor.http_handler_obj)}")
     
-    processor.http_handler_obj.send_to_miniserver.assert_called()
+    assert handed_over(processor.http_handler_obj)
 
 @pytest.mark.asyncio
 async def test_process_data_with_do_not_forward(processor):
@@ -282,7 +294,7 @@ async def test_process_data_with_do_not_forward(processor):
     message = "value"
     processor.update_do_not_forward(dnf_filter)
     processor.process_data(topic, message)
-    processor.http_handler_obj.send_to_miniserver.assert_not_called()
+    assert not handed_over(processor.http_handler_obj)
 
 @pytest.mark.asyncio
 async def test_process_data_order_of_filters(config_instance, monkeypatch):
@@ -306,14 +318,14 @@ async def test_process_data_order_of_filters(config_instance, monkeypatch):
         processor.process_data(topic, message)
         
     # Reset call list to ensure we start fresh
-    processor.http_handler_obj.send_to_miniserver.reset_mock()
+    processor.http_handler_obj.send_batch_to_miniserver.reset_mock()
     
     # Process messages again to ensure clean state
     for topic, message in topic_messages:
         processor.process_data(topic, message)
 
     expected_topics = ["whitelisted/foo", "normal/publish"]
-    actual_calls = [call[0][0] for call in processor.http_handler_obj.send_to_miniserver.call_args_list]
+    actual_calls = [t for t, _, _ in handed_over(processor.http_handler_obj)]
     print(f"Actual calls: {actual_calls}")  # Debug print
     print(f"Expected topics: {expected_topics}")  # Debug print
     assert set(actual_calls) == set(expected_topics), "Only whitelisted and normal topics should be processed"

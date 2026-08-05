@@ -325,3 +325,80 @@ async def test_standard_ports_behavior(
         # The current implementation might not include standard ports
         # This test documents the current behavior
         mock_session.return_value.__aenter__.return_value.get.assert_called()
+
+
+# Batched handover - Rust passes every value expanded out of one MQTT message
+# in a single call instead of one call per JSON leaf.
+
+BATCH = [
+    ("dev/sensor/temp", "dev_sensor_temp", "21.5"),
+    ("dev/sensor/hum", "dev_sensor_hum", "48"),
+    ("dev/sensor/on", "dev_sensor_on", "1"),
+]
+
+
+@pytest.mark.asyncio
+async def test_batch_sends_every_value_over_http(
+    mock_session: MagicMock,
+    handler: HttpMiniserverHandler
+) -> None:
+    handler.use_websocket = False
+    handler.target_ip = "192.168.1.1"
+    handler.http_base_url = f"http://{handler.target_ip}"
+
+    await handler.send_batch_to_miniserver(BATCH)
+
+    urls = [
+        call[0][0]
+        for call in mock_session.return_value.__aenter__.return_value.get.call_args_list
+    ]
+    assert sorted(urls) == sorted(
+        f"http://{handler.target_ip}/dev/sps/io/{normalized}/{value}"
+        for _, normalized, value in BATCH
+    )
+
+
+@pytest.mark.asyncio
+async def test_batch_over_websocket_keeps_order(handler: HttpMiniserverHandler) -> None:
+    """All values share one socket, so they go out one after another."""
+    handler.use_websocket = True
+    sent: list[tuple[str, str]] = []
+
+    async def record(normalized_topic, value):
+        sent.append((normalized_topic, value))
+
+    with patch("loxmqttrelay.http_miniserver_handler.loxwebsocket") as ws:
+        ws.state = "CONNECTED"
+        ws.send_websocket_command = AsyncMock(side_effect=record)
+        await handler.send_batch_to_miniserver(BATCH)
+
+    assert sent == [(normalized, value) for _, normalized, value in BATCH]
+
+
+@pytest.mark.asyncio
+async def test_batch_survives_a_failing_value(
+    mock_session: MagicMock,
+    handler: HttpMiniserverHandler
+) -> None:
+    """One bad value must not take the rest of the message down with it."""
+    handler.use_websocket = False
+    calls: list[str] = []
+
+    async def flaky(topic, normalized_topic, value):
+        calls.append(topic)
+        if topic == "dev/sensor/hum":
+            raise RuntimeError("boom")
+
+    with patch.object(handler, "send_to_miniserver", side_effect=flaky):
+        await handler.send_batch_to_miniserver(BATCH)
+
+    assert calls == [topic for topic, _, _ in BATCH]
+
+
+@pytest.mark.asyncio
+async def test_empty_batch_does_nothing(
+    mock_session: MagicMock,
+    handler: HttpMiniserverHandler
+) -> None:
+    await handler.send_batch_to_miniserver([])
+    mock_session.return_value.__aenter__.return_value.get.assert_not_called()
