@@ -32,9 +32,10 @@ htmlcov/
 .DS_Store
 
 # Project specific
+# uv.lock and Cargo.lock are tracked on purpose: a published release has to be
+# rebuildable from its tag, which floating dependency resolution would not be.
 ref/
 Temp/
-uv.lock
 
 # Logs
 *.log
@@ -45,7 +46,6 @@ target/
 benchmark.py
 newbench.py
 benchmarks/
-Cargo.lock
 lib copy.rs
 src/loxwebsocket/cython_modules/extractor_compatible.c
 src/loxwebsocket/cython_modules/extractor_optimized.c

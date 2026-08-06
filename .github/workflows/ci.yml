@@ -1,10 +1,22 @@
-name: Bugfix CI Pipeline
+name: CI (Build, Test & Experimental)
+
+# Validation plus the experimental channel:
+#   * pull_request      -> test + multi-arch build ONLY (never pushes)
+#   * push to main      -> test + build + push :experimental
+#   * push to bugfix    -> test + build + push :experimental-bugfix
+#   * workflow_dispatch -> same as a push to the dispatched branch
+#
+# Every image from here carries an :experimental prefix. The versioned tags and
+# the moving :latest are published exclusively by release.yml, so a merge to main
+# can no longer reach anyone who pulls :latest.
 
 on:
   workflow_dispatch:
   push:
     branches:
+      - main
       - bugfix
+  pull_request:
 
 # Cancel superseded runs on the same ref to save runner minutes.
 concurrency:
@@ -21,6 +33,7 @@ jobs:
   # --- TEST STAGE ---
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Check out source
         uses: actions/checkout@v6
@@ -40,8 +53,10 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
+      # --locked: resolve exactly what uv.lock records, and fail if the lock and
+      # pyproject.toml have drifted apart, rather than quietly relocking.
       - name: Sync dependencies (incl. test extras)
-        run: uv sync --extra test
+        run: uv sync --locked --extra test
 
       # The UDP path and the MQTT client are Rust; their unit tests live in the
       # crate. Built without `extension-module`, so the harness links libpython
@@ -60,10 +75,34 @@ jobs:
           name: coverage.xml
           path: coverage.xml
 
+  # --- VERSION PARITY (cheap, and it guards the next release) ---
+  # Not strictly needed for an experimental image, but catching the drift here
+  # means a release is never blocked by a bump that was forgotten weeks ago.
+  version-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install uv (with cache)
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+
+      # --no-project: the script reads the files and imports nothing, so it needs
+      # neither the dependencies nor a compiled extension.
+      - name: Assert pyproject == __version__ == Cargo.toml
+        run: uv run --no-project python scripts/check_version_parity.py
+
   # --- BUILD STAGE (one native runner per platform, no QEMU) ---
   build:
-    needs: test
+    # Gate the image on both validation jobs: version-check has no dependency
+    # edge of its own, so without this an experimental image could be pushed
+    # while it is red.
+    needs: [test, version-check]
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -90,14 +129,30 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      # Only authenticate when we are actually going to push (not on PRs), so a
+      # fork PR does not need the registry credentials at all.
       - name: Log in to Docker Registry
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v4
         with:
           username: ${{ vars.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Build and push by digest
+      # PR: prove it compiles on this platform - including both Rust variants and
+      # the extension check in the Dockerfile - and never push.
+      - name: Build image (PR validation, no push)
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: false
+          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
+
+      - name: Build and push by digest (experimental)
         id: build
+        if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -111,12 +166,14 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
 
       - name: Export digest
+        if: github.event_name != 'pull_request'
         run: |
           mkdir -p "${{ runner.temp }}/digests"
           digest="${{ steps.build.outputs.digest }}"
           touch "${{ runner.temp }}/digests/${digest#sha256:}"
 
       - name: Upload digest
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
         with:
           name: digests-${{ env.PLATFORM_PAIR }}
@@ -124,10 +181,13 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # --- MERGE STAGE (assemble the multi-arch manifest, tag & push) ---
+  # --- MERGE STAGE (assemble the experimental multi-arch manifest) ---
   merge:
     needs: build
+    # Skip entirely on PRs — nothing was pushed to merge.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Download digests
         uses: actions/download-artifact@v7
@@ -146,8 +206,18 @@ jobs:
           DOCKER_METADATA_ANNOTATIONS_LEVELS: index
         with:
           images: ${{ env.IMAGE_NAME }}
+          # latest=false: this workflow must never be able to move :latest, no
+          # matter which branch or event it runs for. That tag belongs to
+          # release.yml alone.
+          flavor: |
+            latest=false
+          # A moving tag per branch (:experimental for main,
+          # :experimental-bugfix for the bugfix branch) plus an immutable
+          # :experimental-<short-sha> you can pin and roll back to.
           tags: |
-            type=raw,value=experimental.${{ github.sha }}
+            type=raw,value=experimental,enable={{is_default_branch}}
+            type=ref,event=branch,prefix=experimental-,enable=${{ github.ref_name != github.event.repository.default_branch }}
+            type=sha,prefix=experimental-,format=short
 
       - name: Log in to Docker Registry
         uses: docker/login-action@v4
@@ -170,6 +240,8 @@ jobs:
             SOURCES+=("${IMAGE_NAME}@sha256:${digest}")
           done
           docker buildx imagetools create "${TAG_ARGS[@]}" "${ANN_ARGS[@]}" "${SOURCES[@]}"
+        env:
+          DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta.outputs.json }}
 
       - name: Inspect image
         run: |

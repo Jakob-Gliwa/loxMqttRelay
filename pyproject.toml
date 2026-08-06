@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "loxmqttrelay"
-version = "0.2.0"
+version = "0.3.0"
 description = "MQTT Relay for Loxone"
 requires-python = ">=3.14"
 dependencies = [

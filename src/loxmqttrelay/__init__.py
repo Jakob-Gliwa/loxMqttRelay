@@ -4,7 +4,7 @@ MQTT Relay for Loxone
 This package provides a bridge between MQTT and Loxone Miniserver, allowing bidirectional
 communication between MQTT topics and Loxone controls.
 """
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 
 from loxmqttrelay.utils import prefer_optimized_build, setup_logging
 from loxmqttrelay.logging_config import get_lazy_logger

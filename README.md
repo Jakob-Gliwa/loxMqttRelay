@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ![Docker Pulls](https://img.shields.io/docker/pulls/acidcliff/loxmqttrelay)
-![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/jakob-gliwa/loxMqttRelay/main.yml)
+![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/jakob-gliwa/loxMqttRelay/ci.yml?branch=main)
 [![Static Badge](https://img.shields.io/badge/get_it-on_Docker_Hub-blue)](https://hub.docker.com/r/acidcliff/loxmqttrelay)
 
 This MQTT Relay enables seamless communication between your MQTT devices/services and Loxone Miniserver.
@@ -45,10 +45,29 @@ docker run -d \
   --restart unless-stopped \
   -v $(pwd)/config:/app/config \
   -p 11884:11884/udp \
-  acidcliff/loxmqttrelay
+  acidcliff/loxmqttrelay:latest
 
 Optionally set -e LOG_LEVEL=DEBUG for more detailed logging
 ```
+
+### Image tags
+
+`latest` and the version tags come from a published release; the development
+branches have their own channel, so a merge never reaches anyone running
+`latest`:
+
+| Tag | What it is |
+| --- | --- |
+| `latest` | the newest stable release - what you want unless you have a reason |
+| `0.3.0` | that exact release, never moved again |
+| `0.3` | the newest patch release of that minor version |
+| `0.4.0-rc1` | a prerelease; published under its own name only, it moves neither `latest` nor `0.4` |
+| `experimental` | the current state of `main`. Not released, may break |
+| `experimental-bugfix` | the current state of the `bugfix` branch |
+| `experimental-<sha>` | one specific commit, so you can pin an experimental image and go back to it |
+
+Pin a version tag if an update should be a decision rather than a restart -
+`latest` moves under you the next time the container is recreated.
 
 ### Local installation
 ```bash
@@ -213,7 +232,7 @@ docker run -d \
 version: '3'
 services:
   mqttrelay:
-    image: acidcliff/loxmqttrelay
+    image: acidcliff/loxmqttrelay:latest
     volumes:
       - ./config:/app/config
     environment:
@@ -652,6 +671,42 @@ PYO3_PYTHON="$PWD/.venv/bin/python" cargo nextest run
 
 The shipped wheel is unaffected: `setup.py` turns `extension-module` back on for
 every build that is packaged.
+
+## Releasing
+
+Two workflows, and only one of them can publish a version:
+
+- `ci.yml` runs on every pull request (build only, nothing is pushed) and on
+  pushes to `main` and `bugfix`, where it publishes the `experimental` channel.
+  It can never move `latest`.
+- `release.yml` runs when a GitHub Release is published and is the only source of
+  the version tags and `latest`.
+
+To cut a release:
+
+1. Bump the version in `pyproject.toml`, `src/loxmqttrelay/__init__.py` and
+   `Cargo.toml`. All three have to agree - the wheel, the version a running relay
+   reports and the native crate:
+
+```bash
+uv run --no-project python scripts/check_version_parity.py
+```
+
+2. Refresh the lockfiles so they record the new version, and commit them along
+   with the bump. Both are tracked so a release can be rebuilt from its tag:
+
+```bash
+uv lock && cargo metadata --format-version 1 >/dev/null
+```
+
+3. Publish a GitHub Release with the tag `v<version>`, e.g. `v0.3.1`. The image
+   tags are derived from it: `0.3.1`, `0.3` and `latest`. Mark it as a prerelease
+   to get only `0.4.0-rc1` and leave `latest` where it is.
+
+The release is gated on the same tests as `main`, plus the version parity check
+against the git tag - so a tag without the matching bump fails instead of
+shipping an image that misreports itself. Since GitHub publishes the release
+before any of that runs, a failing gate turns the release back into a draft.
 
 ## Note
 

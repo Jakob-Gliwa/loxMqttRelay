@@ -1,15 +1,22 @@
-name: Main CI Pipeline
+name: Release (Publish to Docker Hub)
+
+# The only workflow that publishes versioned tags and moves :latest. Triggered
+# when a GitHub Release is published; the image tags are derived from the
+# release's semver tag, e.g. "v0.3.0" -> 0.3.0, 0.3, latest.
+#
+# A prerelease tag such as "v0.4.0-rc1" publishes only its own immutable
+# :0.4.0-rc1 and touches neither :latest nor :0.4 (see the merge stage).
+#
+# Everything on main lands on the :experimental channel via ci.yml instead.
 
 on:
-  workflow_dispatch:
-  push:
-    branches:
-      - main
+  release:
+    types: [published]
 
-# Cancel superseded runs on the same ref to save runner minutes.
+# Never cancel a release run: a half-pushed manifest is worse than a slow queue.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -18,22 +25,19 @@ env:
   IMAGE_NAME: ${{ vars.DOCKER_USERNAME }}/loxmqttrelay
 
 jobs:
-  # --- TEST STAGE ---
+  # --- TEST STAGE (gate the release on green tests; mirrors ci.yml) ---
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Check out source
         uses: actions/checkout@v6
 
-      # setup-uv installs uv, manages the Python toolchain (per requires-python)
-      # and persists uv's real cache (~/.cache/uv) across runs out of the box.
       - name: Install uv (with cache)
         uses: astral-sh/setup-uv@v8.2.0
         with:
           enable-cache: true
 
-      # Modern stable toolchain via rustup — understands Cargo.lock v4 and is
-      # needed to build the project's Rust extension.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -41,7 +45,7 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Sync dependencies (incl. test extras)
-        run: uv sync --extra test
+        run: uv sync --locked --extra test
 
       # The UDP path and the MQTT client are Rust; their unit tests live in the
       # crate. Built without `extension-module`, so the harness links libpython
@@ -54,16 +58,36 @@ jobs:
       - name: Run tests with coverage
         run: uv run pytest --cov-report=xml
 
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v7
+  # --- VERSION GATE (git tag must match pyproject, __version__ and Cargo.toml) ---
+  # The image tags come from the release's git tag via type=semver below. If
+  # someone tags v0.4.0 but forgets to bump the code, the image would advertise
+  # 0.4.0 while the relay reports 0.3.0. Fail the release loudly instead.
+  version-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install uv (with cache)
+        uses: astral-sh/setup-uv@v8.2.0
         with:
-          name: coverage.xml
-          path: coverage.xml
+          enable-cache: true
+
+      # --no-project: the script reads the files and imports nothing, so it needs
+      # neither the dependencies nor a compiled extension.
+      - name: Assert release tag == pyproject == __version__ == Cargo.toml
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: uv run --no-project python scripts/check_version_parity.py "$RELEASE_TAG"
 
   # --- BUILD STAGE (one native runner per platform, no QEMU) ---
   build:
-    needs: test
+    # Gate the published image on tests AND version parity: a mismatch must not
+    # be able to ship an image that misreports its own version.
+    needs: [test, version-check]
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -128,6 +152,7 @@ jobs:
   merge:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Download digests
         uses: actions/download-artifact@v7
@@ -146,9 +171,18 @@ jobs:
           DOCKER_METADATA_ANNOTATIONS_LEVELS: index
         with:
           images: ${{ env.IMAGE_NAME }}
+          # latest=auto (the default, stated so the contract is visible): the
+          # moving :latest is emitted only for a stable semver. Together with
+          # type=semver, which suppresses the :{{major}}.{{minor}} partial on a
+          # prerelease, a tag like v0.4.0-rc1 publishes just its own immutable
+          # :0.4.0-rc1 and clobbers neither :latest nor :0.4.
+          flavor: |
+            latest=auto
+          # Derived from the release tag (refs/tags/<tag>). A stable tag like
+          # "v0.3.0" yields 0.3.0, 0.3 and latest.
           tags: |
-            type=raw,value=latest
-            type=raw,value=${{ github.sha }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
 
       - name: Log in to Docker Registry
         uses: docker/login-action@v4
@@ -171,6 +205,8 @@ jobs:
             SOURCES+=("${IMAGE_NAME}@sha256:${digest}")
           done
           docker buildx imagetools create "${TAG_ARGS[@]}" "${ANN_ARGS[@]}" "${SOURCES[@]}"
+        env:
+          DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta.outputs.json }}
 
       - name: Inspect image
         run: |
@@ -179,3 +215,36 @@ jobs:
           docker buildx imagetools inspect "$first_tag"
         env:
           DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta.outputs.json }}
+
+  # --- RETRACT ON FAILURE (best-effort un-publish) ---
+  # A release:[published] trigger means the GitHub Release is already public
+  # before any gate has run. If validation, the image build or the manifest push
+  # fails, turn the release back into a draft so no broken or image-less release
+  # is left visible. This narrows the public window but cannot close it - only
+  # creating the release at the end of a tag-driven run would.
+  retract-on-failure:
+    needs: [test, version-check, build, merge]
+    # Run only when something upstream actually failed or was cancelled.
+    if: >-
+      always()
+      && (contains(needs.*.result, 'failure')
+          || contains(needs.*.result, 'cancelled'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Least privilege: only this job may write repo contents (edit the release).
+    permissions:
+      contents: write
+    steps:
+      - name: Convert release back to draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ github.event.release.id }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          echo "::warning::A release gate failed — retracting release '${RELEASE_TAG}' (id ${RELEASE_ID}) back to draft."
+          gh api \
+            --method PATCH \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -F draft=true
