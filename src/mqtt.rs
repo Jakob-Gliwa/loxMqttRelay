@@ -1,12 +1,15 @@
 //! MQTT 5 ingress and egress on top of mqtt-glide.
 //!
-//! Inbound messages never cross into Python: the connection read task hands
-//! them to a bounded channel and a worker feeds
-//! [`MiniserverDataProcessor::handle_mqtt_message`] directly. The UDP path in
-//! [`crate::udp`] publishes through [`MqttShared`] without the GIL either;
-//! Python keeps only the egress to the Miniserver.
+//! Inbound messages take no detour through a Python callback: the connection
+//! read task hands them to a bounded channel and a worker feeds
+//! [`MiniserverDataProcessor::handle_mqtt_message`] directly, which does the
+//! routing and filtering in Rust and only calls into Python where the work is
+//! Python's - the websocket egress to the Miniserver, orjson, a restart. The
+//! UDP path in [`crate::udp`] publishes through [`MqttShared`] and needs no GIL
+//! at all.
 
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::num::{NonZeroU16, NonZeroUsize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -26,6 +29,7 @@ use pyo3_async_runtimes::tokio::{future_into_py, get_runtime};
 use tokio::sync::{Notify, mpsc};
 
 use crate::MiniserverDataProcessor;
+use crate::util::{lock_recover, loggable, loggable_bytes};
 
 /// Inbound queue depth. Also drives the MQTT Receive Maximum so the broker's
 /// window and our handoff buffer stay aligned.
@@ -38,6 +42,13 @@ const COMMAND_CAPACITY: usize = 1024;
 const KEEP_ALIVE: Duration = Duration::from_secs(60);
 const RECONNECT_DELAY: Duration = Duration::from_secs(15);
 const MAX_AUTH_BACKOFF: Duration = Duration::from_secs(300);
+
+/// First wait after a SUBSCRIBE that did not reach the broker, doubled up to
+/// [`SUBSCRIBE_RETRY_MAX`]. Without the retry a single failed attempt left the
+/// relay connected and deaf until the next reconnect, which on a healthy
+/// connection may never come.
+const SUBSCRIBE_RETRY_DELAY: Duration = Duration::from_secs(2);
+const SUBSCRIBE_RETRY_MAX: Duration = Duration::from_secs(60);
 
 /// How long the "Disconnecting" status message may hold up the shutdown.
 const FAREWELL_TIMEOUT: Duration = Duration::from_secs(1);
@@ -120,29 +131,40 @@ impl MqttShared {
 
     /// Logs and remembers a publish that was lost.
     ///
-    /// `detail` carries the broker/transport error where there is one; the
-    /// reason alone would not tell an operator whether to look at the network
-    /// or at the broker.
-    fn record_drop(&self, topic: &str, payload: &[u8], reason: DropReason, detail: Option<&str>) {
-        match detail {
-            Some(detail) => warn!(
-                "Dropped MQTT publish to '{}' ({} bytes): {} - {}",
-                topic,
-                payload.len(),
-                reason.as_str(),
-                detail
-            ),
-            None => warn!(
-                "Dropped MQTT publish to '{}' ({} bytes): {}",
-                topic,
-                payload.len(),
-                reason.as_str()
-            ),
-        }
-
-        let Ok(mut ring) = self.undelivered.lock() else {
-            return;
+    /// `detail` carries the broker/transport error where there is one - the
+    /// reason alone would not tell an operator whether to look at the network or
+    /// at the broker - and `source` the sender a relayed message came from.
+    /// Both belong in this one line: it is the only trace a lost message leaves,
+    /// and a loss reported in two half lines has to be pieced back together by
+    /// hand.
+    ///
+    /// The address is taken as such rather than as text so that the happy path
+    /// pays nothing for it. Topic and payload come from outside, so they go
+    /// through `loggable`.
+    fn record_drop(
+        &self,
+        topic: &str,
+        payload: &[u8],
+        reason: DropReason,
+        detail: Option<&str>,
+        source: Option<SocketAddr>,
+    ) {
+        let from = match source {
+            Some(addr) => format!(" from {addr}"),
+            None => String::new(),
         };
+        let why = match detail {
+            Some(detail) => format!("{} - {}", reason.as_str(), loggable(detail)),
+            None => reason.as_str().to_owned(),
+        };
+        warn!(
+            "Dropped MQTT publish{from} ({} bytes): {why}: '{}'='{}'",
+            payload.len(),
+            loggable(topic),
+            loggable_bytes(payload)
+        );
+
+        let mut ring = lock_recover(&self.undelivered);
         if ring.len() >= UNDELIVERED_RING {
             ring.pop_front();
         }
@@ -158,13 +180,14 @@ impl MqttShared {
         topic: &str,
         payload: &[u8],
         retain: bool,
+        qos: QoS,
         user_properties: Vec<(String, String)>,
     ) -> Result<(), AppError> {
         let mut publish = client
             .publish_with()
             .topic(topic.to_owned())
             .payload(payload.to_vec())
-            .qos(QoS::AtMostOnce)
+            .qos(qos)
             .retain(retain);
         for (key, value) in user_properties {
             publish = publish.user_property(key, value);
@@ -172,25 +195,78 @@ impl MqttShared {
         publish.send().await
     }
 
-    /// Publishes, or reports why the message was lost. Never fails silently.
-    pub(crate) async fn publish(
+    /// Publish, or report why the message was lost. Never fails silently.
+    async fn deliver(
         &self,
-        topic: String,
-        payload: Vec<u8>,
+        topic: &str,
+        payload: &[u8],
         retain: bool,
+        qos: QoS,
         user_properties: Vec<(String, String)>,
+        source: Option<SocketAddr>,
     ) -> Option<DropReason> {
         let Some(client) = self.live_client() else {
-            self.record_drop(&topic, &payload, DropReason::Disconnected, None);
+            self.record_drop(topic, payload, DropReason::Disconnected, None, source);
             return Some(DropReason::Disconnected);
         };
-        match Self::publish_on(&client, &topic, &payload, retain, user_properties).await {
+        match Self::publish_on(&client, topic, payload, retain, qos, user_properties).await {
             Ok(()) => None,
             Err(e) => {
-                self.record_drop(&topic, &payload, DropReason::SendFailed, Some(&e.to_string()));
+                self.record_drop(
+                    topic,
+                    payload,
+                    DropReason::SendFailed,
+                    Some(&e.to_string()),
+                    source,
+                );
                 Some(DropReason::SendFailed)
             }
         }
+    }
+
+    /// A relayed message: QoS 0, no outbox, gone if the broker is not there.
+    ///
+    /// `source` names the sender it came from, so the drop log says whose
+    /// message was lost.
+    pub(crate) async fn publish(
+        &self,
+        topic: &str,
+        payload: &[u8],
+        retain: bool,
+        user_properties: Vec<(String, String)>,
+        source: Option<SocketAddr>,
+    ) -> Option<DropReason> {
+        self.deliver(
+            topic,
+            payload,
+            retain,
+            QoS::AtMostOnce,
+            user_properties,
+            source,
+        )
+        .await
+    }
+
+    /// The relay's own state on the status topic: retained and acknowledged.
+    ///
+    /// The only place where QoS 0 fire-and-forget is wrong. A state that is not
+    /// retained is invisible to everyone who subscribes later, and one that is
+    /// unacknowledged can be lost in the very reconnect it is meant to describe
+    /// - leaving `Connected` standing while the relay is anything but.
+    ///
+    /// The PUBACK wait cannot stall a caller: glide bounds it with its
+    /// `ack_timeout` (5s by default) and reports a timeout as an error, which is
+    /// then logged and kept like any other lost publish.
+    pub(crate) async fn publish_status(&self, topic: &str, state: &str) -> Option<DropReason> {
+        self.deliver(
+            topic,
+            state.as_bytes(),
+            true,
+            QoS::AtLeastOnce,
+            Vec::new(),
+            None,
+        )
+        .await
     }
 
     /// Fire-and-forget publish for callers that hold the GIL and must not await.
@@ -199,14 +275,22 @@ impl MqttShared {
     /// the drop is visible to the caller as soon as this returns.
     pub(crate) fn publish_detached(self: &Arc<Self>, topic: String, payload: Vec<u8>) {
         let Some(client) = self.live_client() else {
-            self.record_drop(&topic, &payload, DropReason::Disconnected, None);
+            self.record_drop(&topic, &payload, DropReason::Disconnected, None, None);
             return;
         };
         let shared = Arc::clone(self);
         get_runtime().spawn(async move {
-            let result = Self::publish_on(&client, &topic, &payload, false, Vec::new()).await;
+            let result =
+                Self::publish_on(&client, &topic, &payload, false, QoS::AtMostOnce, Vec::new())
+                    .await;
             if let Err(e) = result {
-                shared.record_drop(&topic, &payload, DropReason::SendFailed, Some(&e.to_string()));
+                shared.record_drop(
+                    &topic,
+                    &payload,
+                    DropReason::SendFailed,
+                    Some(&e.to_string()),
+                    None,
+                );
             }
         });
     }
@@ -256,6 +340,67 @@ fn is_granted(reason: SubscribeAckReason) -> bool {
     )
 }
 
+/// What the relay claims to be on the status topic.
+const STATUS_CONNECTED: &str = "Connected";
+const STATUS_DEGRADED: &str = "Degraded";
+const STATUS_DISCONNECTING: &str = "Disconnecting";
+
+/// Report what the broker granted, and decide what the relay may now claim.
+///
+/// A rejected filter is a hole nothing fills: glide's registry only learns the
+/// filters the broker granted, and a retry would not change an ACL decision. So
+/// the session stays up, but it must not be advertised as healthy and the
+/// reconnect policy must not be told this was a good session - otherwise the
+/// relay reports `Connected` while data quietly never arrives.
+fn review_suback(
+    topics: &[String],
+    reasons: &[SubscribeAckReason],
+    reconnect: &StandardReconnectPolicy,
+) -> &'static str {
+    let mut rejected = 0usize;
+    let mut auth_denied = false;
+    for (topic, reason) in topics.iter().zip(reasons) {
+        if !is_granted(*reason) {
+            rejected += 1;
+            auth_denied |= matches!(reason, SubscribeAckReason::NotAuthorized);
+            error!(
+                "Broker rejected subscription to '{}': {reason:?} - no messages will be received \
+                 on it",
+                loggable(topic)
+            );
+        }
+    }
+    // `zip` would have hidden this: fewer reasons than filters means the rest
+    // were never answered for, and nothing says they are in place.
+    if reasons.len() != topics.len() {
+        error!(
+            "Broker answered {} of {} subscription(s) - the rest are unaccounted for",
+            reasons.len(),
+            topics.len()
+        );
+        rejected += topics.len().saturating_sub(reasons.len());
+    }
+
+    if rejected == 0 {
+        // Only arm the fast reconnect retry once the session is really usable,
+        // i.e. after the subscriptions are in place.
+        reconnect.mark_live();
+        return STATUS_CONNECTED;
+    }
+
+    warn!(
+        "{rejected} of {} subscription(s) are not in place - reporting {STATUS_DEGRADED} instead \
+         of {STATUS_CONNECTED}",
+        topics.len()
+    );
+    if auth_denied {
+        // Shares the auth streak with CONNECT failures, which is what backs the
+        // relay off instead of reconnecting into the same refusal every 15s.
+        let _ = reconnect.record_subscribe_auth_failure();
+    }
+    STATUS_DEGRADED
+}
+
 /// Subscribes and republishes the status topic after every (re)connect.
 ///
 /// This is what gmqtt's `on_connect` callback used to do. Glide restores
@@ -275,45 +420,44 @@ async fn resubscribe_loop(
     loop {
         notify.notified().await;
 
-        let Some(client) = shared.live_client() else {
-            debug!("Resubscribe skipped: the session was gone again already");
-            continue;
-        };
+        let mut delay = SUBSCRIBE_RETRY_DELAY;
+        loop {
+            let Some(client) = shared.live_client() else {
+                debug!("Resubscribe skipped: the session was gone again already");
+                break;
+            };
 
-        let filters: Vec<Subscription> = topics
-            .iter()
-            .map(|topic| Subscription::new(topic.clone(), QoS::AtMostOnce))
-            .collect();
+            let filters: Vec<Subscription> = topics
+                .iter()
+                .map(|topic| Subscription::new(topic.clone(), QoS::AtMostOnce))
+                .collect();
 
-        info!("Subscribing to {} topic(s)", filters.len());
-        match client.subscribe(filters).await {
-            Ok(reasons) => {
-                for (topic, reason) in topics.iter().zip(reasons) {
-                    if !is_granted(reason) {
-                        // Nothing arriving on this filter is a silent hole
-                        // otherwise: the relay looks healthy and simply never
-                        // sees those messages.
-                        error!(
-                            "Broker rejected subscription to '{topic}': {reason:?} - no messages \
-                             will be received on it"
-                        );
-                    }
+            info!("Subscribing to {} topic(s)", filters.len());
+            match client.subscribe(filters).await {
+                Ok(reasons) => {
+                    let state = review_suback(&topics, &reasons, &reconnect);
+                    shared.publish_status(&status_topic, state).await;
+                    break;
                 }
-                // Only arm the fast reconnect retry once the session is really
-                // usable, i.e. after the subscriptions are in place.
-                reconnect.mark_live();
-            }
-            Err(e) => {
-                error!(
-                    "Subscribe failed: {e} - no messages will be received until the next reconnect"
-                );
-                continue;
+                Err(e) => {
+                    // Retried here rather than left to the next reconnect: the
+                    // connection is up, so nothing else is going to ask again,
+                    // and until a SUBSCRIBE lands the relay receives nothing.
+                    error!(
+                        "Subscribe failed: {e} - no messages are received until it succeeds, \
+                         retrying in {}s",
+                        delay.as_secs()
+                    );
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => {}
+                        // A reconnect in the meantime: start over at once
+                        // instead of sitting out the rest of the backoff.
+                        _ = notify.notified() => {}
+                    }
+                    delay = (delay * 2).min(SUBSCRIBE_RETRY_MAX);
+                }
             }
         }
-
-        shared
-            .publish(status_topic.clone(), b"Connected".to_vec(), false, Vec::new())
-            .await;
     }
 }
 
@@ -337,7 +481,7 @@ async fn ingress_worker(
         Python::attach(|py| {
             let bound = processor.bind(py);
             if let Err(e) = bound.borrow().handle_mqtt_message(py, topic, payload) {
-                error!("Dropped inbound message on '{received_on}': {e}");
+                error!("Dropped inbound message on '{}': {e}", loggable(&received_on));
             }
         });
     }
@@ -517,7 +661,7 @@ impl MqttClient {
 
         future_into_py(py, async move {
             Ok(shared
-                .publish(topic, payload, retain, properties)
+                .publish(&topic, &payload, retain, properties, None)
                 .await
                 .map(DropReason::as_str))
         })
@@ -537,8 +681,7 @@ impl MqttClient {
 
         future_into_py(py, async move {
             if let Some(client) = shared.handle() {
-                let farewell =
-                    shared.publish(status_topic, b"Disconnecting".to_vec(), false, Vec::new());
+                let farewell = shared.publish_status(&status_topic, STATUS_DISCONNECTING);
                 let announced = tokio::time::timeout(FAREWELL_TIMEOUT, farewell).await;
                 if announced.is_err() {
                     warn!("Timed out announcing the shutdown on the status topic");
@@ -556,9 +699,7 @@ impl MqttClient {
     /// Drains the last dropped publishes as `(topic, payload, reason)`.
     #[pyo3(text_signature = "(self)")]
     fn take_undelivered(&self, py: Python<'_>) -> PyResult<Vec<(String, Py<PyBytes>, &'static str)>> {
-        let Ok(mut ring) = self.shared.undelivered.lock() else {
-            return Ok(Vec::new());
-        };
+        let mut ring = lock_recover(&self.shared.undelivered);
         Ok(ring
             .drain(..)
             .map(|entry| {
@@ -569,5 +710,91 @@ impl MqttClient {
                 )
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy() -> StandardReconnectPolicy {
+        StandardReconnectPolicy::new(RECONNECT_DELAY, MAX_AUTH_BACKOFF)
+    }
+
+    fn topics() -> Vec<String> {
+        vec!["home/#".to_owned(), "sensor/#".to_owned()]
+    }
+
+    /// `mark_live` is not observable directly, but it resets the auth streak -
+    /// so a streak set beforehand shows whether the session was accepted.
+    #[test]
+    fn a_fully_granted_suback_makes_the_session_live() {
+        let reconnect = policy();
+        reconnect.record_subscribe_auth_failure();
+
+        let state = review_suback(
+            &topics(),
+            &[
+                SubscribeAckReason::GrantedQos0,
+                SubscribeAckReason::GrantedQos1,
+            ],
+            &reconnect,
+        );
+
+        assert_eq!(state, STATUS_CONNECTED);
+        assert_eq!(reconnect.consecutive_auth_failures(), 0, "mark_live resets the streak");
+    }
+
+    /// A filter the broker refused is a hole nothing fills, so the relay must
+    /// not advertise itself as healthy - and the session must not count as good.
+    #[test]
+    fn one_rejected_filter_degrades_the_whole_session() {
+        let reconnect = policy();
+        reconnect.record_subscribe_auth_failure();
+
+        let state = review_suback(
+            &topics(),
+            &[
+                SubscribeAckReason::GrantedQos0,
+                SubscribeAckReason::TopicFilterInvalid,
+            ],
+            &reconnect,
+        );
+
+        assert_eq!(state, STATUS_DEGRADED);
+        // Not an ACL refusal, so the streak is neither reset nor extended.
+        assert_eq!(reconnect.consecutive_auth_failures(), 1);
+    }
+
+    /// An ACL refusal joins the auth streak: reconnecting into the same refusal
+    /// every 15 seconds forever is what the streak backs off from.
+    #[test]
+    fn a_not_authorized_filter_counts_against_the_auth_streak() {
+        let reconnect = policy();
+
+        let state = review_suback(
+            &topics(),
+            &[
+                SubscribeAckReason::GrantedQos0,
+                SubscribeAckReason::NotAuthorized,
+            ],
+            &reconnect,
+        );
+
+        assert_eq!(state, STATUS_DEGRADED);
+        assert_eq!(reconnect.consecutive_auth_failures(), 1);
+    }
+
+    /// Fewer reasons than filters used to vanish into `zip`, leaving the relay
+    /// to report a session in which nothing was ever confirmed.
+    #[test]
+    fn an_unanswered_filter_is_not_taken_for_granted() {
+        let reconnect = policy();
+        reconnect.record_subscribe_auth_failure();
+
+        let state = review_suback(&topics(), &[SubscribeAckReason::GrantedQos0], &reconnect);
+
+        assert_eq!(state, STATUS_DEGRADED);
+        assert_eq!(reconnect.consecutive_auth_failures(), 1);
     }
 }

@@ -255,6 +255,13 @@ in which case the connection teardown waits for its own timeout. Without the
 signal the broker would keep the last `Connected` status until the keep-alive
 expires, roughly a minute.
 
+There is no MQTT Last Will behind this, so a relay that is killed rather than
+stopped, or one whose network goes away, leaves its last status standing until
+someone overwrites it. A Last Will would have to be set on CONNECT; mqtt-glide
+carries it in its codec but does not expose it on the client or its options
+yet, so the only way to close that gap for now is to watch the status topic's
+age from outside.
+
 Miniserver requests still in flight are cancelled rather than awaited - see
 [Delivery Guarantees](#delivery-guarantees).
 
@@ -272,6 +279,10 @@ Invalid configuration: [broker] 'port' expects int, got str
 Invalid configuration: [topics] 'subscription_filters' has an invalid pattern 'device.*(data': missing )
 Refusing to start: config/config.toml has 2 unusable value(s). Nothing was connected, nothing was changed.
 ```
+
+An empty pattern counts as unusable, in the file and over the config topics
+alike. An empty expression matches every topic, so a stray `""` next to real
+patterns would not filter one more thing - it would filter everything.
 
 Two habits this puts an end to: `port = "1883"` used to travel all the way to
 the MQTT client before failing, and `udp_source_filter_enabled = "false"` - a
@@ -347,8 +358,15 @@ therefore always available (see [MQTT5 User Properties](#mqtt5-user-properties))
 **There are none while the broker is unreachable.** The relay subscribes and
 publishes at QoS 0 and keeps no outbox: a message that cannot be handed to the
 broker at that moment is dropped, not queued and not retried. This applies to
-everything the relay sends - UDP messages coming from the Miniserver, the
-`config/response` payload and the status topic alike.
+everything the relay relays - UDP messages coming from the Miniserver and the
+`config/response` payload alike.
+
+`<base_topic>status` is the one exception: it goes out retained and at QoS 1,
+because it is a state rather than an event. Retained so that a subscriber
+connecting later learns where the relay stands instead of waiting for the next
+change, and acknowledged so that a status is not lost in the very reconnect it
+describes - which would leave `Connected` standing while the relay is anything
+but.
 
 That is a deliberate choice for a home automation relay. A buffered `.../set`
 command that is delivered minutes later, after the broker comes back, switches a
@@ -356,25 +374,34 @@ light or a blind at a time nobody asked for. A command that is lost is at least
 lost visibly - so instead of guarantees, the relay gives you a record of what it
 lost:
 
-- Every dropped publish is logged at WARNING with topic, payload size and the
-  reason - either `broker not connected` or `publish failed` together with the
-  transport error. While a reconnect is running the message is refused straight
-  away rather than parked until an acknowledgement times out: at QoS 0 there is
-  nothing to gain from the wait, and a late report under the wrong reason is
-  worse than a prompt one.
-- UDP messages that never made it are additionally logged on the way in, with
-  the sender address and the original payload.
+- Every dropped publish is logged at WARNING, in one line: the sender where
+  there is one, the payload size, the reason - either `broker not connected` or
+  `publish failed` with the transport error - and the topic and payload
+  themselves. For a UDP message that means the datagram's origin and content
+  are in the same line as the reason it is gone. While a reconnect is running
+  the message is refused straight away rather than parked until an
+  acknowledgement times out: at QoS 0 there is nothing to gain from the wait,
+  and a late report under the wrong reason is worse than a prompt one.
 - An inbound message the relay fails to process is logged at ERROR with the
   topic it arrived on. It is not retried either.
 - A subscription the broker rejects (`SUBACK` failure, typically an ACL) is
-  logged at ERROR. The relay stays up, but it will not receive anything on that
-  filter - so this is worth an alert.
+  logged at ERROR, and the relay reports `Degraded` instead of `Connected`. It
+  stays up, but it will not receive anything on that filter and a retry would
+  not change an ACL decision - so this is worth an alert.
 - Disconnects are logged with the reason reported by the broker or transport.
+
+Topics and payloads in these lines come from outside, so control characters are
+escaped and long values are cut at 256 bytes with the original length appended.
+A payload cannot forge a log line of its own.
 
 Reconnects are intentionally simple: a fixed 15 second retry, plus one immediate
 attempt when a working session drops, and a 5 minute interval once the broker
-has refused authentication ten times in a row. The relay resubscribes and
-republishes `<base_topic>status` = `Connected` after every reconnect.
+has refused authentication ten times in a row. After every reconnect the relay
+resubscribes and publishes `<base_topic>status`: `Connected` when every filter
+was granted, `Degraded` when any was not. A `SUBSCRIBE` that does not reach the
+broker at all is retried on the spot, backing off from 2 to 60 seconds, because
+the connection is up and nothing else would ask again - until it succeeds the
+relay receives nothing.
 
 The other direction is no different. A value on its way to the Miniserver is
 not queued either: it is written to the websocket and never acknowledged. If the

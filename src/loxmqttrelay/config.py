@@ -206,6 +206,14 @@ def _value_problem(field_name: str, value: Any) -> Optional[str]:
         return f"'{field_name}' cannot be empty"
     if field_name in _REGEX_FIELDS:
         for pattern in (value if isinstance(value, list) else [value]):
+            if not pattern.strip():
+                # An empty expression matches every topic, so one stray "" in
+                # the list filters away everything instead of the one thing it
+                # was meant to name.
+                return (
+                    f"'{field_name}' has an empty pattern - an empty expression "
+                    "matches every topic"
+                )
             try:
                 # A first pass only: the patterns are matched by the Rust regex
                 # engine, which rejects lookaround and backreferences that
@@ -403,6 +411,13 @@ class Config:
                 problems.append(str(e))
                 continue
             if problem := _type_mismatch(field_name, field_type, value):
+                problems.append(problem)
+                continue
+            # The same checks the config file gets. Without them an unusable
+            # value would be written out and the restart that follows would run
+            # into it, which is a relay that does not come back rather than an
+            # update that was refused.
+            if problem := _value_problem(field_name, value):
                 problems.append(problem)
         if problems:
             raise ConfigError(f"Rejected configuration update: {'; '.join(problems)}")

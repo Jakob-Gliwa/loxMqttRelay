@@ -1,9 +1,9 @@
 """What the MQTT client reports about messages it could not deliver.
 
-The relay publishes at QoS 0 and keeps no outbox, so a message that cannot be
-handed to the broker is gone. These tests pin down that the loss is at least
-visible: the publish call says why, and the last few messages stay readable for
-diagnostics.
+Relayed messages go out at QoS 0 with no outbox - only the relay's own status
+topic is retained and acknowledged - so a message that cannot be handed to the
+broker is gone. These tests pin down that the loss is at least visible: the
+publish call says why, and the last few messages stay readable for diagnostics.
 """
 
 import pytest

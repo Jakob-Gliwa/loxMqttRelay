@@ -1,5 +1,5 @@
-use pyo3::{prelude::*, types::{PyFrozenSet, PyList, PyString}};
-use regex::Regex;
+use pyo3::{prelude::*, types::{PyList, PyString}};
+use regex::{Regex, RegexSet};
 use pyo3::exceptions::PyValueError;
 use pyo3::intern;
 
@@ -25,8 +25,10 @@ use pyo3_async_runtimes::tokio::into_future;
 
 mod mqtt;
 mod udp;
+mod util;
 use mqtt::{MqttClient, MqttShared};
 use udp::UdpServer;
+use util::{lock_recover, loggable};
 
 /// A small struct to store all relevant MQTT topics in Rust, so we don't fetch them repeatedly
 #[derive(Clone, Debug)]
@@ -494,17 +496,52 @@ macro_rules! pyget {
     }};
 }
 
-/// Compile regex filters, refusing the whole set if one pattern is invalid.
+/// A configured filter list: the patterns as they were written, and the machine
+/// that matches them.
+///
+/// A `RegexSet` rather than one regex built from `patterns.join("|")`. Joining
+/// looked cheaper but made the list unrecoverable - a pattern containing `|`,
+/// an escaped `\|` or a `[|]` class could not be split apart again for the
+/// getters - and it let the patterns interfere with each other: `(?i)` in one
+/// of them applies to everything that follows in the enclosing group, so it
+/// silently turned every later filter case-insensitive, and two patterns using
+/// the same capture name refused to compile together although each was fine.
+struct FilterSet {
+    patterns: Vec<String>,
+    set: RegexSet,
+}
+
+impl FilterSet {
+    #[inline]
+    fn is_match(&self, text: &str) -> bool {
+        self.set.is_match(text)
+    }
+
+    fn patterns(&self) -> Vec<String> {
+        self.patterns.clone()
+    }
+}
+
+/// Compile regex filters, refusing the whole set if one pattern is unusable.
 ///
 /// Used wherever a filter list comes straight from the configuration: silently
 /// dropping a pattern there would hand the user a relay that forwards what they
 /// told it to hold back, so a typo has to surface as a startup error instead.
-fn compile_filters_strict(kind: &str, filters: &[String]) -> PyResult<Option<Regex>> {
+fn compile_filters_strict(kind: &str, filters: &[String]) -> PyResult<Option<FilterSet>> {
     if filters.is_empty() {
         debug!("No {} filters configured.", kind);
         return Ok(None);
     }
     for flt in filters {
+        // An empty expression matches every topic, so a stray "" in the list
+        // would filter away everything instead of the one thing it names.
+        if flt.trim().is_empty() {
+            return Err(PyValueError::new_err(format!(
+                "Empty '{kind}' pattern: an empty expression matches every topic"
+            )));
+        }
+        // Compiled one by one first, so the error names the offending pattern
+        // rather than the whole set.
         if let Err(e) = Regex::new(flt) {
             return Err(PyValueError::new_err(format!(
                 "Invalid '{}' pattern '{}': {}",
@@ -512,13 +549,13 @@ fn compile_filters_strict(kind: &str, filters: &[String]) -> PyResult<Option<Reg
             )));
         }
     }
-    let pattern = format!("({})", filters.join("|"));
-    Regex::new(&pattern).map(Some).map_err(|e| {
-        PyValueError::new_err(format!(
-            "Failed to compile combined '{}' pattern '{}': {}",
-            kind, pattern, e
-        ))
-    })
+    let set = RegexSet::new(filters).map_err(|e| {
+        PyValueError::new_err(format!("Failed to compile the '{kind}' filters: {e}"))
+    })?;
+    Ok(Some(FilterSet {
+        patterns: filters.to_vec(),
+        set,
+    }))
 }
 
 #[pyclass]
@@ -526,9 +563,9 @@ pub struct MiniserverDataProcessor {
     #[pyo3(get)]
     global_config: Py<PyAny>,
 
-    compiled_subscription_filter: Option<Regex>,
-    
-    do_not_forward_patterns: Option<Regex>,
+    compiled_subscription_filter: Option<FilterSet>,
+
+    do_not_forward_patterns: Option<FilterSet>,
 
     #[pyo3(get)]
     topic_whitelist: HashSet<String>,
@@ -546,7 +583,7 @@ pub struct MiniserverDataProcessor {
     #[pyo3(get)]
     http_handler_obj: Py<PyAny>,
     orjson_obj: Py<PyAny>,
-    mqtt_topics: Option<MqttTopics>,
+    mqtt_topics: MqttTopics,
     // Cached once at construction. Config is immutable between restarts (a config
     // change re-execs the process), so the per-message hot path needs no getattr
     // back into Python for this flag.
@@ -604,8 +641,6 @@ impl MiniserverDataProcessor {
             config_update_topic,
             config_restart_topic,
         };
-        // processor.mqtt_topics = Some(topics);
-
 
         // topic_whitelist may be a Python set, frozenset or list depending on how
         // config built it. pyo3's Vec extraction rejects sets ("not a Sequence"),
@@ -627,7 +662,7 @@ impl MiniserverDataProcessor {
             }),
             shape_cache_enabled: true,
             global_config: global_config_py,
-            mqtt_topics: Some(topics),
+            mqtt_topics: topics,
             relay_main_obj,
             mqtt_shared: mqtt_client.shared(),
             http_handler_obj,
@@ -681,7 +716,7 @@ impl MiniserverDataProcessor {
     /// be described against the same reference.
     #[pyo3(text_signature = "(self, val)")]
     fn _convert_boolean(&self, val: &str) -> PyResult<Option<String>> {
-        let mut cache = self.convert_bool_cache.lock().unwrap();
+        let mut cache = lock_recover(&self.convert_bool_cache);
         if let Some(cached) = cache.get(val) {
             return Ok(Some(cached.clone()));
         }
@@ -700,7 +735,7 @@ impl MiniserverDataProcessor {
 
     #[pyo3(text_signature = "(self, topic)")]
     fn normalize_topic(&self, topic: &str) -> PyResult<String> {
-        let mut cache = self.normalize_topic_cache.lock().unwrap();
+        let mut cache = lock_recover(&self.normalize_topic_cache);
         if let Some(cached) = cache.get(topic) {
             return Ok(cached.clone());
         }
@@ -708,35 +743,9 @@ impl MiniserverDataProcessor {
             cache.put(topic.to_string(), topic.to_string());
             return Ok(topic.to_string());
         }
-        let normalized = topic.replace('/', "_").replace('%', "_");
+        let normalized = topic.replace(['/', '%'], "_");
         cache.put(topic.to_string(), normalized.clone());
         Ok(normalized)
-    }
-
-    #[pyo3(text_signature = "(self, topic, val)")]
-    fn expand_json(&self, py: Python, topic: &str, val: &str) -> PyResult<Py<PyFrozenSet>> {
-        if val.is_empty() || ((!val.starts_with('{')) && (!val.starts_with('['))) {
-            let tuple = (topic.to_string(), val.to_string());
-            let set = PyFrozenSet::new(py, &[tuple])?;
-            return Ok(set.into());
-        }
-        match serde_json::from_str::<Value>(val) {
-            Ok(json_val) if json_val.is_object() => {
-                let mut flattened = Vec::new();
-                flatten_json(&json_val, "", &mut flattened);
-                let results: Vec<(String, String)> = flattened
-                    .into_iter()
-                    .map(|(k, v)| (format!("{}/{}", topic, k), v))
-                    .collect();
-                let set = PyFrozenSet::new(py, &results)?;
-                Ok(set.into())
-            }
-            _ => {
-                let tuple = (topic.to_string(), val.to_string());
-                let set = PyFrozenSet::new(py, &[tuple])?;
-                Ok(set.into())
-            }
-        }
     }
 
     #[pyo3(text_signature = "(self, topic)")]
@@ -752,13 +761,17 @@ impl MiniserverDataProcessor {
         topic: &str,
         message: &str,
     ) -> PyResult<()> {
-        debug!("Processing data - topic: {}, message: {}", topic, message);
+        debug!(
+            "Processing data - topic: {}, message: {}",
+            loggable(topic),
+            loggable(message)
+        );
 
         // subscription filter (on original topic)
-        if let Some(ref regex) = self.compiled_subscription_filter
-            && regex.is_match(topic)
+        if let Some(ref filters) = self.compiled_subscription_filter
+            && filters.is_match(topic)
         {
-            debug!("Topic '{}' filtered by subscription filter", topic);
+            debug!("Topic '{}' filtered by subscription filter", loggable(topic));
             return Ok(());
         }
 
@@ -784,22 +797,12 @@ impl MiniserverDataProcessor {
         Ok(())
     }
 
-    /// Equivalent of the old `received_mqtt_message`, but now inside MiniserverDataProcessor.
-    /// Because we already stored all topic strings in `mqtt_topics`, we do not repeatedly
-    /// fetch them from Python on every call. Much more efficient.
+    /// Route one inbound MQTT message: a control topic, or the data path.
     ///
-    /// Called in Python via partial:
-    ///    callback = partial(
-    ///       self.miniserver_data_processor.handle_mqtt_message,
-    ///       self,  # MQTTRelay instance
-    ///       mqtt_client,
-    ///       http_handler_obj,
-    ///       orjson,
-    ///    )
-    ///    ...
-    ///    asyncio.create_task(callback(topic, message))
+    /// Called from [`crate::mqtt`]'s ingress worker, which holds the GIL for the
+    /// duration. The control topics are compared against the strings resolved
+    /// once at construction rather than fetched from Python per message.
     #[pyo3(text_signature = "(self,topic, message)")]
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn handle_mqtt_message(
         &self,
         py: Python<'_>,
@@ -812,19 +815,24 @@ impl MiniserverDataProcessor {
             Err(e) => {
                 // e.into_bytes() gives us the original bytes back
                 let original_bytes = e.into_bytes();
-                warn!("Received binary MQTT message on topic '{}': {} bytes. Encoding as base64 for exact preservation.", topic, original_bytes.len());
-                
+                warn!(
+                    "Received binary MQTT message on topic '{}': {} bytes. Encoding as base64 for exact preservation.",
+                    loggable(&topic),
+                    original_bytes.len()
+                );
+
                 // Encode binary data as base64 to preserve exact data
                 format!("[base64:{}]", general_purpose::STANDARD.encode(original_bytes))
             }
         };
 
-        debug!("(Rust) handle_mqtt_message: {} => {}", topic, message);
+        debug!(
+            "(Rust) handle_mqtt_message: {} => {}",
+            loggable(&topic),
+            loggable(&message)
+        );
 
-        let Some(ref topics) = self.mqtt_topics else {
-            error!("mqtt_topics was never initialized!");
-            return Ok(()); 
-        };
+        let topics = &self.mqtt_topics;
         // Matched exactly against the known control topics rather than gated by
         // a `starts_with(base_topic)` prefix check: the prefix alone does not
         // identify a control topic, so anything under base_topic that is not
@@ -838,13 +846,13 @@ impl MiniserverDataProcessor {
             }
         }
         else if topic == topics.config_get_topic {
-            // global_config.get_safe_config -> orjson.dumps -> publish
-            let global_config_py = self
-                .relay_main_obj
+            // global_config.get_safe_config -> orjson.dumps -> publish. Straight
+            // off the field: the same object used to be looked up the long way
+            // round, through the relay and back into this very processor.
+            let safe_cfg = self
+                .global_config
                 .bind(py)
-                .getattr(intern!(py, "miniserver_data_processor"))?
-                .getattr(intern!(py, "global_config"))?;
-            let safe_cfg = global_config_py.call_method0("get_safe_config")?;
+                .call_method0(intern!(py, "get_safe_config"))?;
             let serialized = self.orjson_obj.bind(py).call_method1("dumps", (safe_cfg,))?;
             self.mqtt_shared.publish_detached(
                 topics.config_response_topic.clone(),
@@ -862,12 +870,10 @@ impl MiniserverDataProcessor {
             let load_res = self.orjson_obj.bind(py).call_method1("loads", (message.as_str(),));
             match load_res {
                 Ok(py_obj) => {
-                    let global_config_py = self
-                        .relay_main_obj
+                    let update_res = self
+                        .global_config
                         .bind(py)
-                        .getattr(intern!(py, "miniserver_data_processor"))?
-                        .getattr(intern!(py, "global_config"))?;
-                    let update_res = global_config_py.call_method1("update_fields", (py_obj, update_mode));
+                        .call_method1(intern!(py, "update_fields"), (py_obj, update_mode));
                     if let Err(e) = update_res {
                         error!("Error updating configuration: {:?}", e);
                     } else {
@@ -899,7 +905,7 @@ impl MiniserverDataProcessor {
     fn get_do_not_forward_patterns(&self) -> Vec<String> {
         self.do_not_forward_patterns
             .as_ref()
-            .map(split_combined_pattern)
+            .map(FilterSet::patterns)
             .unwrap_or_default()
     }
 
@@ -929,7 +935,7 @@ impl MiniserverDataProcessor {
     /// duplicate keys, numbers that would not render identically.
     #[pyo3(text_signature = "(self)")]
     fn get_shape_stats(&self) -> (usize, u64) {
-        let store = self.shape_cache.lock().unwrap();
+        let store = lock_recover(&self.shape_cache);
         (store.plans.len(), store.learns)
     }
 
@@ -937,31 +943,20 @@ impl MiniserverDataProcessor {
     fn get_subscription_filters(&self) -> Vec<String> {
         self.compiled_subscription_filter
             .as_ref()
-            .map(split_combined_pattern)
+            .map(FilterSet::patterns)
             .unwrap_or_default()
     }
 
 }
 
-/// Undo `compile_filters_strict`'s `(a|b|c)` wrapping for the Python getters.
-fn split_combined_pattern(regex: &Regex) -> Vec<String> {
-    let pattern = regex.as_str();
-    if let Some(inner) = pattern.strip_prefix('(')
-        && let Some(inner) = inner.strip_suffix(')')
-    {
-        inner.split('|').map(String::from).collect()
-    } else {
-        vec![pattern.to_string()]
-    }
-}
-
 /// Internals that are not part of the Python surface.
 impl MiniserverDataProcessor {
     /// Plans cache the verdict of every filter, so a filter change voids them.
+    ///
+    /// A poisoned lock must not skip this: a plan that survives a filter change
+    /// keeps forwarding what the new filter was meant to hold back.
     fn invalidate_shapes(&mut self) {
-        if let Ok(store) = self.shape_cache.get_mut() {
-            store.plans.clear();
-        }
+        lock_recover(&self.shape_cache).plans.clear();
     }
 
     /// Everything this message should hand over, in the order the DOM path
@@ -996,7 +991,7 @@ impl MiniserverDataProcessor {
         list: &Bound<'py, PyList>,
     ) -> PyResult<bool> {
         let cached = {
-            let mut store = self.shape_cache.lock().unwrap();
+            let mut store = lock_recover(&self.shape_cache);
             store.plans.get(topic).map(Arc::clone)
         };
         if let Some(ref shape) = cached
@@ -1005,7 +1000,10 @@ impl MiniserverDataProcessor {
             return Ok(true);
         }
         if cached.is_some() {
-            debug!("Shape plan for '{}' no longer matches, relearning", topic);
+            debug!(
+                "Shape plan for '{}' no longer matches, relearning",
+                loggable(topic)
+            );
         }
 
         let Some(shape) = self.learn(py, topic, message) else {
@@ -1016,7 +1014,7 @@ impl MiniserverDataProcessor {
         if !self.emit_shape(py, &shape, message, list)? {
             return Ok(false);
         }
-        let mut store = self.shape_cache.lock().unwrap();
+        let mut store = lock_recover(&self.shape_cache);
         store.learns += 1;
         store.plans.put(topic.to_string(), Arc::new(shape));
         Ok(true)
@@ -1064,7 +1062,11 @@ impl MiniserverDataProcessor {
         }
         let mut emits = 0;
         assign_slots(&mut root, &mut emits);
-        debug!("Learned shape for '{}' with {} target(s)", topic, emits);
+        debug!(
+            "Learned shape for '{}' with {} target(s)",
+            loggable(topic),
+            emits
+        );
         Some(Shape { root, emits })
     }
 
@@ -1157,13 +1159,13 @@ impl MiniserverDataProcessor {
         if !self.topic_whitelist.is_empty() && !self.topic_whitelist.contains(&normalized) {
             return PlanNode::Drop;
         }
-        if let Some(ref regex) = self.compiled_subscription_filter
-            && regex.is_match(full_topic)
+        if let Some(ref filters) = self.compiled_subscription_filter
+            && filters.is_match(full_topic)
         {
             return PlanNode::Drop;
         }
-        if let Some(ref regex) = self.do_not_forward_patterns
-            && regex.is_match(full_topic)
+        if let Some(ref filters) = self.do_not_forward_patterns
+            && filters.is_match(full_topic)
         {
             return PlanNode::Drop;
         }
@@ -1202,19 +1204,23 @@ impl MiniserverDataProcessor {
         for (t, v) in flattened {
             let normalized = self.normalize_topic(&t)?;
             if !self.topic_whitelist.is_empty() && !self.topic_whitelist.contains(&normalized) {
-                debug!("Topic '{}' (normalized: '{}') not in whitelist", t, normalized);
+                debug!(
+                    "Topic '{}' (normalized: '{}') not in whitelist",
+                    loggable(&t),
+                    loggable(&normalized)
+                );
                 continue;
             }
-            if let Some(ref regex) = self.compiled_subscription_filter
-                && regex.is_match(&t)
+            if let Some(ref filters) = self.compiled_subscription_filter
+                && filters.is_match(&t)
             {
-                debug!("Topic '{}' filtered by second pass", t);
+                debug!("Topic '{}' filtered by second pass", loggable(&t));
                 continue;
             }
-            if let Some(ref regex) = self.do_not_forward_patterns
-                && regex.is_match(&t)
+            if let Some(ref filters) = self.do_not_forward_patterns
+                && filters.is_match(&t)
             {
-                debug!("Topic '{}' filtered by do_not_forward", t);
+                debug!("Topic '{}' filtered by do_not_forward", loggable(&t));
                 continue;
             }
             if !self.convert_booleans {
@@ -1240,10 +1246,15 @@ impl MiniserverDataProcessor {
 /// warning the relay emits about dropped messages. `LOG_LEVEL` now reaches the
 /// Rust side too, and `RUST_LOG` still overrides it for anyone who wants to
 /// turn a single module up.
+///
+/// Returns whether this call installed the logger. `False` means one was
+/// already in place and the level handed in here had no effect at all - worth
+/// saying out loud rather than discarding, because the symptom otherwise is a
+/// Rust half that logs at a level nobody asked for.
 #[pyfunction]
 #[pyo3(signature = (level = "INFO"))]
 #[pyo3(text_signature = "(level='INFO')")]
-fn init_rust_logger(level: &str) {
+fn init_rust_logger(level: &str) -> bool {
     let default = match level.to_ascii_uppercase().as_str() {
         "DEBUG" => "debug",
         "INFO" => "info",
@@ -1252,22 +1263,21 @@ fn init_rust_logger(level: &str) {
         "ERROR" | "CRITICAL" => "error",
         _ => "info",
     };
-    let _ = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or(default),
-    )
-    // Mirrors the Python format ('%(asctime)s %(levelname)s [%(name)s] ...'),
-    // so both halves of the relay read as one log.
-    .format(|buf, record| {
-        writeln!(
-            buf,
-            "{} {} [{}] {}",
-            buf.timestamp(),
-            record.level(),
-            record.target(),
-            record.args()
-        )
-    })
-    .try_init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default))
+        // Mirrors the Python format ('%(asctime)s %(levelname)s [%(name)s] ...'),
+        // so both halves of the relay read as one log.
+        .format(|buf, record| {
+            writeln!(
+                buf,
+                "{} {} [{}] {}",
+                buf.timestamp(),
+                record.level(),
+                record.target(),
+                record.args()
+            )
+        })
+        .try_init()
+        .is_ok()
 }
 
 #[pymodule]

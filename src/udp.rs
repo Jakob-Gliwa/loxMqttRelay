@@ -12,7 +12,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use log::{Level, debug, error, info, log_enabled, warn};
@@ -24,6 +24,7 @@ use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::mqtt::{MqttClient, MqttShared};
+use crate::util::{lock_recover, loggable};
 
 /// Upper bound for the "warn once per sender" bookkeeping, so a flood of
 /// spoofed source addresses cannot grow the set (or the log) without limit.
@@ -130,7 +131,7 @@ fn parse_command(udpmsg: &str) -> Option<(bool, &str)> {
         match tail {
             Some(tail) => tail,
             None => {
-                error!("Missing topic/payload after command: {msg}");
+                error!("Missing topic/payload after command: {}", loggable(msg));
                 return None;
             }
         }
@@ -139,7 +140,7 @@ fn parse_command(udpmsg: &str) -> Option<(bool, &str)> {
     };
 
     if rest.is_empty() {
-        error!("No topic/message after command: {msg}");
+        error!("No topic/message after command: {}", loggable(msg));
         return None;
     }
 
@@ -152,24 +153,31 @@ fn parse_command(udpmsg: &str) -> Option<(bool, &str)> {
 /// only with a `=` and a non-empty key; empty values are allowed. `None` means
 /// not a single valid pair was found, and the block is then *not* treated as
 /// user properties at all.
-fn parse_user_properties(block_content: &str) -> Option<UserProperties> {
+///
+/// The second half of the result counts the segments that were thrown away.
+/// It is up to the caller to report them, and to report them once: a datagram
+/// may carry tens of thousands of `;` and a line each would bury every other
+/// message in the log - including for a block that is not a property block at
+/// all and whose brackets simply belong to the topic.
+fn parse_user_properties(block_content: &str) -> (Option<UserProperties>, usize) {
     let mut properties: UserProperties = Vec::new();
+    let mut discarded = 0usize;
     for segment in block_content.split(';') {
         let Some((key, value)) = segment.split_once('=') else {
             if !py_strip(segment).is_empty() {
-                warn!("Ignoring malformed user property segment (no '='): {segment:?}");
+                discarded += 1;
             }
             continue;
         };
         let key = py_strip(key);
         if key.is_empty() {
-            warn!("Ignoring user property with empty key: {segment:?}");
+            discarded += 1;
             continue;
         }
         properties.push((key.to_owned(), value.to_owned()));
     }
 
-    (!properties.is_empty()).then_some(properties)
+    ((!properties.is_empty()).then_some(properties), discarded)
 }
 
 /// Peel off a leading `[...]` block when it holds at least one valid pair.
@@ -184,14 +192,24 @@ fn extract_property_block(rest: &str) -> (Option<UserProperties>, &str) {
         return (None, rest);
     };
 
-    let Some(properties) = parse_user_properties(&rest[1..close_index]) else {
+    let block = &rest[1..close_index];
+    let (properties, discarded) = parse_user_properties(block);
+    let Some(properties) = properties else {
         return (None, rest);
     };
 
     let remaining = py_strip(&rest[close_index + 1..]);
     if remaining.is_empty() {
-        error!("Property block without topic/payload: {rest}");
+        error!("Property block without topic/payload: {}", loggable(rest));
         return (None, rest);
+    }
+
+    if discarded > 0 {
+        warn!(
+            "Ignored {discarded} malformed user property segment(s) (no '=' or an empty key) in \
+             '{}'",
+            loggable(block)
+        );
     }
 
     (Some(properties), remaining)
@@ -210,7 +228,10 @@ fn parse_topic_payload(rest: &str) -> Option<(Cow<'_, str>, Cow<'_, str>)> {
         let payload_part = py_strip(&rest[brace_index..]);
 
         if topic_part.is_empty() || payload_part.is_empty() {
-            error!("Invalid format - topic or payload empty: {rest}");
+            error!(
+                "Invalid format - topic or payload empty: {}",
+                loggable(rest)
+            );
             return None;
         }
         return Some((Cow::Borrowed(topic_part), Cow::Borrowed(payload_part)));
@@ -218,7 +239,10 @@ fn parse_topic_payload(rest: &str) -> Option<(Cow<'_, str>, Cow<'_, str>)> {
 
     let tokens: Vec<&str> = py_split(rest).collect();
     if tokens.len() < 2 {
-        error!("Invalid format - need at least topic + payload: {rest}");
+        error!(
+            "Invalid format - need at least topic + payload: {}",
+            loggable(rest)
+        );
         return None;
     }
     if tokens.len() == 2 {
@@ -240,7 +264,10 @@ fn parse_topic_payload(rest: &str) -> Option<(Cow<'_, str>, Cow<'_, str>)> {
     let topic_str = tokens[..i].join(" ");
     let payload_str = tokens[i..].join(" ");
     if topic_str.is_empty() || payload_str.is_empty() {
-        error!("Invalid format - empty topic or payload: {rest}");
+        error!(
+            "Invalid format - empty topic or payload: {}",
+            loggable(rest)
+        );
         return None;
     }
 
@@ -307,16 +334,22 @@ fn resolve_host(host: &str) -> HashSet<IpAddr> {
                 addrs.map(|addr| addr.ip()).partition(IpAddr::is_ipv4);
             if !v6.is_empty() {
                 error!(
-                    "'{host}' resolved to IPv6 address(es) {} - the UDP listener only binds \
+                    "'{}' resolved to IPv6 address(es) {} - the UDP listener only binds \
                      IPv4, so datagrams from these can never arrive; they are ignored. \
                      Configure an IPv4 address, or a hostname with an A record, instead",
+                    loggable(host),
                     sorted_listing(v6.into_iter())
                 );
             }
             v4
         }
         Err(e) => {
-            error!("Cannot resolve configured UDP sender '{host}', ignoring it: {e}");
+            // `udp_allowed_sources` is writable over MQTT, so even a configured
+            // host is foreign text.
+            error!(
+                "Cannot resolve configured UDP sender '{}', ignoring it: {e}",
+                loggable(host)
+            );
             HashSet::new()
         }
     }
@@ -335,13 +368,17 @@ fn in_prefix(addr: &[u8], net: &[u8], prefix: u32) -> bool {
     (addr[full] & mask) == (net[full] & mask)
 }
 
-/// Python's `ipaddress.IPv4Address.is_private`.
+/// Whether an address is anything other than a public, globally routed one.
 ///
-/// Deliberately not `Ipv4Addr::is_private`, which is RFC 1918 only. Loopback,
-/// link-local and the shared address space all count as private here, so a
-/// relay talking to a Miniserver on `127.0.0.1` is not warned about a public
-/// address that is nothing of the sort.
-fn is_private_v4(addr: Ipv4Addr) -> bool {
+/// Deliberately not `Ipv4Addr::is_private`, which is RFC 1918 only: loopback and
+/// link-local have to count too, or a relay talking to a Miniserver on
+/// `127.0.0.1` would be warned about a public address that is nothing of the
+/// sort. The table is Python's `ipaddress.IPv4Address.is_private` (3.13 and
+/// later, including the `192.0.0.9`/`192.0.0.10` exceptions) with one addition:
+/// the CGNAT shared address space `100.64.0.0/10`, for which Python reports
+/// neither `is_private` nor `is_global`. It is not a DynDNS answer either, which
+/// is the mistake the only caller warns about, so it belongs on this side.
+fn is_non_public_v4(addr: Ipv4Addr) -> bool {
     const NETS: &[(Ipv4Addr, u32)] = &[
         (Ipv4Addr::new(0, 0, 0, 0), 8),
         (Ipv4Addr::new(10, 0, 0, 0), 8),
@@ -369,8 +406,9 @@ fn is_private_v4(addr: Ipv4Addr) -> bool {
         .any(|(net, prefix)| in_prefix(&octets, &net.octets(), *prefix))
 }
 
-/// Python's `ipaddress.IPv6Address.is_private`, including the IPv4-mapped case.
-fn is_private_v6(addr: Ipv6Addr) -> bool {
+/// [`is_non_public_v4`]'s counterpart: Python's `ipaddress.IPv6Address.is_private`,
+/// including its delegation for IPv4-mapped addresses.
+fn is_non_public_v6(addr: Ipv6Addr) -> bool {
     const NETS: &[(Ipv6Addr, u32)] = &[
         (Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1), 128),
         (Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0), 128),
@@ -393,7 +431,7 @@ fn is_private_v6(addr: Ipv6Addr) -> bool {
     ];
 
     if let Some(mapped) = addr.to_ipv4_mapped() {
-        return is_private_v4(mapped);
+        return is_non_public_v4(mapped);
     }
     let octets = addr.octets();
     if EXCEPTIONS
@@ -406,10 +444,10 @@ fn is_private_v6(addr: Ipv6Addr) -> bool {
         .any(|(net, prefix)| in_prefix(&octets, &net.octets(), *prefix))
 }
 
-fn is_private(addr: IpAddr) -> bool {
+fn is_non_public(addr: IpAddr) -> bool {
     match addr {
-        IpAddr::V4(v4) => is_private_v4(v4),
-        IpAddr::V6(v6) => is_private_v6(v6),
+        IpAddr::V4(v4) => is_non_public_v4(v4),
+        IpAddr::V6(v6) => is_non_public_v6(v6),
     }
 }
 
@@ -422,7 +460,7 @@ fn warn_about_public_addresses(addresses: &HashSet<IpAddr>) {
     let public: Vec<IpAddr> = addresses
         .iter()
         .copied()
-        .filter(|addr| !is_private(*addr))
+        .filter(|addr| !is_non_public(*addr))
         .collect();
     if public.is_empty() {
         return;
@@ -649,7 +687,7 @@ fn format_properties(properties: &Option<UserProperties>) -> String {
         Some(list) => {
             let pairs: Vec<String> = list
                 .iter()
-                .map(|(key, value)| format!("('{key}', '{value}')"))
+                .map(|(key, value)| format!("('{}', '{}')", loggable(key), loggable(value)))
                 .collect();
             format!("[{}]", pairs.join(", "))
         }
@@ -666,7 +704,7 @@ fn handle_datagram(shared: &Arc<MqttShared>, data: &[u8], addr: SocketAddr) {
     let msg = decode_utf8_ignore(data);
     // DEBUG, not INFO: the datagram carries whatever the Miniserver sends, and
     // that is nobody's business at the default level.
-    debug!("UDP IN: {addr}: {msg}");
+    debug!("UDP IN: {addr}: {}", loggable(&msg));
 
     let Some(parsed) = parse_udp_message(&msg) else {
         return;
@@ -680,8 +718,10 @@ fn handle_datagram(shared: &Arc<MqttShared>, data: &[u8], addr: SocketAddr) {
 
     if log_enabled!(Level::Debug) {
         debug!(
-            "Publishing{}: '{topic}'='{payload}' properties={}",
+            "Publishing{}: '{}'='{}' properties={}",
             if retain { " (retain)" } else { "" },
+            loggable(&topic),
+            loggable(&payload),
             format_properties(&user_properties)
         );
     }
@@ -690,18 +730,15 @@ fn handle_datagram(shared: &Arc<MqttShared>, data: &[u8], addr: SocketAddr) {
     let topic = topic.into_owned();
     let payload = payload.into_owned();
     let properties = user_properties.unwrap_or_default();
+    // The sender travels with the publish so that a loss is reported once, with
+    // everything in it: who sent the datagram, what was in it and why it is
+    // gone. Nothing retries it - QoS 0, no outbox - so that line is all that is
+    // left of the command the Miniserver sent.
     get_runtime().spawn(async move {
-        let dropped = shared
-            .publish(topic.clone(), payload.clone().into_bytes(), retain, properties)
+        // The reason is not read here: record_drop has already logged it.
+        let _ = shared
+            .publish(&topic, payload.as_bytes(), retain, properties, Some(addr))
             .await;
-        if let Some(reason) = dropped {
-            // The datagram is gone: QoS 0, no local queue, nothing to retry. Say
-            // so here, where the sender and the payload are still known.
-            warn!(
-                "UDP message from {addr} was not forwarded to MQTT ({}): '{topic}'='{payload}'",
-                reason.as_str()
-            );
-        }
     });
 }
 
@@ -759,13 +796,6 @@ impl Running {
     }
 }
 
-/// The lock is only ever held for a `replace` or a `take`, so no panic can
-/// happen while it is held. If it were poisoned anyway, going on with the
-/// handle beats dropping it: a detached receive loop keeps the socket.
-fn lock_running(slot: &Mutex<Option<Running>>) -> MutexGuard<'_, Option<Running>> {
-    slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 /// The relay's UDP listener, owned by Python for its lifetime.
 ///
 /// Construct it alongside the MQTT client, then [`UdpServer::start`] once the
@@ -818,7 +848,7 @@ impl UdpServer {
         future_into_py(py, async move {
             // Binding first would report this as "address already in use", which
             // says nothing about the caller having started the server twice.
-            if lock_running(&slot).as_ref().is_some_and(Running::is_live) {
+            if lock_recover(&slot).as_ref().is_some_and(Running::is_live) {
                 return Err(PyRuntimeError::new_err(format!(
                     "UDP-IN is already listening on port {port}"
                 )));
@@ -867,7 +897,7 @@ impl UdpServer {
                 late_addresses,
                 Arc::clone(&shutdown),
             ));
-            if let Some(previous) = lock_running(&slot).replace(Running { shutdown, task }) {
+            if let Some(previous) = lock_recover(&slot).replace(Running { shutdown, task }) {
                 // Only reachable if two starts raced past the check above, and
                 // then the bind would have failed. Abort rather than drop: a
                 // dropped handle detaches its task instead of ending it.
@@ -886,7 +916,7 @@ impl UdpServer {
     /// [`start`]: UdpServer::start
     #[pyo3(text_signature = "(self)")]
     fn stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let running = lock_running(&self.running).take();
+        let running = lock_recover(&self.running).take();
         if let Some(run) = &running {
             // `notify_waiters` wakes a loop that is already parked on
             // `notified()` but stores nothing; `notify_one` covers the window
@@ -1358,7 +1388,7 @@ mod tests {
     }
 
     #[test]
-    fn private_covers_more_than_rfc1918() {
+    fn non_public_covers_more_than_rfc1918() {
         for address in [
             "10.0.0.1",
             "172.16.0.1",
@@ -1371,11 +1401,11 @@ mod tests {
             "fe80::1",
             "::ffff:192.168.1.10",
         ] {
-            assert!(is_private(ip(address)), "{address} should be private");
+            assert!(is_non_public(ip(address)), "{address} should be non-public");
         }
 
         for address in ["84.1.2.3", "8.8.8.8", "172.32.0.1", "192.0.0.9", "2606:4700::1"] {
-            assert!(!is_private(ip(address)), "{address} should be public");
+            assert!(!is_non_public(ip(address)), "{address} should be public");
         }
     }
 
@@ -1564,7 +1594,9 @@ mod tests {
     ///
     /// Nothing retries it - QoS 0, no outbox - so this log line is all that is
     /// left of the command the Miniserver sent. It went missing once already
-    /// (#23), when publish reported success while disconnected.
+    /// (#23), when publish reported success while disconnected. One line, not
+    /// two: the sender is handed to the publish so the loss is reported once,
+    /// with everything in it.
     #[test]
     fn a_datagram_that_never_reaches_the_broker_is_reported() {
         log::set_logger(&Recorder).expect("only one test may install the logger");
@@ -1582,7 +1614,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .find(|line| line.contains("was not forwarded"))
+                .find(|line| line.contains("Dropped MQTT publish"))
                 .cloned();
             match found {
                 Some(line) => break line,
@@ -1601,6 +1633,16 @@ mod tests {
         ] {
             assert!(line.contains(expected), "{expected:?} missing from {line:?}");
         }
+
+        // And exactly once: the loss used to be announced by the publish and
+        // again by the caller, so an operator had to correlate two lines.
+        let reported = RECORDED
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| line.starts_with("WARN ") && line.contains("home/status"))
+            .count();
+        assert_eq!(reported, 1, "the loss must be reported once, not twice");
     }
 
     #[test]

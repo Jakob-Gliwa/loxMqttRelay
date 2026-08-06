@@ -35,7 +35,11 @@ logger = get_lazy_logger(__name__)
 # left to RUST_LOG: unset, that would silence everything below ERROR, and the
 # UDP and MQTT paths report their dropped messages at WARNING.
 logger.info("Initializing Rust logger ...")
-init_rust_logger(logging.getLevelName(logging.getLogger().getEffectiveLevel()))
+if not init_rust_logger(logging.getLevelName(logging.getLogger().getEffectiveLevel())):
+    # A logger was already installed, so LOG_LEVEL did not reach the Rust half
+    # at all - which is exactly the situation where its warnings about dropped
+    # messages go missing without anyone noticing.
+    logger.warning("Rust logger was already installed; LOG_LEVEL does not apply to it")
 
 class MQTTRelay:
     def __init__(self):

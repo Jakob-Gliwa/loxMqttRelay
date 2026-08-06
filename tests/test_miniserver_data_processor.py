@@ -180,30 +180,22 @@ def test_convert_boolean(processor, input_val, expected):
     in_val = input_val if input_val is not None else ""
     assert processor._convert_boolean(in_val) == expected
 
-def test_flatten_dict(processor):
-    import json
-    input_dict = {
-        "a": 1,
-        "b": {
-            "c": 2,
-            "d": {
-                "e": 3
-            }
-        },
-        "f": [1, 2, 3]
+@pytest.mark.asyncio
+async def test_json_is_flattened_into_one_value_per_leaf(config_instance):
+    """Nested objects and arrays each become their own '/'-joined target."""
+    processor = build_processor(config_instance, expand_json=True, convert_booleans=False)
+    message = json.dumps({"a": 1, "b": {"c": 2, "d": {"e": 3}}, "f": [1, 2, 3]})
+
+    processor.process_data("test", message)
+
+    assert set(handed_over(processor.http_handler_obj)) == {
+        ("test/a", "test_a", "1"),
+        ("test/b/c", "test_b_c", "2"),
+        ("test/b/d/e", "test_b_d_e", "3"),
+        ("test/f/0", "test_f_0", "1"),
+        ("test/f/1", "test_f_1", "2"),
+        ("test/f/2", "test_f_2", "3"),
     }
-    json_str = json.dumps(input_dict)
-    # Using topic prefix 'test'
-    result = processor.expand_json("test", json_str)
-    expected = {
-        ("test/a", "1"),
-        ("test/b/c", "2"),
-        ("test/b/d/e", "3"),
-        ("test/f/0", "1"),
-        ("test/f/1", "2"),
-        ("test/f/2", "3")
-    }
-    assert set(result) == expected
 
 def test_normalize_topic(processor):
     assert processor.normalize_topic("a/b/c") == "a_b_c"
@@ -213,17 +205,13 @@ def test_normalize_topic(processor):
     assert processor.normalize_topic("test/topic%with/both") == "test_topic_with_both"  # Test both / and %
     assert processor.normalize_topic("test/topic/%with/both") == "test_topic__with_both"  # Test both / and %
 
-def test_expand_json(processor):
-    result = processor.expand_json("test", '{"key1": "val1", "key2": {"nested": "val2"}}')
-    expected = {
-        ("test/key1", "val1"),
-        ("test/key2/nested", "val2")
-    }
-    assert result == expected
+@pytest.mark.asyncio
+async def test_a_payload_that_is_not_json_is_forwarded_as_it_stands(config_instance):
+    processor = build_processor(config_instance, expand_json=True, convert_booleans=False)
 
-    # Test with non-JSON value
-    result = processor.expand_json("test", "normal_value")
-    assert result == {("test", "normal_value")}
+    processor.process_data("test", "normal_value")
+
+    assert handed_over(processor.http_handler_obj) == [("test", "test", "normal_value")]
 
 
 def test_cache_behavior(processor):
@@ -239,7 +227,46 @@ def test_update_subscription_filters_single(processor):
     """Test setting subscription filters."""
     filters = [r"^ignore_.*", r"^skip_.*"]
     processor.update_subscription_filters(filters)
-    assert processor.get_subscription_filters is not None
+    assert processor.get_subscription_filters() == filters
+
+
+@pytest.mark.parametrize("filters", [
+    [r"^foo\/(a|b)$"],   # an alternation of its own
+    [r"bar\|baz"],       # an escaped pipe
+    [r"[|]"],            # a pipe in a character class
+    [r"^a$", r"^b$"],    # several patterns, unchanged
+])
+def test_the_filter_getters_return_what_was_configured(processor, filters):
+    """The getters used to rebuild the list by splitting one joined pattern at
+    every '|', which mangled every pattern that contained a pipe itself."""
+    processor.update_subscription_filters(filters)
+    assert processor.get_subscription_filters() == filters
+
+    processor.update_do_not_forward(filters)
+    assert processor.get_do_not_forward_patterns() == filters
+
+
+@pytest.mark.parametrize("filters", [[""], ["   "], [r"^ok\/", ""]])
+def test_an_empty_filter_pattern_is_refused(processor, filters):
+    """An empty expression matches every topic, so a stray "" in the list would
+    silently filter away everything instead of the one thing it names."""
+    with pytest.raises(ValueError):
+        processor.update_subscription_filters(filters)
+    with pytest.raises(ValueError):
+        processor.update_do_not_forward(filters)
+
+
+@pytest.mark.asyncio
+async def test_an_inline_flag_stays_inside_its_own_pattern(processor):
+    """`(?i)` applies to the rest of its enclosing group, so joining the
+    patterns into one made every following filter case-insensitive too."""
+    processor.update_do_not_forward([r"(?i)^debug\/", r"^Secret\/"])
+
+    processor.process_data("secret/value", "1")
+
+    assert handed_over(processor.http_handler_obj) == [
+        ("secret/value", "secret_value", "1")
+    ]
 
 def test_update_topic_whitelist(processor):
     whitelist = ["some_allowed_topic", "another_allowed_topic"]
@@ -249,7 +276,7 @@ def test_update_topic_whitelist(processor):
 def test_update_do_not_forward(processor):
     do_not_forward = [r"^debug_.*", r"private_topic"]
     processor.update_do_not_forward(do_not_forward)
-    assert processor.get_do_not_forward_patterns is not None
+    assert processor.get_do_not_forward_patterns() == do_not_forward
 
 @pytest.mark.parametrize("filters,topic,message,should_stay", [
     ([r"^ignore\/.*"], "ignore/something", "value", False),
@@ -854,12 +881,16 @@ class TestConfigControlTopics:
     crosses into Python, so it is observed via the client's undelivered ring."""
 
     @pytest.fixture
-    def ctx(self, config_instance):
+    def ctx(self, config_instance, monkeypatch):
         mock_http_handler = MagicMock()
         mock_mqtt_client = MqttClient(config_instance)
         mock_relay_main = MagicMock()
         mock_orjson = MagicMock()
         topics = ControlTopicNS()
+        # The config actions work on the object the processor was handed, not on
+        # one reached back through the relay - so that is where they are observed.
+        monkeypatch.setattr(config_instance, "get_safe_config", MagicMock(return_value={}))
+        monkeypatch.setattr(config_instance, "update_fields", MagicMock())
         processor = MiniserverDataProcessor(
             topics,
             config_instance,
@@ -875,6 +906,7 @@ class TestConfigControlTopics:
             mqtt_client=mock_mqtt_client,
             orjson=mock_orjson,
             http_handler=mock_http_handler,
+            global_config=config_instance,
         )
 
     def test_config_get_serializes_and_publishes_safe_config(self, ctx):
@@ -882,7 +914,7 @@ class TestConfigControlTopics:
         ctx.processor.handle_mqtt_message(ctx.topics.CONFIG_GET, b"")
 
         # safe config is fetched, serialized and published to the response topic
-        ctx.relay_main.miniserver_data_processor.global_config.get_safe_config.assert_called_once()
+        ctx.global_config.get_safe_config.assert_called_once()
         ctx.orjson.dumps.assert_called_once()
         # The client is not connected, so the publish lands in the undelivered
         # ring - which is where the target topic becomes observable, together
@@ -903,7 +935,7 @@ class TestConfigControlTopics:
         ctx.processor.handle_mqtt_message(topic, b'{"general": {"cache_size": 50}}')
 
         ctx.orjson.loads.assert_called_once()
-        global_config_mock = ctx.relay_main.miniserver_data_processor.global_config
+        global_config_mock = ctx.global_config
         global_config_mock.update_fields.assert_called_once()
         # second positional arg is the update mode ("set"/"add"/"remove")
         assert global_config_mock.update_fields.call_args[0][1] == expected_mode
@@ -916,7 +948,7 @@ class TestConfigControlTopics:
         The config would be unchanged, so the restart would achieve nothing but
         a dropped MQTT session - and a publisher could trigger it at will.
         """
-        global_config_mock = ctx.relay_main.miniserver_data_processor.global_config
+        global_config_mock = ctx.global_config
         global_config_mock.update_fields.side_effect = ConfigError("refused")
 
         ctx.processor.handle_mqtt_message(ctx.topics.CONFIG_SET, b'{"miniserver_ip": "203.0.113.5"}')
@@ -932,7 +964,7 @@ class TestConfigControlTopics:
         # verifies the restart_relay rename (old name would never be called)
         ctx.relay_main.restart_relay.assert_called_once()
         # plain update/restart must not mutate the config
-        ctx.relay_main.miniserver_data_processor.global_config.update_fields.assert_not_called()
+        ctx.global_config.update_fields.assert_not_called()
 
     def test_miniserver_startup_triggers_sync_when_enabled(self, ctx):
         global_config.miniserver.sync_with_miniserver = True

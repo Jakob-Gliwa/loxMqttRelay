@@ -472,6 +472,15 @@ def test_protected_field_rejects_the_whole_batch(config_instance):
     ({"subscriptions": [1, 2]}, "subscriptions"),
     ({"topic_whitelist": [None]}, "topic_whitelist"),
     ({"no_such_field": 1}, "no_such_field"),
+    # An empty expression matches every topic, so this would forward nothing
+    # at all rather than the one thing the list names.
+    ({"do_not_forward": ["^debug/", ""]}, "do_not_forward"),
+    ({"subscription_filters": ["   "]}, "subscription_filters"),
+    # Values of the right type but out of range are refused here too, not just
+    # in the file: the update is written out and restarts the relay, which would
+    # then run into the very value it just saved.
+    ({"log_level": "TRACE"}, "log_level"),
+    ({"udp_in_port": 70000}, "udp_in_port"),
 ])
 def test_update_fields_refuses_unusable_values(config_instance, updates, expected):
     with pytest.raises(ConfigError, match=expected):
