@@ -13,13 +13,14 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use log::{Level, debug, error, info, log_enabled, warn};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::{future_into_py, get_runtime};
 use tokio::net::UdpSocket;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::mqtt::{MqttClient, MqttShared};
@@ -30,6 +31,11 @@ const MAX_TRACKED_REJECTED_SOURCES: usize = 64;
 
 /// The largest payload a UDP datagram can carry, so nothing is ever truncated.
 const MAX_DATAGRAM: usize = 65_535;
+
+/// How long to wait between attempts to resolve a configured sender that did
+/// not resolve at startup. Every datagram is dropped in the meantime, so this
+/// trades a slow recovery for not hammering a DNS server that is already down.
+const SOURCE_RETRY_INTERVAL: Duration = Duration::from_secs(300);
 
 type UserProperties = Vec<(String, String)>;
 
@@ -416,7 +422,33 @@ fn sorted_listing(addresses: impl Iterator<Item = IpAddr>) -> String {
     sorted.join(", ")
 }
 
-/// Senders to accept; an empty set means every sender is accepted.
+/// Every sender the configuration names: the Miniserver plus the extras.
+fn configured_sources(miniserver_ip: &str, extra_sources: &[String]) -> Vec<String> {
+    let mut sources = Vec::with_capacity(1 + extra_sources.len());
+    sources.push(miniserver_ip.to_owned());
+    sources.extend(extra_sources.iter().cloned());
+    sources
+}
+
+fn resolve_sources(
+    sources: &[String],
+    resolve: &dyn Fn(&str) -> HashSet<IpAddr>,
+) -> HashSet<IpAddr> {
+    sources
+        .iter()
+        .flat_map(|source| resolve(host_part(source)))
+        .collect()
+}
+
+fn announce_allowed(allowed: &HashSet<IpAddr>) {
+    info!(
+        "UDP-IN accepts datagrams from {}",
+        sorted_listing(allowed.iter().copied())
+    );
+    warn_about_public_addresses(allowed);
+}
+
+/// Senders to accept while the filter is on; empty means nothing resolved yet.
 ///
 /// `resolve` is a parameter so the tests can decide what a name resolves to
 /// without a DNS server in the loop.
@@ -434,25 +466,47 @@ fn configure_source_filter(
         return HashSet::new();
     }
 
-    let mut allowed = HashSet::new();
-    allowed.extend(resolve(host_part(miniserver_ip)));
-    for source in extra_sources {
-        allowed.extend(resolve(host_part(source)));
-    }
-
+    let allowed = resolve_sources(&configured_sources(miniserver_ip, extra_sources), resolve);
     if allowed.is_empty() {
         error!(
-            "No usable sender address configured (miniserver_ip='{miniserver_ip}') - UDP source \
-             filtering stays off and every host on the network can publish via UDP"
+            "No usable sender address configured (miniserver_ip='{miniserver_ip}') - UDP \
+             datagrams are dropped until one of the configured names resolves"
         );
     } else {
-        info!(
-            "UDP-IN accepts datagrams from {}",
-            sorted_listing(allowed.iter().copied())
-        );
-        warn_about_public_addresses(&allowed);
+        announce_allowed(&allowed);
     }
     allowed
+}
+
+/// Look the configured senders up again until one of them resolves.
+///
+/// Started only when the filter is on and startup resolution produced nothing.
+/// Every datagram is dropped in that state, so without this a DNS server that
+/// happened to be away at boot would leave the relay deaf until it is
+/// restarted. One success is enough: the addresses are then in place and this
+/// stops.
+async fn resolve_sources_in_background(sources: Vec<String>, found: mpsc::Sender<HashSet<IpAddr>>) {
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(SOURCE_RETRY_INTERVAL) => {}
+            // The receive loop is gone, so the relay is shutting down and there
+            // is nobody left to hand an address to.
+            _ = found.closed() => return,
+        }
+
+        let attempt = sources.clone();
+        let Ok(allowed) =
+            tokio::task::spawn_blocking(move || resolve_sources(&attempt, &resolve_host)).await
+        else {
+            // The resolver panicked or the runtime is going away; retrying with
+            // the same input would only repeat it.
+            return;
+        };
+        if !allowed.is_empty() {
+            let _ = found.send(allowed).await;
+            return;
+        }
+    }
 }
 
 /// IPv4 default gateway from `/proc/net/route`, or `None` where that cannot be
@@ -480,7 +534,15 @@ fn parse_default_gateway(route_table: &str) -> Option<IpAddr> {
 
 /// Decides which senders get through, and does the talking about the ones that
 /// do not.
+///
+/// `enabled` is kept apart from `allowed` on purpose. The two used to be one
+/// and the same - an empty set meant "let everyone through" - so a filter that
+/// was switched off and a filter whose addresses could not be resolved were
+/// indistinguishable, and a failure quietly picked the least safe policy.
+/// Empty now means "no address to compare against yet", and that drops
+/// datagrams rather than waving them through.
 struct SourceFilter {
+    enabled: bool,
     allowed: HashSet<IpAddr>,
     allowed_listing: String,
     gateway: Option<IpAddr>,
@@ -489,8 +551,9 @@ struct SourceFilter {
 }
 
 impl SourceFilter {
-    fn new(allowed: HashSet<IpAddr>, gateway: Option<IpAddr>) -> Self {
+    fn new(enabled: bool, allowed: HashSet<IpAddr>, gateway: Option<IpAddr>) -> Self {
         Self {
+            enabled,
             allowed_listing: sorted_listing(allowed.iter().copied()),
             allowed,
             gateway,
@@ -499,8 +562,25 @@ impl SourceFilter {
         }
     }
 
+    /// Whether the filter is on but has nothing to compare against, i.e. every
+    /// datagram is currently dropped and another resolution attempt is worth
+    /// making.
+    fn awaits_addresses(&self) -> bool {
+        self.enabled && self.allowed.is_empty()
+    }
+
+    /// Take on the addresses a later resolution attempt produced.
+    fn adopt(&mut self, allowed: HashSet<IpAddr>) {
+        self.allowed_listing = sorted_listing(allowed.iter().copied());
+        self.allowed = allowed;
+        // The senders turned away so far were turned away for want of an
+        // address, so they deserve a fresh hearing in the log under the new one.
+        self.rejected.clear();
+        announce_allowed(&self.allowed);
+    }
+
     fn allows(&mut self, source: IpAddr) -> bool {
-        if self.allowed.is_empty() || self.allowed.contains(&source) {
+        if !self.enabled || self.allowed.contains(&source) {
             return true;
         }
 
@@ -519,10 +599,17 @@ impl SourceFilter {
 
         if !self.rejected.contains(&source) && self.rejected.len() < MAX_TRACKED_REJECTED_SOURCES {
             self.rejected.insert(source);
-            warn!(
-                "Dropped UDP datagram from {source} - only {} may publish via UDP",
-                self.allowed_listing
-            );
+            if self.allowed.is_empty() {
+                warn!(
+                    "Dropped UDP datagram from {source} - no configured sender address could be \
+                     resolved yet, so nothing may publish via UDP"
+                );
+            } else {
+                warn!(
+                    "Dropped UDP datagram from {source} - only {} may publish via UDP",
+                    self.allowed_listing
+                );
+            }
         } else {
             debug!("Dropped UDP datagram from {source}");
         }
@@ -601,12 +688,18 @@ async fn serve(
     socket: UdpSocket,
     shared: Arc<MqttShared>,
     mut filter: SourceFilter,
+    mut late_addresses: mpsc::Receiver<HashSet<IpAddr>>,
     shutdown: Arc<Notify>,
 ) {
     let mut buf = vec![0u8; MAX_DATAGRAM];
     loop {
         tokio::select! {
             _ = shutdown.notified() => break,
+            // `Some(..)` rather than a plain binding: once the background
+            // resolver is done its sender is dropped, and matching on `Some`
+            // is what retires this branch instead of letting a closed channel
+            // complete the select over and over.
+            Some(allowed) = late_addresses.recv() => filter.adopt(allowed),
             received = socket.recv_from(&mut buf) => match received {
                 Ok((len, addr)) => {
                     if filter.allows(addr.ip()) {
@@ -662,9 +755,11 @@ impl UdpServer {
 
     /// Bind the socket and start accepting datagrams.
     ///
-    /// A failed bind is raised rather than logged: without UDP the relay has no
-    /// inbound path from the Miniserver, so starting anyway would be a relay
-    /// that looks healthy and forwards nothing.
+    /// Neither a failed bind nor a failed filter setup is logged and shrugged
+    /// off. Without UDP the relay has no inbound path from the Miniserver, so
+    /// starting anyway would be a relay that looks healthy and forwards
+    /// nothing; and a relay that answers a panic in the filter by accepting
+    /// every sender is worse than one that refuses to start.
     #[pyo3(text_signature = "(self)")]
     fn start<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let shared = Arc::clone(&self.shared);
@@ -683,6 +778,8 @@ impl UdpServer {
                 .await
                 .map_err(|e| PyRuntimeError::new_err(format!("Cannot bind UDP port {port}: {e}")))?;
 
+            let sources = configured_sources(&miniserver_ip, &allowed_sources);
+
             // Name resolution blocks, and it happens once, at startup.
             let filter = tokio::task::spawn_blocking(move || {
                 let gateway = container_gateway();
@@ -692,18 +789,25 @@ impl UdpServer {
                     filter_enabled,
                     &resolve_host,
                 );
-                SourceFilter::new(allowed, gateway)
+                SourceFilter::new(filter_enabled, allowed, gateway)
             })
             .await
-            .unwrap_or_else(|e| {
-                // A bind failure is worth refusing to start over; this is not.
-                // Whatever went wrong setting the filter up, a relay that
-                // forwards everything beats one that forwards nothing.
-                error!("Could not set up UDP source filtering ({e}) - accepting every sender");
-                SourceFilter::new(HashSet::new(), None)
-            });
+            .map_err(|e| {
+                PyRuntimeError::new_err(format!("Could not set up UDP source filtering: {e}"))
+            })?;
 
-            let handle = get_runtime().spawn(serve(socket, shared, filter, shutdown));
+            let (found, late_addresses) = mpsc::channel(1);
+            if filter.awaits_addresses() {
+                warn!(
+                    "UDP-IN drops every datagram until a configured sender resolves; retrying \
+                     every {} seconds",
+                    SOURCE_RETRY_INTERVAL.as_secs()
+                );
+                get_runtime().spawn(resolve_sources_in_background(sources, found));
+            }
+
+            let handle =
+                get_runtime().spawn(serve(socket, shared, filter, late_addresses, shutdown));
             if let Ok(mut slot) = slot.lock() {
                 slot.replace(handle);
             }
@@ -1235,7 +1339,7 @@ mod tests {
     ) -> SourceFilter {
         let allowed =
             configure_source_filter(miniserver_ip, extra, enabled, &fixed_resolver(pairs));
-        SourceFilter::new(allowed, gateway.map(ip))
+        SourceFilter::new(enabled, allowed, gateway.map(ip))
     }
 
     #[test]
@@ -1293,11 +1397,48 @@ mod tests {
     }
 
     #[test]
-    fn an_unresolvable_address_keeps_the_bridge_working() {
-        // Better a relay that forwards everything than one that silently stops
-        // forwarding because a DNS server was briefly away.
+    fn an_unresolvable_address_drops_everything_rather_than_nothing() {
+        // The filter was asked for, so a name that will not resolve must not
+        // turn into "accept every sender" behind the operator's back.
         let mut filter = filter_for("does-not-resolve", &[], true, &[], None);
-        assert!(filter.allows(ip("192.168.1.99")));
+        assert!(filter.awaits_addresses());
+        assert!(!filter.allows(ip("192.168.1.99")));
+    }
+
+    #[test]
+    fn a_late_resolution_puts_the_filter_to_work() {
+        let mut filter = filter_for("does-not-resolve", &[], true, &[], None);
+        assert!(!filter.allows(ip("192.168.1.10")));
+
+        filter.adopt(HashSet::from([ip("192.168.1.10")]));
+
+        assert!(!filter.awaits_addresses());
+        assert!(filter.allows(ip("192.168.1.10")));
+        assert!(!filter.allows(ip("192.168.1.99")));
+    }
+
+    #[test]
+    fn a_disabled_filter_never_waits_for_an_address() {
+        let filter = filter_for("does-not-resolve", &[], false, &[], None);
+        assert!(!filter.awaits_addresses());
+    }
+
+    #[test]
+    fn a_source_that_resolves_late_is_looked_up_from_the_whole_configuration() {
+        let sources = configured_sources("miniserver.local", &["192.168.1.50".to_owned()]);
+        assert_eq!(sources, ["miniserver.local", "192.168.1.50"]);
+
+        let resolved = resolve_sources(
+            &sources,
+            &fixed_resolver(&[
+                ("miniserver.local", "192.168.1.10"),
+                ("192.168.1.50", "192.168.1.50"),
+            ]),
+        );
+        assert_eq!(
+            resolved,
+            HashSet::from([ip("192.168.1.10"), ip("192.168.1.50")])
+        );
     }
 
     #[test]

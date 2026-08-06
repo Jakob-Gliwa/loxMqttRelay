@@ -163,7 +163,9 @@ udp_source_filter_enabled = true
 udp_allowed_sources = []          # e.g. ["192.168.1.50", "test-host.local"]
 ```
 
-Entries may be IP addresses or hostnames and are resolved once at startup. Use the **local** address of your Miniserver here - a DynDNS entry such as Loxone Cloud DNS resolves to the public address of your internet connection, while the Miniserver sends its datagrams from its local address. The relay warns at startup when an allowed sender turns out to be a public address. If no address can be resolved at all, it logs an error and keeps accepting every sender so the bridge does not silently stop working.
+Entries may be IP addresses or hostnames and are resolved once at startup. Use the **local** address of your Miniserver here - a DynDNS entry such as Loxone Cloud DNS resolves to the public address of your internet connection, while the Miniserver sends its datagrams from its local address. The relay warns at startup when an allowed sender turns out to be a public address.
+
+If no address can be resolved at all, the filter has nothing to compare against and **every** datagram is dropped - a filter you asked for is never turned off behind your back. The relay logs an error and retries the lookup every five minutes; as soon as one name resolves it logs the addresses it accepts and starts forwarding. To accept every sender on purpose, set `udp_source_filter_enabled = false`.
 
 Docker bridge networking usually preserves the sender address, so the filter works as expected. If datagrams instead arrive from the container gateway (for example `172.17.0.1` with Docker's userland proxy or Docker Desktop), the real sender is hidden by Docker and cannot be checked. Those datagrams are accepted and a warning is logged once - restrict the UDP port on the host firewall or run the container with `network_mode: host` in that case.
 
