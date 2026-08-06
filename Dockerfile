@@ -51,7 +51,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # setup.py is REQUIRED: the Rust extensions are declared there (not in
 # pyproject.toml). Without it the build silently produces a pure-Python wheel
 # with no .so, and importing loxmqttrelay.{optimized,compatible} fails at runtime.
-COPY setup.py Cargo.toml ./
+# build.rs is equally required - cargo refuses to build without the file the
+# manifest implies.
+COPY setup.py Cargo.toml build.rs ./
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cargo/registry \

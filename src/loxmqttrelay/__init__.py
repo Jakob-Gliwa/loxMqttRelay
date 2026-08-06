@@ -24,6 +24,7 @@ if prefer_optimized_build():
     from loxmqttrelay.optimized._loxmqttrelay import (
         MiniserverDataProcessor,
         MqttClient,
+        UdpServer,
         init_rust_logger
     )
     ACTIVE_RUST_BUILD = "optimized"
@@ -33,6 +34,7 @@ else:
     from loxmqttrelay.compatible._loxmqttrelay import (
         MiniserverDataProcessor,
         MqttClient,
+        UdpServer,
         init_rust_logger
     )
     ACTIVE_RUST_BUILD = "compatible"
@@ -48,6 +50,7 @@ __all__ = [
     'global_config',
     'MiniserverDataProcessor',
     'MqttClient',
+    'UdpServer',
     'init_rust_logger',
     'ACTIVE_RUST_BUILD',
     'ACTIVE_RUST_MODULE',

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import signal
 import types
 import sys
@@ -8,14 +9,13 @@ import uvloop
 
 from loxmqttrelay.config import ConfigError, ConfigSection, global_config
 from loxmqttrelay.logging_config import get_lazy_logger
-from loxmqttrelay.udp_handler import start_udp_server
 from loxmqttrelay.miniserver_sync import sync_miniserver_whitelist
 from loxmqttrelay.http_miniserver_handler import http_miniserver_handler
 from loxwebsocket.lox_ws_api import loxwebsocket
 import loxmqttrelay.utils as utils
 
 # The imports are now handled by __init__.py
-from loxmqttrelay import MiniserverDataProcessor, MqttClient, init_rust_logger
+from loxmqttrelay import MiniserverDataProcessor, MqttClient, UdpServer, init_rust_logger
 
 TOPIC = types.SimpleNamespace(
     CONFIG_SET = f"{global_config.general.base_topic}config/set",
@@ -31,9 +31,11 @@ TOPIC = types.SimpleNamespace(
 logger = get_lazy_logger(__name__)
 
 # Initialize Rust logger (native call — log a breadcrumb so a hard crash here
-# is preceded by a traceable log line).
+# is preceded by a traceable log line). The level is handed over rather than
+# left to RUST_LOG: unset, that would silence everything below ERROR, and the
+# UDP and MQTT paths report their dropped messages at WARNING.
 logger.info("Initializing Rust logger ...")
-init_rust_logger()
+init_rust_logger(logging.getLevelName(logging.getLogger().getEffectiveLevel()))
 
 class MQTTRelay:
     def __init__(self):
@@ -41,9 +43,12 @@ class MQTTRelay:
         # so it has to exist before the processor is built.
         self.mqtt_client = MqttClient(global_config)
         self.miniserver_data_processor = MiniserverDataProcessor(TOPIC, global_config, self, self.mqtt_client, http_miniserver_handler, orjson)
+        # Shares the client's connection state, so a datagram is parsed and
+        # published entirely in Rust. Binds nothing until start().
+        self.udp_server = UdpServer(global_config, self.mqtt_client)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stop: asyncio.Event | None = None
-        self._udp_transport: asyncio.BaseTransport | None = None
+        self._udp_running = False
         self._restart_requested = False
         self._shutdown_done = False
 
@@ -63,10 +68,10 @@ class MQTTRelay:
         # A websocket reconnect means the Miniserver went away and came back,
         # which usually follows a configuration upload - so resync the whitelist.
         loxwebsocket.add_event_callback(self.handle_miniserver_sync, [loxwebsocket.EventType.RECONNECTED])
-        # Awaited instead of spawned: shutdown needs the transport handle to
-        # close the socket, and a failed bind has to abort startup rather than
-        # vanish into a discarded task.
-        self._udp_transport, _ = await start_udp_server(self.mqtt_client)
+        # Awaited rather than spawned: a failed bind has to abort startup, not
+        # vanish into a discarded task and leave a relay with no inbound path.
+        await self.udp_server.start()
+        self._udp_running = True
 
         logger.info("MQTT Relay started")
         await self._stop.wait()
@@ -113,9 +118,12 @@ class MQTTRelay:
             return
         self._shutdown_done = True
 
-        if self._udp_transport is not None:
-            self._udp_transport.close()
-            self._udp_transport = None
+        if self._udp_running:
+            self._udp_running = False
+            try:
+                await self.udp_server.stop()
+            except Exception:
+                logger.warning("Error while closing the UDP socket", exc_info=True)
 
         try:
             await self.mqtt_client.disconnect()

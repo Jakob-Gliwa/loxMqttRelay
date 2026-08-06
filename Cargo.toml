@@ -15,8 +15,16 @@ name = "loxmqttrelay"
 # crate-type = ["cdylib", "rlib"]
 crate-type = ["cdylib"]
 
+[features]
+# On by default for the wheel: `extension-module` leaves libpython unlinked,
+# which is right for a shared object Python loads but breaks `cargo test`, whose
+# harness is an executable and has to resolve those symbols itself. setup.py
+# turns it back on for the builds that ship.
+default = []
+extension-module = ["pyo3/extension-module"]
+
 [dependencies]
-pyo3 = { version = "0.28.3", features = ["auto-initialize","extension-module"] }
+pyo3 = { version = "0.28.3", features = ["auto-initialize"] }
 pyo3-async-runtimes = { version = "0.28", features = ["attributes", "tokio-runtime"] }
 regex = "1.12.3"
 lru = "0.18.0"          # LRU cache
@@ -30,3 +38,6 @@ base64 = "0.22.1"
 # builds without cmake/NASM on the ARM targets this ships to.
 mqtt-glide = { version = "0.1.1", default-features = false, features = ["tls-rustls-ring"] }
 arc-swap = "1.9"
+
+[build-dependencies]
+pyo3-build-config = "0.28.3"

@@ -12,6 +12,10 @@ import asyncio
 import typing
 from typing import AsyncGenerator, Generator, List
 
+def _stub_udp_server() -> MagicMock:
+    """A UdpServer that binds nothing - these tests are about the sync path."""
+    return MagicMock(start=AsyncMock(), stop=AsyncMock())
+
 @pytest.fixture(autouse=True)
 def cleanup_singletons() -> typing.Generator[None, None, None]:
     """Ensure Config singleton is cleaned up before and after each test"""
@@ -146,7 +150,7 @@ async def test_whitelist_sync_on_websocket_reconnect(config_instance: Config, mo
         relay = MQTTRelay()
         with patch('loxmqttrelay.main.sync_miniserver_whitelist', return_value=["reconnect_topic"]) as mock_sync, \
              patch.object(relay, 'connect_and_subscribe_mqtt', new=AsyncMock()), \
-             patch('loxmqttrelay.main.start_udp_server', new=AsyncMock()):
+             patch.object(relay, 'udp_server', new=_stub_udp_server()):
             main_task = asyncio.create_task(relay.main())
             try:
                 # main() läuft bis zum abschließenden await asyncio.Future()
@@ -213,7 +217,7 @@ async def test_no_sync_on_other_websocket_events(config_instance: Config, mock_l
         relay = MQTTRelay()
         with patch('loxmqttrelay.main.sync_miniserver_whitelist', return_value=["reconnect_topic"]) as mock_sync, \
              patch.object(relay, 'connect_and_subscribe_mqtt', new=AsyncMock()), \
-             patch('loxmqttrelay.main.start_udp_server', new=AsyncMock()):
+             patch.object(relay, 'udp_server', new=_stub_udp_server()):
             main_task = asyncio.create_task(relay.main())
             try:
                 await asyncio.sleep(0.1)

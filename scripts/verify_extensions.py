@@ -10,9 +10,9 @@ Expected variants must mirror setup.py:
   * everything else -> ``compatible`` only
 
 For each expected variant the matching ``.so``/``.pyd`` must exist *and* load,
-exposing ``MiniserverDataProcessor`` and ``init_rust_logger``. Loading happens in
-isolation (directly from the file) so the package's ``__init__`` side effects are
-not triggered.
+exposing every symbol the relay imports from it. Loading happens in isolation
+(directly from the file) so the package's ``__init__`` side effects are not
+triggered.
 """
 from __future__ import annotations
 
@@ -76,7 +76,7 @@ def main() -> int:
         except BaseException as exc:  # noqa: BLE001 - report any load failure (incl. SIGILL-ish)
             failures.append(f"'{variant}' extension at {so_path} failed to load: {exc!r}")
             continue
-        for symbol in ("MiniserverDataProcessor", "init_rust_logger"):
+        for symbol in ("MiniserverDataProcessor", "MqttClient", "UdpServer", "init_rust_logger"):
             if not hasattr(module, symbol):
                 failures.append(f"'{variant}' extension missing symbol '{symbol}'")
         print(f"OK: '{variant}' -> {os.path.basename(so_path)} (loaded, symbols present)")

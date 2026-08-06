@@ -6,6 +6,7 @@ use pyo3::intern;
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::sync::{Arc, Mutex};
 
 // For caching
@@ -23,7 +24,9 @@ use base64::{Engine, engine::general_purpose};
 use pyo3_async_runtimes::tokio::into_future;
 
 mod mqtt;
+mod udp;
 use mqtt::{MqttClient, MqttShared};
+use udp::UdpServer;
 
 /// A small struct to store all relevant MQTT topics in Rust, so we don't fetch them repeatedly
 #[derive(Clone, Debug)]
@@ -1232,10 +1235,41 @@ impl MiniserverDataProcessor {
     }
 }
 
-/// Initialize the Rust logger
+/// Initialize the Rust logger at the level Python resolved.
+///
+/// Without a level this used to be `env_logger::try_init()`, whose default
+/// filter with no `RUST_LOG` set is `error` - which quietly swallowed every
+/// warning the relay emits about dropped messages. `LOG_LEVEL` now reaches the
+/// Rust side too, and `RUST_LOG` still overrides it for anyone who wants to
+/// turn a single module up.
 #[pyfunction]
-fn init_rust_logger() {
-    let _ = env_logger::try_init();
+#[pyo3(signature = (level = "INFO"))]
+#[pyo3(text_signature = "(level='INFO')")]
+fn init_rust_logger(level: &str) {
+    let default = match level.to_ascii_uppercase().as_str() {
+        "DEBUG" => "debug",
+        "INFO" => "info",
+        "WARNING" | "WARN" => "warn",
+        // `log` has no level above error, so CRITICAL lands there as well.
+        "ERROR" | "CRITICAL" => "error",
+        _ => "info",
+    };
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or(default),
+    )
+    // Mirrors the Python format ('%(asctime)s %(levelname)s [%(name)s] ...'),
+    // so both halves of the relay read as one log.
+    .format(|buf, record| {
+        writeln!(
+            buf,
+            "{} {} [{}] {}",
+            buf.timestamp(),
+            record.level(),
+            record.target(),
+            record.args()
+        )
+    })
+    .try_init();
 }
 
 #[pymodule]
@@ -1247,6 +1281,7 @@ fn _loxmqttrelay(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()>{
     pyo3_async_runtimes::tokio::init(builder);
     m.add_class::<MiniserverDataProcessor>()?;
     m.add_class::<MqttClient>()?;
+    m.add_class::<UdpServer>()?;
     m.add_function(wrap_pyfunction!(init_rust_logger, m)?)?;
     Ok(())
 }

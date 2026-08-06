@@ -2,8 +2,9 @@
 //!
 //! Inbound messages never cross into Python: the connection read task hands
 //! them to a bounded channel and a worker feeds
-//! [`MiniserverDataProcessor::handle_mqtt_message`] directly. Python keeps the
-//! egress to the Miniserver and the UDP publish path.
+//! [`MiniserverDataProcessor::handle_mqtt_message`] directly. The UDP path in
+//! [`crate::udp`] publishes through [`MqttShared`] without the GIL either;
+//! Python keeps only the egress to the Miniserver.
 
 use std::collections::VecDeque;
 use std::num::{NonZeroU16, NonZeroUsize};
@@ -54,7 +55,7 @@ pub enum DropReason {
 }
 
 impl DropReason {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             DropReason::Disconnected => "broker not connected",
             DropReason::SendFailed => "publish failed",
@@ -78,7 +79,9 @@ pub struct MqttShared {
 }
 
 impl MqttShared {
-    fn new() -> Self {
+    /// A shared state with no connection yet - which is also what the UDP
+    /// tests need to exercise the "the broker was not there" branch.
+    pub(crate) fn new() -> Self {
         Self {
             client: ArcSwapOption::empty(),
             undelivered: Mutex::new(VecDeque::with_capacity(UNDELIVERED_RING)),
@@ -144,7 +147,7 @@ impl MqttShared {
     }
 
     /// Publishes, or reports why the message was lost. Never fails silently.
-    async fn publish(
+    pub(crate) async fn publish(
         &self,
         topic: String,
         payload: Vec<u8>,

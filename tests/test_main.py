@@ -20,7 +20,8 @@ def relay():
     # makes the teardown observable.
     relay.mqtt_client = AsyncMock()
     relay._stop = asyncio.Event()
-    relay._udp_transport = MagicMock()
+    relay.udp_server = MagicMock(start=AsyncMock(), stop=AsyncMock())
+    relay._udp_running = True
     return relay
 
 
@@ -44,17 +45,16 @@ async def test_shutdown_closes_inputs_and_connection(relay):
     await relay.shutdown()
 
     relay.mqtt_client.disconnect.assert_awaited_once()
-    assert relay._udp_transport is None
+    relay.udp_server.stop.assert_awaited_once()
+    assert relay._udp_running is False
 
 
 @pytest.mark.asyncio
 async def test_shutdown_runs_once(relay):
-    transport = relay._udp_transport
-
     await relay.shutdown()
     await relay.shutdown()
 
-    transport.close.assert_called_once()
+    relay.udp_server.stop.assert_awaited_once()
     relay.mqtt_client.disconnect.assert_awaited_once()
 
 

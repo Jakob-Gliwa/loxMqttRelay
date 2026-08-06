@@ -296,6 +296,11 @@ An invalid level in the config file is refused at startup. On the command line
 or in `LOG_LEVEL` it falls back to INFO with a warning - a typo there used to
 turn on DEBUG, which is the one level that also logs message payloads.
 
+The level applies to the Rust half of the relay as well - the MQTT client and
+the UDP listener, which is where the reports about dropped messages come from.
+Set `RUST_LOG` if you want to override it there on its own (for example
+`RUST_LOG=loxmqttrelay::udp=debug`); it takes precedence over `LOG_LEVEL`.
+
 ### MQTT Broker Settings
 ```toml
 [broker]
@@ -475,6 +480,9 @@ Attention: Do not change `udp_in_port` if you run MQTT Relay from within Docker 
 
 `udp_source_filter_enabled` restricts incoming UDP to the Miniserver address plus any sender in `udp_allowed_sources`. See [Accepted senders](#accepted-senders) for details.
 
+The socket, the message parser and the sender filter all live in Rust, and a
+datagram is turned into an MQTT publish without ever entering Python.
+
 ## Dynamic Configuration Updates
 
 You can update the relays's configuration on the fly using MQTT messages. All topics are prefixed with your configured `base_topic`.
@@ -622,6 +630,28 @@ there to be run deliberately:
 ```bash
 uv run pytest -m harness
 ```
+
+### The Rust tests
+
+The UDP listener and the MQTT client are implemented in Rust, and so are their
+tests. They cover the parts a Python test can no longer reach: the datagram
+parser with its greedy topic rule, the sender filter and the address handling
+around it.
+
+```bash
+cargo nextest run
+```
+
+The crate builds without pyo3's `extension-module` feature here, so the test
+harness links libpython itself. Point it at an interpreter that ships a shared
+library - the project's own virtualenv will do:
+
+```bash
+PYO3_PYTHON="$PWD/.venv/bin/python" cargo nextest run
+```
+
+The shipped wheel is unaffected: `setup.py` turns `extension-module` back on for
+every build that is packaged.
 
 ## Note
 

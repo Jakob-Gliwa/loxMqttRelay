@@ -37,8 +37,19 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Sync dependencies (incl. test extras)
         run: uv sync --extra test
+
+      # The UDP path and the MQTT client are Rust; their unit tests live in the
+      # crate. Built without `extension-module`, so the harness links libpython
+      # itself - PYO3_PYTHON points it at the interpreter uv just provisioned.
+      - name: Run Rust tests
+        run: cargo nextest run
+        env:
+          PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
 
       - name: Run tests with coverage
         run: uv run pytest --cov-report=xml
