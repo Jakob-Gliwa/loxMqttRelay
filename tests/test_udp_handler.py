@@ -402,44 +402,6 @@ async def test_udp_protocol_accepts_any_source_when_filter_disabled(mock_mqtt_cl
 
 
 @pytest.mark.asyncio
-async def test_udp_protocol_accepts_single_string_as_allowed_sources(mock_mqtt_client):
-    global_config._config.miniserver.miniserver_ip = "192.168.1.10"
-    global_config._config.udp.udp_allowed_sources = "192.168.1.50"  # type: ignore[assignment]
-
-    with patch('loxmqttrelay.udp_handler._container_gateway', return_value=None):
-        protocol = UDPProtocol(mock_mqtt_client)
-
-    assert protocol._allowed_sources == {"192.168.1.10", "192.168.1.50"}
-
-
-@pytest.mark.asyncio
-async def test_udp_protocol_survives_unusable_allowed_sources(mock_mqtt_client):
-    global_config._config.miniserver.miniserver_ip = "192.168.1.10"
-    global_config._config.udp.udp_allowed_sources = 42  # type: ignore[assignment]
-
-    with patch('loxmqttrelay.udp_handler._container_gateway', return_value=None):
-        protocol = UDPProtocol(mock_mqtt_client)
-
-    assert protocol._allowed_sources == {"192.168.1.10"}
-    protocol.datagram_received(b"publish test/topic test message", ("192.168.1.99", 1234))
-    await asyncio.sleep(0.1)
-    mock_mqtt_client.publish.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_udp_protocol_reads_filter_flag_written_as_string(mock_mqtt_client):
-    global_config._config.miniserver.miniserver_ip = "192.168.1.10"
-    global_config._config.udp.udp_source_filter_enabled = "false"  # type: ignore[assignment]
-
-    with patch('loxmqttrelay.udp_handler._container_gateway', return_value=None):
-        protocol = UDPProtocol(mock_mqtt_client)
-    protocol.datagram_received(b"publish test/topic test message", ("192.168.1.99", 1234))
-    await asyncio.sleep(0.1)
-
-    mock_mqtt_client.publish.assert_called_once()
-
-
-@pytest.mark.asyncio
 async def test_udp_protocol_starts_when_filter_setup_fails(mock_mqtt_client):
     with patch('loxmqttrelay.udp_handler._container_gateway', return_value=None), \
          patch('loxmqttrelay.udp_handler._allowed_source_addresses',

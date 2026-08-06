@@ -519,38 +519,6 @@ fn compile_filters_strict(kind: &str, filters: &[String]) -> PyResult<Option<Reg
     })
 }
 
-/// Private helper function to compile regex filters
-fn compile_filters(filters: Vec<String>) -> Option<Regex> {
-    if filters.is_empty() {
-        debug!("No filters provided.");
-        return None;
-    }
-    let mut valid_filters = Vec::new();
-    for flt in filters {
-        match Regex::new(&flt) {
-            Ok(_) => {
-                debug!("Filter '{}' is valid", flt);
-                valid_filters.push(flt);
-            }
-            Err(e) => {
-                error!("Invalid filter '{}': {}", flt, e);
-            }
-        }
-    }
-    if valid_filters.is_empty() {
-        debug!("No valid filters found.");
-        return None;
-    }
-    let pattern = format!("({})", valid_filters.join("|"));
-    match Regex::new(&pattern) {
-        Ok(compiled_regex) => Some(compiled_regex),
-        Err(e) => {
-            error!("Failed to compile combined regex '{}': {}", pattern, e);
-            None
-        }
-    }
-}
-
 #[pyclass]
 pub struct MiniserverDataProcessor {
     #[pyo3(get)]
@@ -597,7 +565,12 @@ impl MiniserverDataProcessor {
             pyget!(global_config_py, py, "general", "cache_size").extract::<i32>()?
         );
 
-        let compiled = compile_filters(pyget!(global_config_py, py, "topics", "subscription_filters").extract()?);
+        // Strict, like do_not_forward: a filter that cannot be compiled used to
+        // be skipped with a log line, so a typo silently forwarded everything
+        // the filter was meant to hold back.
+        let subscription_filters: Vec<String> =
+            pyget!(global_config_py, py, "topics", "subscription_filters").extract()?;
+        let compiled = compile_filters_strict("subscription_filters", &subscription_filters)?;
         let cache_size = if pyget!(global_config_py, py, "general", "cache_size").extract::<i32>()? == 0 {
             64
         } else {
@@ -676,10 +649,12 @@ impl MiniserverDataProcessor {
     }
 
     #[pyo3(text_signature = "(self, filters)")]
-    fn update_subscription_filters(&mut self, filters: Vec<String>) {
+    fn update_subscription_filters(&mut self, filters: Vec<String>) -> PyResult<()> {
         debug!("Updating subscription filters: {:?}", filters);
-        self.compiled_subscription_filter = compile_filters(filters);
+        self.compiled_subscription_filter =
+            compile_filters_strict("subscription_filters", &filters)?;
         self.invalidate_shapes();
+        Ok(())
     }
 
     #[pyo3(text_signature = "(self, whitelist)")]

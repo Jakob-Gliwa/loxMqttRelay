@@ -127,40 +127,96 @@ def test_config_missing_file(tmp_path):
     assert config.miniserver.miniserver_ip == "127.0.0.1"
     # Add more default assertions as needed
 
-def test_config_validation(tmp_path):
-    """Test loading invalid configuration without raising ConfigError"""
-    config_path = tmp_path / "invalid_config.toml"
-    invalid_config = """
+def _load(tmp_path, toml: str) -> Config:
+    """Load a config file the way startup does."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(toml)
+    config = Config()
+    config.config_path = str(config_path)
+    config._config = config._load_config()
+    return config
+
+
+def test_unusable_config_stops_the_start(tmp_path, caplog):
+    """A file the relay cannot work with must not reach the network.
+
+    Every value used to be taken as written: a port as a string reached the
+    Rust side, and a list field holding a bare string was iterated character
+    by character.
+    """
+    with pytest.raises(SystemExit) as exit_info:
+        _load(tmp_path, """
 [general]
 log_level = "INVALID_LEVEL"
-base_topic = "invalid_base_topic"
 
 [broker]
 host = ""
 port = "not_a_port"
 
-[miniserver]
-miniserver_ip = "invalid_ip"
-miniserver_port = "not_a_port"
-
 [topics]
 subscriptions = "not_a_list"
-"""
-    config_path.write_text(invalid_config)
-    
-    config = Config()
-    config.config_path = str(config_path)
-    config._config = config._load_config()
-    
-    # Since there's no validation, ensure that the incorrect types are loaded as strings
-    # and that default values are not overridden unless specified
-    assert config.general.log_level == "INVALID_LEVEL"  # Loaded as is
-    assert config.general.base_topic == "invalid_base_topic"  # Loaded as is
-    assert config.broker.host == ""  # Loaded as is
-    assert config.broker.port == "not_a_port"  # Loaded as string, though it should be int
-    assert config.miniserver.miniserver_ip == "invalid_ip"  # Loaded as is
-    assert config.miniserver.miniserver_port == "not_a_port"  # Loaded as string
-    assert config.topics.subscriptions == "not_a_list"  # Loaded as string
+""")
+
+    assert exit_info.value.code == 1
+    reported = caplog.text
+    assert "log_level" in reported
+    assert "'port' expects int, got str" in reported
+    assert "'host' cannot be empty" in reported
+    assert "'subscriptions' expects a list, got str" in reported
+
+
+def test_every_problem_is_named_at_once(tmp_path, caplog):
+    """Fixing a config one restart at a time is nobody's idea of a good time."""
+    with pytest.raises(SystemExit):
+        _load(tmp_path, """
+[broker]
+port = 70000
+
+[miniserver]
+miniserver_max_parallel_connections = 0
+
+[udp]
+udp_in_port = -1
+""")
+
+    assert "'port' must be between 1 and 65535" in caplog.text
+    assert "'miniserver_max_parallel_connections' must be at least 1" in caplog.text
+    assert "'udp_in_port' must be between 1 and 65535" in caplog.text
+
+
+def test_a_broken_pattern_is_caught_before_the_relay_runs(tmp_path, caplog):
+    with pytest.raises(SystemExit):
+        _load(tmp_path, """
+[topics]
+subscription_filters = ["device.*(data"]
+""")
+
+    assert "invalid pattern" in caplog.text
+
+
+def test_true_written_as_a_string_is_rejected(tmp_path, caplog):
+    """The value that used to be quietly truthy - filtering stayed on."""
+    with pytest.raises(SystemExit):
+        _load(tmp_path, """
+[udp]
+udp_source_filter_enabled = "false"
+""")
+
+    assert "'udp_source_filter_enabled' expects bool, got str" in caplog.text
+
+
+def test_unknown_fields_do_not_stop_the_start(tmp_path):
+    """An option dropped in an upgrade must not lock the user out."""
+    config = _load(tmp_path, """
+[broker]
+port = 1884
+retired_option = "whatever"
+
+[nowhere]
+key = "value"
+""")
+
+    assert config.broker.port == 1884
 
 def test_config_update(config_instance):
     """Test updating configuration sections"""

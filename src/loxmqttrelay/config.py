@@ -1,5 +1,6 @@
 import os
 import logging
+import re
 from dataclasses import dataclass, field, asdict, replace, fields
 import threading
 from typing import Dict, Any, List, Optional, Literal, Union, get_args, get_origin, get_type_hints, Set
@@ -159,8 +160,15 @@ def _matches_type(value: Any, expected: Any) -> bool:
     return isinstance(value, expected)
 
 
-def _type_mismatch(field_name: str, expected: Any, value: Any) -> Optional[str]:
-    """Why *value* does not fit *expected*, or None if it does."""
+def _type_mismatch(
+    field_name: str, expected: Any, value: Any, allow_bare_item: bool = True
+) -> Optional[str]:
+    """Why *value* does not fit *expected*, or None if it does.
+
+    ``allow_bare_item`` is what separates an MQTT update from the config file:
+    a payload may name a single entry where a list is expected, a TOML file has
+    real arrays and no reason to.
+    """
     origin = get_origin(expected)
 
     if origin is Union:
@@ -172,9 +180,14 @@ def _type_mismatch(field_name: str, expected: Any, value: Any) -> Optional[str]:
     if origin in (list, set):
         args = get_args(expected)
         item_type = args[0] if args else str
-        # A bare element stands for a one-element collection, the same way the
-        # update itself unwraps the payload.
-        items = list(value) if isinstance(value, (list, set)) else [value]
+        if isinstance(value, (list, set)):
+            items = list(value)
+        elif allow_bare_item:
+            # A bare element stands for a one-element collection, the same way
+            # the update itself unwraps the payload.
+            items = [value]
+        else:
+            return f"'{field_name}' expects a list, got {type(value).__name__}"
         if all(_matches_type(item, item_type) for item in items):
             return None
         return f"'{field_name}' expects a list of {item_type.__name__}"
@@ -182,6 +195,73 @@ def _type_mismatch(field_name: str, expected: Any, value: Any) -> Optional[str]:
     if _matches_type(value, expected):
         return None
     return f"'{field_name}' expects {expected.__name__}, got {type(value).__name__}"
+
+
+_PORT_FIELDS = frozenset({"port", "miniserver_port", "udp_in_port"})
+_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+_REGEX_FIELDS = frozenset({"subscription_filters", "do_not_forward"})
+
+
+def _value_problem(field_name: str, value: Any) -> Optional[str]:
+    """What is wrong with a value of the right type, or None.
+
+    Only reached once the type fits, so the comparisons below are safe.
+    """
+    if field_name in _PORT_FIELDS and not 1 <= value <= 65535:
+        return f"'{field_name}' must be between 1 and 65535, got {value}"
+    if field_name == "miniserver_max_parallel_connections" and value < 1:
+        return f"'{field_name}' must be at least 1, got {value}"
+    if field_name == "cache_size" and value < 0:
+        return f"'{field_name}' cannot be negative, got {value}"
+    if field_name == "log_level" and value.upper() not in _LOG_LEVELS:
+        return f"'log_level' must be one of {', '.join(_LOG_LEVELS)}, got '{value}'"
+    if field_name == "base_topic" and not value.strip():
+        return "'base_topic' cannot be empty - it prefixes every control topic"
+    if field_name in ("host", "miniserver_ip") and not value.strip():
+        return f"'{field_name}' cannot be empty"
+    if field_name in _REGEX_FIELDS:
+        for pattern in (value if isinstance(value, list) else [value]):
+            try:
+                # A first pass only: the patterns are matched by the Rust regex
+                # engine, which rejects lookaround and backreferences that
+                # Python accepts. Those still fail there, with their own error.
+                re.compile(pattern)
+            except re.error as e:
+                return f"'{field_name}' has an invalid pattern '{pattern}': {e}"
+    return None
+
+
+def validate_config_dict(config_dict: Dict[str, Any]) -> List[str]:
+    """Every reason the parsed file cannot be used, in file order.
+
+    Runs before the dataclasses are built, so a value of the wrong type is
+    named here instead of surfacing later as a TypeError from a section
+    constructor, an unreadable value on the Rust side, or - worse - a string
+    like "false" that is quietly truthy.
+
+    Unknown sections and fields are not errors: an upgrade that drops an
+    option must not stop the relay from starting. ``_create_section`` warns
+    about those.
+    """
+    problems: List[str] = []
+    for section, values in config_dict.items():
+        section_class = globals().get(section.capitalize() + "Config")
+        if section_class is None:
+            logger.warning(f"Unknown configuration section '[{section}]' will be ignored.")
+            continue
+        if not isinstance(values, dict):
+            problems.append(f"'[{section}]' must be a table")
+            continue
+        expected_types = get_type_hints(section_class)
+        for key, value in values.items():
+            if key not in expected_types:
+                continue
+            problem = _type_mismatch(
+                key, expected_types[key], value, allow_bare_item=False
+            ) or _value_problem(key, value)
+            if problem:
+                problems.append(f"[{section}] {problem}")
+    return problems
 
 
 class Config:
@@ -210,6 +290,19 @@ class Config:
 
         with open(self.config_path, "r") as f:
             config_dict = tomlkit.parse(f.read()).unwrap()
+
+        if problems := validate_config_dict(config_dict):
+            for problem in problems:
+                logger.error(f"Invalid configuration: {problem}")
+            logger.error(
+                f"Refusing to start: {self.config_path} has {len(problems)} unusable "
+                f"value(s). Nothing was connected, nothing was changed."
+            )
+            # Raised while this module is imported, i.e. before the relay opens
+            # a socket. SystemExit exits with a status instead of a traceback -
+            # the lines above are the message.
+            raise SystemExit(1)
+
         return AppConfig.from_dict(config_dict)
 
     def save_config(self) -> None:

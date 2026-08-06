@@ -159,7 +159,13 @@ def setup_logging():
     else:
         log_level = global_config.general.log_level.upper()
     
-    level = getattr(logging, log_level, logging.DEBUG)
+    # The config file is validated, but LOG_LEVEL and --log-level are not, and a
+    # typo used to land on DEBUG - the loudest level, and the one that logs
+    # every payload.
+    level = getattr(logging, log_level, None)
+    if not isinstance(level, int):
+        logging.warning(f"Unknown log level '{log_level}', using INFO")
+        level = logging.INFO
     logging.basicConfig(
         level=level,
         format='%(asctime)s %(levelname)s [%(name)s] %(message)s'

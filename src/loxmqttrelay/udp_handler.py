@@ -196,7 +196,9 @@ def parse_udp_message_mqtt5(
 
 async def handle_udp_message(mqtt_client, udpmsg: str, addr) -> None:
     """Parse one UDP datagram and forward it to MQTT."""
-    logger.info(f"UDP IN: {addr}: {udpmsg}")
+    # DEBUG, not INFO: the datagram carries whatever the Miniserver sends, and
+    # that is nobody's business at the default level.
+    logger.debug(f"UDP IN: {addr}: {udpmsg}")
     result = parse_udp_message_mqtt5(udpmsg)
     if result is None:
         return
@@ -215,30 +217,6 @@ async def handle_udp_message(mqtt_client, udpmsg: str, addr) -> None:
             "UDP message from %s was not forwarded to MQTT (%s): '%s'='%s'",
             addr, drop_reason, topic, message,
         )
-
-
-def _as_bool(value: Any, field_name: str, default: bool) -> bool:
-    """Read a config flag that a hand-edited TOML may hold as a string."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in ("true", "yes", "on", "1"):
-            return True
-        if lowered in ("false", "no", "off", "0"):
-            return False
-    logger.warning(f"Invalid value for {field_name}: {value!r} - using {default}")
-    return default
-
-
-def _as_host_list(value: Any) -> List[str]:
-    """Read udp_allowed_sources, tolerating a single string instead of a list."""
-    if isinstance(value, str):
-        return [value] if value.strip() else []
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [str(item) for item in value]
-    logger.warning(f"Ignoring udp_allowed_sources - expected a list of addresses, got {value!r}")
-    return []
 
 
 def _host_part(address: Any) -> str:
@@ -276,7 +254,7 @@ def _allowed_source_addresses() -> Set[str]:
     hosts = [global_config.miniserver.miniserver_ip]
     if global_config.debug.enable_mock and global_config.debug.mock_ip:
         hosts.append(global_config.debug.mock_ip)
-    hosts.extend(_as_host_list(global_config.udp.udp_allowed_sources))
+    hosts.extend(global_config.udp.udp_allowed_sources)
     addresses: Set[str] = set()
     for host in hosts:
         addresses |= _resolve(_host_part(host))
@@ -337,13 +315,15 @@ class UDPProtocol(asyncio.DatagramProtocol):
         try:
             self._allowed_sources = self._configure_source_filter()
         except Exception as e:
-            # An unusable config value must never keep the relay from starting
+            # The values are validated at startup, so what can still fail here
+            # is name resolution - and a DNS server that is briefly away must
+            # not keep the relay from starting.
             logger.error(f"Could not set up UDP source filtering ({e}) - accepting every sender")
 
     @staticmethod
     def _configure_source_filter() -> Set[str]:
         """Senders to accept; an empty set means every sender is accepted."""
-        if not _as_bool(global_config.udp.udp_source_filter_enabled, "udp_source_filter_enabled", True):
+        if not global_config.udp.udp_source_filter_enabled:
             logger.warning(
                 "UDP source filtering is switched off (udp_source_filter_enabled = false) - "
                 "every host that can reach the UDP port can publish to MQTT"

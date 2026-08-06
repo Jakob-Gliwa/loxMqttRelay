@@ -235,6 +235,25 @@ Miniserver requests still in flight are cancelled rather than awaited - see
 
 The MQTT Relay is configured through a `config.toml` file. A default configuration file (`default_config.toml`) is provided as a starting point with sensible defaults.
 
+The file is checked before anything else happens. Types, port ranges, the log
+level and the regular expressions in `subscription_filters` and
+`do_not_forward` all have to make sense; if they do not, the relay names **every**
+problem it found and exits with status 1 without opening a single connection:
+
+```
+Invalid configuration: [broker] 'port' expects int, got str
+Invalid configuration: [topics] 'subscription_filters' has an invalid pattern 'device.*(data': missing )
+Refusing to start: config/config.toml has 2 unusable value(s). Nothing was connected, nothing was changed.
+```
+
+Two habits this puts an end to: `port = "1883"` used to travel all the way to
+the MQTT client before failing, and `udp_source_filter_enabled = "false"` - a
+string, and therefore true - quietly left the source filter switched on.
+Quoting a boolean or a number is now an error rather than a surprise.
+
+Fields the relay does not know are only warned about, not rejected, so a
+setting that disappears in an upgrade cannot lock you out of your own relay.
+
 ### Logging Configuration
 
 The logging level can be set in three ways, with the following priority (highest to lowest):
@@ -262,7 +281,9 @@ Available log levels: DEBUG, INFO, WARNING, ERROR, CRITICAL
 - ERROR: Error messages for serious problems
 - CRITICAL: Critical issues that may prevent operation
 
-If an invalid log level is provided, it will default to INFO with a warning message.
+An invalid level in the config file is refused at startup. On the command line
+or in `LOG_LEVEL` it falls back to INFO with a warning - a typo there used to
+turn on DEBUG, which is the one level that also logs message payloads.
 
 ### MQTT Broker Settings
 ```toml
@@ -333,12 +354,16 @@ Configure which MQTT topics to subscribe to:
 ```toml
 [topics]
 subscriptions = ["device/#","sensors/#",]
-subscription_filters = ["device.*(data(?!.*(?:private|internal))"]
+subscription_filters = ["^device/.*/(debug|internal)$"]
 topic_whitelist = []
 do_not_forward = []
 ```
 Subscriptions define to which topics the MQTT Relay will subscribe. Subscriptions follow the MQTT subcrition syntax.
-Subscription filters filter topics from further processing. These filters are defined by Regular Expressions.
+Subscription filters drop matching topics from further processing - a topic that
+matches is not looked at again. They are regular expressions, matched by the
+Rust regex engine, which does not support lookahead or backreferences. A pattern
+that does not compile stops the relay at startup rather than being skipped, so a
+typo cannot quietly let through what it was meant to hold back.
 If you just wish to stop topics from being sent to the miniserver use the doNotForward-Option
 
 #### Topic Normalization
