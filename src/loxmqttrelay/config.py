@@ -333,18 +333,35 @@ class Config:
         try:    
             with open(self.config_path, "w") as f:
                 f.write(tomlkit.dumps(doc))
-        except PermissionError as e:
-            logger.error(f"⚠️ No write permission for {self.config_path} for user {os.getlogin()} with uid {os.getuid()} and gid {os.getgid()}. File Owner: {os.stat(self.config_path).st_uid}, Group: {os.stat(self.config_path).st_gid}")
-            logger.error("Trying to change ownership...")
-            try:
-                os.chmod(self.config_path, 0o666)
-                with open(self.config_path, "w") as f:
-                    f.write(tomlkit.dumps(doc))
-            except PermissionError as e:
-                logger.error(f"⚠️ Still no write permission for {self.config_path} for user {os.getlogin()} with uid {os.getuid()} and gid {os.getgid()}. File Owner: {os.stat(self.config_path).st_uid}, Group: {os.stat(self.config_path).st_gid}")
-                logger.error("Please change the file permissions and restart.")
+        except PermissionError:
+            # Deliberately no chmod here. Widening the file to 0666 to get one
+            # write through would leave the broker and Miniserver passwords
+            # readable and writable for every account on the host, permanently,
+            # to fix something temporary - and it only ever works when the file
+            # is ours, in which case the obstacle was somewhere else anyway.
+            logger.error(self._permission_hint())
+            logger.error(
+                "The configuration was NOT written. The relay keeps running with the "
+                "values it already has, but the change is lost on the next restart."
+            )
         except Exception as e:
             logger.error(f"Error saving config: {e}")
+
+    def _permission_hint(self) -> str:
+        """Who we are, who owns the file, and how to reconcile the two."""
+        message = f"No write permission for {self.config_path}"
+        try:
+            info = os.stat(self.config_path)
+            # getlogin() is not used on purpose: it raises without a controlling
+            # terminal, which is exactly the container case this describes.
+            message += (
+                f" - running as uid {os.getuid()}, gid {os.getgid()}, "
+                f"file owned by uid {info.st_uid}, gid {info.st_gid}. "
+                f"Fix with: chown {os.getuid()}:{os.getgid()} {self.config_path}"
+            )
+        except Exception as e:
+            message += f" ({e})"
+        return message
 
     def update_field(self, field_name: str, value: Any, list_mode: Literal["set", "add", "remove"] = "set") -> None:
         self._apply_field(field_name, value, list_mode)

@@ -1,4 +1,7 @@
 import asyncio
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
 from loxmqttrelay.config import (
     Config, BrokerConfig, AppConfig,
@@ -203,6 +206,34 @@ udp_source_filter_enabled = "false"
 """)
 
     assert "'udp_source_filter_enabled' expects bool, got str" in caplog.text
+
+
+def test_a_config_that_cannot_be_written_keeps_its_permissions(tmp_path, caplog):
+    """The file holds both passwords, so a failed write must not open it up.
+
+    It used to chmod 0666 - readable and writable for every account on the
+    host, forever - to force one write through.
+    """
+    config = _load(tmp_path, "[broker]\nport = 1884\n")
+    mode_before = Path(config.config_path).stat().st_mode
+
+    with patch("loxmqttrelay.config.open", side_effect=PermissionError("read-only")), \
+         patch("loxmqttrelay.config.os.chmod") as chmod:
+        config.save_config()
+
+    chmod.assert_not_called()
+    assert Path(config.config_path).stat().st_mode == mode_before
+    assert "No write permission" in caplog.text
+
+
+def test_a_failed_write_leaves_the_running_config_alone(tmp_path):
+    """Losing the file is bad enough without also losing the running values."""
+    config = _load(tmp_path, "[broker]\nport = 1884\n")
+
+    with patch("loxmqttrelay.config.open", side_effect=PermissionError("read-only")):
+        config.update_field("cache_size", 500)
+
+    assert config.general.cache_size == 500
 
 
 def test_unknown_fields_do_not_stop_the_start(tmp_path):

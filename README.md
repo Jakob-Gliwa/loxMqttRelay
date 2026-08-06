@@ -192,6 +192,12 @@ docker run -d \
   ```bash
   -v /path/to/your/config:/app/config
   ```
+  The relay writes this file whenever the configuration is changed over MQTT, so
+  it has to be writable for the user the container runs as. If it is not, the
+  change is logged as lost - together with the two user ids involved and the
+  `chown` that reconciles them - and the relay carries on with the values it
+  already has. It will not widen the file's permissions to get the write
+  through: your broker and Miniserver passwords are in there.
 
 - **Logging Level**: Control the verbosity of logging:
   - Set `LOG_LEVEL` to one of: DEBUG, INFO, WARNING, ERROR, CRITICAL
