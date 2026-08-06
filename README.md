@@ -215,7 +215,21 @@ services:
     ports:
       - "11884:11884/udp"
     restart: unless-stopped
+    stop_grace_period: 10s
 ```
+
+### Stopping the container
+
+`docker stop` sends SIGTERM, which the relay turns into an orderly shutdown: it
+closes the UDP socket, publishes `<base_topic>status` = `Disconnecting` and
+sends a proper MQTT DISCONNECT before exiting. That normally takes well under a
+second; `stop_grace_period` only matters if the broker has become unreachable,
+in which case the connection teardown waits for its own timeout. Without the
+signal the broker would keep the last `Connected` status until the keep-alive
+expires, roughly a minute.
+
+Miniserver requests still in flight are cancelled rather than awaited - see
+[Delivery Guarantees](#delivery-guarantees).
 
 ## Configuration
 

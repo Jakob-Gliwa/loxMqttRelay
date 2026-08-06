@@ -85,4 +85,9 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 11884/udp
+
+# Docker's default, stated so the contract is visible: the relay installs a
+# SIGTERM handler and shuts the MQTT session down before exiting.
+STOPSIGNAL SIGTERM
+
 ENTRYPOINT ["docker-entrypoint.sh"]
