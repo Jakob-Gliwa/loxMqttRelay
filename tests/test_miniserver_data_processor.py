@@ -452,14 +452,18 @@ async def test_process_data_order_of_filters(config_instance, monkeypatch):
 
 class TestBinaryDataHandling:
     """Test cases for handling non-UTF-8 MQTT messages"""
-    
+
+    # Handing the batch over goes through into_future, which needs a running
+    # loop; handle_mqtt_message reports that failure rather than swallowing it.
+    pytestmark = pytest.mark.asyncio
+
     @pytest.fixture
     def processor(self, config_instance):
         """Create a processor instance for testing"""
         test_processor = TestMiniserverDataProcessor(config_instance)
         return test_processor.processor
     
-    def test_utf8_text_message_handling(self, processor):
+    async def test_utf8_text_message_handling(self, processor):
         """Test that valid UTF-8 messages are processed normally"""
         topic = "test/topic"
         message = b"Hello, World! This is UTF-8 text."
@@ -475,7 +479,7 @@ class TestBinaryDataHandling:
         except Exception as e:
             pytest.fail(f"UTF-8 message handling failed with exception: {e}")
     
-    def test_binary_message_handling(self, processor):
+    async def test_binary_message_handling(self, processor):
         """Test that binary messages are handled gracefully without crashing"""
         topic = "test/binary"
         
@@ -493,7 +497,7 @@ class TestBinaryDataHandling:
         except Exception as e:
             pytest.fail(f"Binary message handling failed with exception: {e}")
     
-    def test_gzip_compressed_data_handling(self, processor):
+    async def test_gzip_compressed_data_handling(self, processor):
         """Test handling of gzip compressed data"""
         topic = "test/gzip"
         
@@ -510,7 +514,7 @@ class TestBinaryDataHandling:
         except Exception as e:
             pytest.fail(f"Gzip message handling failed with exception: {e}")
     
-    def test_png_image_data_handling(self, processor):
+    async def test_png_image_data_handling(self, processor):
         """Test handling of PNG image data"""
         topic = "test/image"
         
@@ -527,7 +531,7 @@ class TestBinaryDataHandling:
         except Exception as e:
             pytest.fail(f"PNG message handling failed with exception: {e}")
     
-    def test_jpeg_image_data_handling(self, processor):
+    async def test_jpeg_image_data_handling(self, processor):
         """Test handling of JPEG image data"""
         topic = "test/jpeg"
         
@@ -544,7 +548,7 @@ class TestBinaryDataHandling:
         except Exception as e:
             pytest.fail(f"JPEG message handling failed with exception: {e}")
     
-    def test_zip_archive_data_handling(self, processor):
+    async def test_zip_archive_data_handling(self, processor):
         """Test handling of ZIP archive data"""
         topic = "test/zip"
         
@@ -561,7 +565,7 @@ class TestBinaryDataHandling:
         except Exception as e:
             pytest.fail(f"ZIP message handling failed with exception: {e}")
     
-    def test_large_binary_data_handling(self, processor):
+    async def test_large_binary_data_handling(self, processor):
         """Test handling of large binary data"""
         topic = "test/large_binary"
         
@@ -578,7 +582,7 @@ class TestBinaryDataHandling:
         except Exception as e:
             pytest.fail(f"Large binary message handling failed with exception: {e}")
     
-    def test_mixed_binary_and_text_topics(self, processor):
+    async def test_mixed_binary_and_text_topics(self, processor):
         """Test that both binary and text topics work in the same session"""
         # Test text topic
         try:
@@ -610,7 +614,7 @@ class TestBinaryDataHandling:
         except Exception as e:
             pytest.fail(f"Second text message handling failed with exception: {e}")
     
-    def test_binary_data_with_special_characters(self, processor):
+    async def test_binary_data_with_special_characters(self, processor):
         """Test handling of binary data that contains special characters"""
         topic = "test/special_chars"
         
@@ -627,7 +631,7 @@ class TestBinaryDataHandling:
         except Exception as e:
             pytest.fail(f"Special character binary message handling failed with exception: {e}")
     
-    def test_empty_binary_message(self, processor):
+    async def test_empty_binary_message(self, processor):
         """Test handling of empty binary message"""
         topic = "test/empty"
         
@@ -641,7 +645,7 @@ class TestBinaryDataHandling:
         except Exception as e:
             pytest.fail(f"Empty binary message handling failed with exception: {e}")
     
-    def test_single_byte_binary_message(self, processor):
+    async def test_single_byte_binary_message(self, processor):
         """Test handling of single byte binary message"""
         topic = "test/single_byte"
         
@@ -658,8 +662,10 @@ class TestBinaryDataHandling:
 
 class TestBase64BinaryDataPreservation:
     """Test cases to verify that base64 encoding preserves binary data exactly"""
+
+    pytestmark = pytest.mark.asyncio
     
-    def test_base64_encoding_preserves_exact_binary_data(self, processor):
+    async def test_base64_encoding_preserves_exact_binary_data(self, processor):
         """Test that base64 encoding preserves binary data exactly"""
         topic = "sensor/exact_binary_test"
         
@@ -679,7 +685,7 @@ class TestBase64BinaryDataPreservation:
         except Exception as e:
             pytest.fail(f"Base64 encoding of binary data failed with exception: {e}")
     
-    def test_base64_encoding_various_binary_formats(self, processor):
+    async def test_base64_encoding_various_binary_formats(self, processor):
         """Test base64 encoding with various binary formats"""
         test_cases = [
             ("sensor/zlib_data", bytes([120, 156, 165, 125, 217, 142])),
@@ -701,7 +707,7 @@ class TestBase64BinaryDataPreservation:
             except Exception as e:
                 pytest.fail(f"Base64 encoding failed for {topic} with exception: {e}")
     
-    def test_base64_encoding_large_binary_data(self, processor):
+    async def test_base64_encoding_large_binary_data(self, processor):
         """Test base64 encoding with large binary data"""
         topic = "sensor/large_binary_test"
         
@@ -721,8 +727,10 @@ class TestBase64BinaryDataPreservation:
 
 class TestDownstreamBinaryDataFlow:
     """Test cases for complete downstream data flow with binary data"""
+
+    pytestmark = pytest.mark.asyncio
     
-    def test_binary_data_handling_in_rust_processor(self, processor):
+    async def test_binary_data_handling_in_rust_processor(self, processor):
         """Test that binary data is handled correctly by the Rust processor"""
         # Test with zlib compressed data (like the problematic data from the error)
         topic = "sensor/binary_data"
@@ -735,7 +743,7 @@ class TestDownstreamBinaryDataFlow:
         except Exception as e:
             pytest.fail(f"Binary message handling failed with exception: {e}")
     
-    def test_binary_data_conversion_in_pipeline(self, processor):
+    async def test_binary_data_conversion_in_pipeline(self, processor):
         """Test that binary data gets converted to safe representation in the pipeline"""
         topic = "sensor/binary_conversion"
         binary_message = bytes([120, 156, 165, 125, 217, 142])
@@ -747,7 +755,7 @@ class TestDownstreamBinaryDataFlow:
         except Exception as e:
             pytest.fail(f"Binary message handling failed with exception: {e}")
     
-    def test_mixed_data_types_in_pipeline(self, processor):
+    async def test_mixed_data_types_in_pipeline(self, processor):
         """Test that mixed text and binary data flows correctly through the pipeline"""
         # Test text message
         text_topic = "sensor/text_data"
@@ -769,7 +777,7 @@ class TestDownstreamBinaryDataFlow:
         except Exception as e:
             pytest.fail(f"Binary message handling failed with exception: {e}")
     
-    def test_large_binary_data_in_pipeline(self, processor):
+    async def test_large_binary_data_in_pipeline(self, processor):
         """Test that large binary data is handled correctly in the pipeline"""
         topic = "sensor/large_binary_data"
         large_binary = bytes([i % 256 for i in range(1000)])
@@ -780,7 +788,7 @@ class TestDownstreamBinaryDataFlow:
         except Exception as e:
             pytest.fail(f"Large binary message handling failed with exception: {e}")
     
-    def test_special_character_binary_in_pipeline(self, processor):
+    async def test_special_character_binary_in_pipeline(self, processor):
         """Test that binary data with special characters flows correctly"""
         topic = "sensor/special_chars"
         special_binary = bytes([0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F])
@@ -791,7 +799,7 @@ class TestDownstreamBinaryDataFlow:
         except Exception as e:
             pytest.fail(f"Special character binary message handling failed with exception: {e}")
     
-    def test_compression_signatures_in_pipeline(self, processor):
+    async def test_compression_signatures_in_pipeline(self, processor):
         """Test that compression signatures are detected and handled correctly"""
         # Test zlib signature
         zlib_topic = "sensor/zlib_data"
@@ -813,7 +821,7 @@ class TestDownstreamBinaryDataFlow:
         except Exception as e:
             pytest.fail(f"Gzip message handling failed with exception: {e}")
     
-    def test_end_to_end_binary_data_flow(self, processor):
+    async def test_end_to_end_binary_data_flow(self, processor):
         """Test complete end-to-end flow of binary data through the system"""
         topic = "sensor/end_to_end_binary"
         binary_message = bytes([120, 156, 165, 125, 217, 142, 158, 201, 145, 221, 187, 212, 245, 47])
@@ -936,11 +944,26 @@ class TestConfigControlTopics:
         ctx.processor.handle_mqtt_message(ctx.topics.MINISERVER_STARTUP_EVENT, b"")
         ctx.relay_main.schedule_miniserver_sync.assert_not_called()
 
-    def test_data_topic_is_not_treated_as_control(self, ctx):
+    @pytest.mark.asyncio
+    async def test_data_topic_is_not_treated_as_control(self, ctx):
         # A topic outside base_topic must take the data path, never the
         # control branches (no restart, no config response published).
         ctx.processor.handle_mqtt_message("some/data/topic", b"value")
         ctx.relay_main.restart_relay.assert_not_called()
         ctx.relay_main.schedule_miniserver_sync.assert_not_called()
         assert ctx.mqtt_client.take_undelivered() == []
+        ctx.http_handler.send_batch_to_miniserver.assert_called_once()
+
+    def test_data_path_errors_propagate(self, ctx):
+        """process_data failures must surface so ingress_worker can log them.
+
+        A discarded Err here used to leave the outer handler with Ok(()) and no
+        ERROR line for the dropped message.
+        """
+        ctx.http_handler.send_batch_to_miniserver.side_effect = RuntimeError(
+            "handover failed"
+        )
+
+        with pytest.raises(RuntimeError, match="handover failed"):
+            ctx.processor.handle_mqtt_message("some/data/topic", b"value")
 

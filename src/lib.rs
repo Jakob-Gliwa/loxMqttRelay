@@ -885,13 +885,9 @@ impl MiniserverDataProcessor {
             }
         }
         else {
-
-            // process_data(...) returns Vec<(String, Option<String>)>
-            let _ = self.process_data(
-                py,
-                &topic,
-                &message
-            );
+            // Propagate so ingress_worker can log the topic and reason; a
+            // discarded Err here used to leave those failures silent.
+            self.process_data(py, &topic, &message)?;
         }
 
         Ok(())
