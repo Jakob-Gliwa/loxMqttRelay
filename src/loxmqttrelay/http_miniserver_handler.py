@@ -1,4 +1,5 @@
 import asyncio
+import time
 import aiohttp
 from collections.abc import Sequence
 from typing import Any 
@@ -35,11 +36,62 @@ class HttpMiniserverHandler:
     auth = aiohttp.BasicAuth(ms_user, ms_pass) if ms_user and ms_pass else None
     # Increase the timeout to 10 seconds
     timeout = aiohttp.ClientTimeout(total=10)
+    # A handshake is an HTTP round trip for the session key, the websocket
+    # upgrade, the key exchange and a token. While the Miniserver is
+    # unreachable, every message would otherwise pay that price again.
+    connect_retry_delay = 15.0
 
 
     """Handler for processing and sending data to Miniserver via HTTP."""
     def __init__(self):
+        # One connect at a time: a burst of messages arriving while the socket
+        # is down must not turn into a burst of handshakes.
+        self._connect_lock = asyncio.Lock()
+        self._last_connect_failure = 0.0
         logger.info("MQTT Miniserver Handler created")
+
+    async def _ensure_websocket(self) -> bool:
+        """Report whether a websocket connection is available for sending.
+
+        Connect failures are answered with False rather than raised: a batch is
+        one MQTT message, and an exception escaping the first value would take
+        the rest of that message with it.
+        """
+        if loxwebsocket.state == "CONNECTED":
+            return True
+        if loxwebsocket.state != "CLOSED":
+            # RECONNECTING means the library is already retrying and a second
+            # handshake would race it; STOPPING means the relay is going down.
+            logger.debug("Websocket is %s, not sending", loxwebsocket.state)
+            return False
+
+        async with self._connect_lock:
+            # Another message may have connected - or just failed - while this
+            # one waited for the lock.
+            if loxwebsocket.state == "CONNECTED":
+                return True
+            since_failure = time.monotonic() - self._last_connect_failure
+            if since_failure < self.connect_retry_delay:
+                logger.debug(
+                    "Not connecting: the last attempt failed %.1fs ago", since_failure,
+                )
+                return False
+
+            try:
+                await loxwebsocket.connect(
+                    user=self.ms_user,
+                    password=self.ms_pass,
+                    loxone_url=self.ws_base_url,
+                    receive_updates=False,
+                )
+            except Exception as e:
+                self._last_connect_failure = time.monotonic()
+                logger.error(
+                    f"Cannot reach the Miniserver websocket at {self.ws_base_url}: {e} - "
+                    f"not trying again for {self.connect_retry_delay:.0f}s"
+                )
+                return False
+            return loxwebsocket.state == "CONNECTED"
 
     async def send_to_minisever_via_websocket(
         self,
@@ -54,12 +106,15 @@ class HttpMiniserverHandler:
         # Determine target IP
         logger.debug("Using miniserver address: %s %s", self.target_ip, '(mock)' if (self.mock_ms_ip and self.enable_mock_miniserver) else '(real)')
 
-        ws_client = loxwebsocket
-        if "CONNECTED" not in ws_client.state:
-            await ws_client.connect(user=self.ms_user, password=self.ms_pass, loxone_url=self.ws_base_url, receive_updates=False)
+        if not await self._ensure_websocket():
+            logger.warning(
+                "Dropped %s (as %s)=%s: no websocket connection to the Miniserver",
+                topic, normalized_topic, value,
+            )
+            return
 
         try:
-            await ws_client.send_websocket_command(normalized_topic, str(value))
+            await loxwebsocket.send_websocket_command(normalized_topic, str(value))
             logger.debug("Sent %s (as %s)=%s to Miniserver successfully via WebSocket.", topic, normalized_topic, value)
             return 
         except Exception as e:
@@ -164,6 +219,15 @@ class HttpMiniserverHandler:
             return
 
         if self.use_websocket:
+            if not await self._ensure_websocket():
+                # Nothing retries these, so name what was lost. One line for the
+                # message instead of one per value - they share the connection,
+                # so they share its fate.
+                logger.warning(
+                    "Dropped %d value(s) from '%s': no websocket connection to the Miniserver",
+                    len(items), items[0][0],
+                )
+                return
             for topic, normalized_topic, value in items:
                 await self.send_to_miniserver(topic, normalized_topic, value)
             return

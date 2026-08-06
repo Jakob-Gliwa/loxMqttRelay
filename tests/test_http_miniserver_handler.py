@@ -402,3 +402,108 @@ async def test_empty_batch_does_nothing(
 ) -> None:
     await handler.send_batch_to_miniserver([])
     mock_session.return_value.__aenter__.return_value.get.assert_not_called()
+
+
+# Websocket connection handling. The connect used to sit outside the try block,
+# so a Miniserver that was not answering took the rest of the message with it -
+# and every message tried a fresh handshake while it stayed away.
+
+@pytest.mark.asyncio
+async def test_failed_connect_does_not_escape_the_batch(handler: HttpMiniserverHandler) -> None:
+    handler.use_websocket = True
+
+    with patch("loxmqttrelay.http_miniserver_handler.loxwebsocket") as ws:
+        ws.state = "CLOSED"
+        ws.connect = AsyncMock(side_effect=ConnectionError("miniserver down"))
+        ws.send_websocket_command = AsyncMock()
+
+        await handler.send_batch_to_miniserver(BATCH)
+
+        ws.send_websocket_command.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_batch_reports_what_the_failed_connect_cost(
+    handler: HttpMiniserverHandler
+) -> None:
+    handler.use_websocket = True
+
+    with patch("loxmqttrelay.http_miniserver_handler.loxwebsocket") as ws, \
+         patch("loxmqttrelay.http_miniserver_handler.logger") as log:
+        ws.state = "CLOSED"
+        ws.connect = AsyncMock(side_effect=ConnectionError("miniserver down"))
+
+        await handler.send_batch_to_miniserver(BATCH)
+
+        dropped = " ".join(str(arg) for arg in log.warning.call_args[0])
+        assert "3" in dropped and BATCH[0][0] in dropped
+
+
+@pytest.mark.asyncio
+async def test_a_failed_connect_is_not_retried_per_message(
+    handler: HttpMiniserverHandler
+) -> None:
+    """One handshake per retry window, not one per message.
+
+    A handshake costs a session key over HTTP, the upgrade, the key exchange
+    and a token; repeating that for every message while the Miniserver is away
+    is what turns an outage into a load problem.
+    """
+    handler.use_websocket = True
+
+    with patch("loxmqttrelay.http_miniserver_handler.loxwebsocket") as ws:
+        ws.state = "CLOSED"
+        ws.connect = AsyncMock(side_effect=ConnectionError("miniserver down"))
+
+        for _ in range(5):
+            await handler.send_batch_to_miniserver(BATCH)
+
+        ws.connect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_the_retry_window_expires(handler: HttpMiniserverHandler) -> None:
+    handler.use_websocket = True
+    handler.connect_retry_delay = 0.0
+
+    with patch("loxmqttrelay.http_miniserver_handler.loxwebsocket") as ws:
+        ws.state = "CLOSED"
+        ws.connect = AsyncMock(side_effect=ConnectionError("miniserver down"))
+
+        await handler.send_batch_to_miniserver(BATCH)
+        await handler.send_batch_to_miniserver(BATCH)
+
+        assert ws.connect.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_concurrent_messages_share_one_connect(handler: HttpMiniserverHandler) -> None:
+    handler.use_websocket = True
+
+    async def connect(**kwargs):
+        await asyncio.sleep(0)
+        ws.state = "CONNECTED"
+
+    with patch("loxmqttrelay.http_miniserver_handler.loxwebsocket") as ws:
+        ws.state = "CLOSED"
+        ws.connect = AsyncMock(side_effect=connect)
+        ws.send_websocket_command = AsyncMock()
+
+        await asyncio.gather(*(handler.send_batch_to_miniserver(BATCH) for _ in range(4)))
+
+        ws.connect.assert_awaited_once()
+        assert ws.send_websocket_command.await_count == 4 * len(BATCH)
+
+
+@pytest.mark.asyncio
+async def test_no_connect_while_the_library_reconnects(handler: HttpMiniserverHandler) -> None:
+    """A second handshake would race the reconnect instead of helping it."""
+    handler.use_websocket = True
+
+    with patch("loxmqttrelay.http_miniserver_handler.loxwebsocket") as ws:
+        ws.state = "RECONNECTING"
+        ws.connect = AsyncMock()
+
+        await handler.send_batch_to_miniserver(BATCH)
+
+        ws.connect.assert_not_called()

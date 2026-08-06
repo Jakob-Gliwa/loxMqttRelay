@@ -315,6 +315,13 @@ attempt when a working session drops, and a 5 minute interval once the broker
 has refused authentication ten times in a row. The relay resubscribes and
 republishes `<base_topic>status` = `Connected` after every reconnect.
 
+The other direction is no different. A value on its way to the Miniserver is
+not queued either: over websocket it is written to the socket and never
+acknowledged, over HTTP it is one request whose status code is logged. If the
+Miniserver cannot be reached, the values of that message are dropped with a log
+line and the relay waits 15 seconds before trying to open the connection again -
+see [Websocket Communication](#websocket-communication).
+
 If a command must not be lost, do not rely on the relay for it: the Miniserver
 should observe the resulting state (e.g. the device's own status topic) and
 repeat the command if the state does not follow.
@@ -391,18 +398,29 @@ The MQTT Relay supports secure websocket communication with the Miniserver:
 use_websocket = true
 ```
 
+This is the default, and the path the relay is built around: one connection
+carries every value, and its loss is what triggers the
+[whitelist resync](#automatic-resync-after-a-miniserver-restart).
+
 When websocket communication is enabled:
-- Secure encrypted communication using AES and RSA
-- Token-based authentication with automatic token refresh
-- Automatic reconnection handling
-- Keepalive mechanism to maintain connection (every 30 seconds)
+- Encrypted communication using AES and RSA
+- Token-based authentication, with the token refreshed before it expires
+- Automatic reconnection, retried every 15 seconds for as long as it takes
+- A keepalive every 60 seconds, so a dead connection is noticed without traffic
 - Support for both ws:// and wss:// (secure websocket) connections
 
-The websocket implementation provides:
-- More reliable and secure communication compared to HTTP
-- Real-time bidirectional communication
-- Automatic handling of connection issues
-- Support for both encrypted and unencrypted connections
+What it does not provide is a confirmation per value. A command is written to
+the socket and that is the end of it - the Miniserver does not answer it, and
+the relay only learns that something is wrong when the connection itself
+breaks. If the socket is down when a message arrives, the values from that
+message are dropped and logged, naming how many were lost and which topic they
+came from; the relay then waits 15 seconds before attempting another handshake,
+so an unreachable Miniserver does not turn into a handshake per message. See
+[Delivery Guarantees](#delivery-guarantees).
+
+The HTTP path is the opposite trade-off: a separate request per value, each
+answered with a status code the relay checks and logs, at the cost of a round
+trip - and, with authentication configured, credentials on every one of them.
 
 #### UDP Communication
 ```toml
