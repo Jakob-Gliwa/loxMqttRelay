@@ -240,5 +240,20 @@ def log_runtime_environment() -> None:
         miniserver_sync.ACTIVE_XML_PARSER,
         miniserver_sync.XML_PARSER_REASON,
     )
+    # The values the processor bakes in at construction. Reported here because a
+    # relay that silently ignored one of them is indistinguishable from a
+    # misconfigured one when reading a bug report.
+    logger.info(
+        "processing: expand_json=%s  convert_booleans=%s",
+        global_config.processing.expand_json,
+        global_config.processing.convert_booleans,
+    )
+    logger.info(
+        "topic filters: subscriptions=%d  subscription_filters=%d  do_not_forward=%d  whitelist=%d",
+        len(global_config.topics.subscriptions),
+        len(global_config.topics.subscription_filters),
+        len(global_config.topics.do_not_forward),
+        len(global_config.topics.topic_whitelist),
+    )
     logger.info("dependencies: %s", _dependency_versions())
     logger.info("--------------------------------------------")

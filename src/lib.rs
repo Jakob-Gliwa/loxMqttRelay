@@ -1,5 +1,6 @@
 use pyo3::{prelude::*, types::{PyFrozenSet, PyList, PyString}};
 use regex::Regex;
+use pyo3::exceptions::PyValueError;
 use pyo3::intern;
 
 use std::borrow::Cow;
@@ -368,17 +369,27 @@ impl<'a> Scan<'a> {
 }
 
 /// Read one leaf value and convert it exactly like the DOM path would.
-fn read_leaf<'a>(sc: &mut Scan<'a>) -> Option<Cow<'a, str>> {
+///
+/// `convert` mirrors `processing.convert_booleans`: with it off, strings are
+/// passed through untouched and JSON literals render the way `flatten_json`
+/// writes them, which is what the DOM path hands over when the flag is off.
+fn read_leaf<'a>(sc: &mut Scan<'a>, convert: bool) -> Option<Cow<'a, str>> {
     match sc.peek()? {
-        b'"' => sc.string().map(convert_bool_value),
+        b'"' => sc.string().map(|s| {
+            if convert {
+                convert_bool_value(s)
+            } else {
+                Cow::Borrowed(s)
+            }
+        }),
         // The plan expected a scalar but the document grew a container here.
         b'{' | b'[' => None,
         _ => match sc.scalar()? {
             // Numbers render as "1"/"0"/"12.5"; the boolean table maps those to
             // themselves, so it can be skipped.
             Scalar::Number(text) => number_value(text),
-            Scalar::True => Some(Cow::Borrowed("1")),
-            Scalar::False => Some(Cow::Borrowed("0")),
+            Scalar::True => Some(Cow::Borrowed(if convert { "1" } else { "true" })),
+            Scalar::False => Some(Cow::Borrowed(if convert { "0" } else { "false" })),
             Scalar::Null => Some(Cow::Borrowed("null")),
         },
     }
@@ -421,6 +432,7 @@ fn exec_node<'p, 'a>(
     node: &'p PlanNode,
     sc: &mut Scan<'a>,
     out: &mut [Option<Emitted<'p, 'a>>],
+    convert: bool,
 ) -> bool {
     match node {
         PlanNode::Emit {
@@ -428,7 +440,7 @@ fn exec_node<'p, 'a>(
             normalized,
             slot,
         } => {
-            let Some(value) = read_leaf(sc) else {
+            let Some(value) = read_leaf(sc, convert) else {
                 return false;
             };
             let Some(cell) = out.get_mut(*slot) else {
@@ -437,7 +449,7 @@ fn exec_node<'p, 'a>(
             *cell = Some((topic, normalized, value));
             true
         }
-        PlanNode::Drop => read_leaf(sc).is_some(),
+        PlanNode::Drop => read_leaf(sc, convert).is_some(),
         PlanNode::Object(fields) => {
             if !sc.eat(b'{') {
                 return false;
@@ -449,7 +461,7 @@ fn exec_node<'p, 'a>(
                 if sc.string() != Some(&**key) || !sc.eat(b':') {
                     return false;
                 }
-                if !exec_node(child, sc, out) {
+                if !exec_node(child, sc, out, convert) {
                     return false;
                 }
             }
@@ -463,7 +475,7 @@ fn exec_node<'p, 'a>(
                 if i > 0 && !sc.eat(b',') {
                     return false;
                 }
-                if !exec_node(child, sc, out) {
+                if !exec_node(child, sc, out, convert) {
                     return false;
                 }
             }
@@ -478,6 +490,33 @@ macro_rules! pyget {
         $( obj = obj.getattr(intern!($py, $attr))?; )*
         obj
     }};
+}
+
+/// Compile regex filters, refusing the whole set if one pattern is invalid.
+///
+/// Used wherever a filter list comes straight from the configuration: silently
+/// dropping a pattern there would hand the user a relay that forwards what they
+/// told it to hold back, so a typo has to surface as a startup error instead.
+fn compile_filters_strict(kind: &str, filters: &[String]) -> PyResult<Option<Regex>> {
+    if filters.is_empty() {
+        debug!("No {} filters configured.", kind);
+        return Ok(None);
+    }
+    for flt in filters {
+        if let Err(e) = Regex::new(flt) {
+            return Err(PyValueError::new_err(format!(
+                "Invalid '{}' pattern '{}': {}",
+                kind, flt, e
+            )));
+        }
+    }
+    let pattern = format!("({})", filters.join("|"));
+    Regex::new(&pattern).map(Some).map_err(|e| {
+        PyValueError::new_err(format!(
+            "Failed to compile combined '{}' pattern '{}': {}",
+            kind, pattern, e
+        ))
+    })
 }
 
 /// Private helper function to compile regex filters
@@ -543,6 +582,8 @@ pub struct MiniserverDataProcessor {
     // change re-execs the process), so the per-message hot path needs no getattr
     // back into Python for this flag.
     expand_json: bool,
+    #[pyo3(get)]
+    convert_booleans: bool,
 }
 
 #[pymethods]
@@ -565,6 +606,12 @@ impl MiniserverDataProcessor {
         let lru_size = NonZeroUsize::new(cache_size).unwrap();
         let base_topic: String = pyget!(global_config_py, py, "general", "base_topic").extract()?;
         let expand_json: bool = pyget!(global_config_py, py, "processing", "expand_json").extract()?;
+        let convert_booleans: bool = pyget!(global_config_py, py, "processing", "convert_booleans").extract()?;
+        // Configured filtering has to be live from the first message on: nothing
+        // else installs it later, and a topic that leaks once is already on a
+        // miniserver input.
+        let do_not_forward: Vec<String> = pyget!(global_config_py, py, "topics", "do_not_forward").extract()?;
+        let compiled_do_not_forward = compile_filters_strict("do_not_forward", &do_not_forward)?;
         let miniserver_startup_topic: String = topic_ns.bind(py).getattr(intern!(py, "MINISERVER_STARTUP_EVENT"))?.extract()?;
         let config_get_topic: String = topic_ns.bind(py).getattr(intern!(py, "CONFIG_GET"))?.extract()?;
         let config_response_topic: String = topic_ns.bind(py).getattr(intern!(py, "CONFIG_RESPONSE"))?.extract()?;
@@ -597,7 +644,7 @@ impl MiniserverDataProcessor {
 
         let processor = MiniserverDataProcessor {
             compiled_subscription_filter: compiled,
-            do_not_forward_patterns: None,
+            do_not_forward_patterns: compiled_do_not_forward,
             topic_whitelist,
             convert_bool_cache: Mutex::new(LruCache::new(lru_size)),
             normalize_topic_cache: Mutex::new(LruCache::new(lru_size)),
@@ -614,9 +661,16 @@ impl MiniserverDataProcessor {
             orjson_obj,
             base_topic:base_topic,
             expand_json,
+            convert_booleans,
         };
 
-  
+        info!(
+            "Processing configuration: expand_json={}, convert_booleans={}, do_not_forward={} pattern(s), topic_whitelist={} entry/entries",
+            processor.expand_json,
+            processor.convert_booleans,
+            do_not_forward.len(),
+            processor.topic_whitelist.len()
+        );
         debug!("MiniserverDataProcessor initialization complete");
         Ok(processor)
     }
@@ -637,14 +691,20 @@ impl MiniserverDataProcessor {
     }
 
     #[pyo3(text_signature = "(self, filters)")]
-    fn update_do_not_forward(&mut self, filters: Vec<String>) {
+    fn update_do_not_forward(&mut self, filters: Vec<String>) -> PyResult<()> {
         debug!("Updating do_not_forward filters: {:?}", filters);
-        self.do_not_forward_patterns = compile_filters(filters);
+        self.do_not_forward_patterns = compile_filters_strict("do_not_forward", &filters)?;
         self.invalidate_shapes();
+        Ok(())
     }
 
     
 
+    /// The keyword mapping itself, always applied.
+    ///
+    /// `processing.convert_booleans` decides whether the forwarding path calls
+    /// this at all; the mapping stays available on its own so both settings can
+    /// be described against the same reference.
     #[pyo3(text_signature = "(self, val)")]
     fn _convert_boolean(&self, val: &str) -> PyResult<Option<String>> {
         let mut cache = self.convert_bool_cache.lock().unwrap();
@@ -1015,7 +1075,7 @@ impl MiniserverDataProcessor {
         out.resize_with(shape.emits, || None);
 
         let mut sc = Scan::new(message.as_bytes());
-        if !exec_node(&shape.root, &mut sc, &mut out) || !sc.at_end() {
+        if !exec_node(&shape.root, &mut sc, &mut out, self.convert_booleans) || !sc.at_end() {
             return Ok(false);
         }
         if out.iter().any(|slot| slot.is_none()) {
@@ -1196,6 +1256,10 @@ impl MiniserverDataProcessor {
                     debug!("Topic '{}' filtered by do_not_forward", t);
                     continue;
                 }
+            }
+            if !self.convert_booleans {
+                list.append((t.as_str(), normalized.as_str(), v.as_str()))?;
+                continue;
             }
             // Deliberately the cached, allocating variant and not the plan
             // path's `convert_bool_value`: this route is the reference the

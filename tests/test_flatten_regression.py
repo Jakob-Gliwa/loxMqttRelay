@@ -51,6 +51,17 @@ def pairs():
     return {flag: fc.Pair(global_config, flag) for flag in (True, False)}
 
 
+@pytest.fixture(scope="module")
+def raw_pair():
+    """A plan/DOM pair built with ``processing.convert_booleans`` turned off.
+
+    Boolean handling is the one step the two routes each implement themselves,
+    so switching it off needs its own parity check rather than riding along on
+    the pairs above.
+    """
+    return fc.Pair(global_config, True, convert_booleans=False)
+
+
 @pytest.mark.parametrize("payload_name", sorted(PAYLOADS))
 @pytest.mark.asyncio
 async def test_plan_and_dom_agree(pairs, payload_name):
@@ -184,6 +195,33 @@ async def test_boolean_mapping_is_pinned(pairs):
     assert plan == dom
     assert [value for _, _, value in plan] == [
         pair.plan._convert_boolean(v) for v in raw
+    ]
+
+
+@pytest.mark.parametrize("payload_name", sorted(PAYLOADS))
+@pytest.mark.asyncio
+async def test_plan_and_dom_agree_without_boolean_conversion(raw_pair, payload_name):
+    raw_pair.apply(fc.SCENARIOS["plain"], None)
+    topic = fc.topic_for(payload_name)
+
+    for _ in ("cold", "warm"):
+        plan, dom = raw_pair.run(topic, PAYLOADS[payload_name])
+        assert plan == dom, f"{payload_name} diverged with conversion disabled"
+
+
+@pytest.mark.asyncio
+async def test_boolean_conversion_can_be_turned_off(raw_pair):
+    """Zigbee2MQTT-style ``on``/``off`` and JSON literals stay as sent."""
+    raw_pair.apply(fc.SCENARIOS["plain"], None)
+    payload = json.dumps(
+        {"a": "on", "b": "OFF", "c": True, "d": False, "e": "true", "f": 1, "g": "x"}
+    )
+
+    plan, dom = raw_pair.run("dev/raw_booleans", payload)
+
+    assert plan == dom
+    assert [value for _, _, value in plan] == [
+        "on", "OFF", "true", "false", "true", "1", "x",
     ]
 
 

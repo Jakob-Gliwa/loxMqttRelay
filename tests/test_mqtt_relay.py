@@ -165,6 +165,47 @@ async def test_whitelist_sync_on_websocket_reconnect(config_instance: Config, mo
             mock_sync.assert_called_once()
             assert global_config.topics.topic_whitelist == {"reconnect_topic"}
 
+def _forwarded_topics(handler: MagicMock) -> List[str]:
+    return [
+        item[0]
+        for call in handler.send_batch_to_miniserver.call_args_list
+        for item in call[0][0]
+    ]
+
+@pytest.mark.asyncio
+async def test_configured_do_not_forward_survives_startup_and_sync(config_instance: Config, mock_logger: MagicMock) -> None:
+    """Test: do_not_forward aus der Config greift ohne Zutun eines Mutators.
+
+    Der Miniserver-Sync tauscht danach die Whitelist aus - inklusive des
+    gesperrten Topics - und darf die Filter trotzdem nicht verlieren.
+    """
+    config_instance._config.topics.topic_whitelist = set()
+    config_instance._config.topics.do_not_forward = [r"^private\/.*"]
+
+    with patch('loxmqttrelay.main.http_miniserver_handler', new=MagicMock()) as handler:
+        relay = MQTTRelay()
+        processor = relay.miniserver_data_processor
+
+        processor.process_data("private/secret", "value")
+        processor.process_data("public/sensor", "value")
+        assert _forwarded_topics(handler) == ["public/sensor"]
+
+        with patch('loxmqttrelay.main.sync_miniserver_whitelist', return_value=["private_secret", "public_sensor"]):
+            await relay.handle_miniserver_sync()
+
+        handler.send_batch_to_miniserver.reset_mock()
+        processor.process_data("private/secret", "value")
+        processor.process_data("public/sensor", "value")
+        assert _forwarded_topics(handler) == ["public/sensor"]
+
+@pytest.mark.asyncio
+async def test_invalid_do_not_forward_pattern_fails_startup(config_instance: Config, mock_logger: MagicMock) -> None:
+    """Test: Ein kaputtes Regex bricht den Start mit klarer Meldung ab."""
+    config_instance._config.topics.do_not_forward = [r"(unclosed"]
+
+    with pytest.raises(ValueError, match="do_not_forward"):
+        MQTTRelay()
+
 @pytest.mark.asyncio
 async def test_no_sync_on_other_websocket_events(config_instance: Config, mock_logger: MagicMock) -> None:
     """Test: Nur RECONNECTED synct - der erste Connect hat das bereits erledigt."""

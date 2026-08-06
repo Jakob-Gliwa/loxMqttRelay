@@ -88,6 +88,34 @@ async def processor(config_instance):
     return test_processor.processor
 
 
+def build_processor(
+    config,
+    *,
+    expand_json=False,
+    convert_booleans=True,
+    do_not_forward=(),
+    topic_whitelist=(),
+):
+    """Build a processor the way production does: configure, then construct.
+
+    Everything the Rust side reads once is set on the config beforehand, so
+    these tests exercise the same wiring ``MQTTRelay.__init__`` uses instead of
+    reaching for the update_* mutators.
+    """
+    config.processing.expand_json = expand_json
+    config.processing.convert_booleans = convert_booleans
+    config.topics.do_not_forward = list(do_not_forward)
+    config.topics.topic_whitelist = set(topic_whitelist)
+    return MiniserverDataProcessor(
+        DummyTopicNS(),
+        config,
+        AsyncMock(),
+        MqttClient(config),
+        MagicMock(),
+        MagicMock(),
+    )
+
+
 def handed_over(http_handler):
     """The (topic, normalized_topic, value) triples the Rust side handed over.
 
@@ -297,6 +325,95 @@ async def test_process_data_with_do_not_forward(processor):
     processor.update_do_not_forward(dnf_filter)
     processor.process_data(topic, message)
     assert not handed_over(processor.http_handler_obj)
+
+
+@pytest.mark.parametrize("convert_booleans", [True, False])
+@pytest.mark.parametrize("value,mapped", [
+    ("on", "1"),
+    ("off", "0"),
+    ("true", "1"),
+    ("false", "0"),
+    ("ON", "1"),
+    ("1", "1"),
+    ("0", "0"),
+    ("23.5", "23.5"),
+    ("hello", "hello"),
+])
+@pytest.mark.asyncio
+async def test_convert_booleans_setting_decides_the_forwarded_value(
+    config_instance, convert_booleans, value, mapped
+):
+    """``processing.convert_booleans`` has to reach the forwarding path.
+
+    With the option off, a Zigbee2MQTT ``action`` of ``on``/``off`` must arrive
+    at the miniserver as sent - otherwise declarative action matching is
+    impossible.
+    """
+    processor = build_processor(config_instance, convert_booleans=convert_booleans)
+    processor.process_data("zigbee/switch/action", value)
+
+    expected = mapped if convert_booleans else value
+    assert [v for _, _, v in handed_over(processor.http_handler_obj)] == [expected]
+
+
+@pytest.mark.parametrize("convert_booleans,expected", [
+    (True, ["1", "0", "1", "0", "1"]),
+    (False, ["on", "off", "true", "false", "1"]),
+])
+@pytest.mark.asyncio
+async def test_convert_booleans_setting_applies_to_expanded_json(
+    config_instance, convert_booleans, expected
+):
+    processor = build_processor(
+        config_instance, expand_json=True, convert_booleans=convert_booleans
+    )
+    payload = '{"a":"on","b":"off","c":true,"d":false,"e":1}'
+    processor.process_data("zigbee/device", payload)
+
+    assert [v for _, _, v in handed_over(processor.http_handler_obj)] == expected
+
+
+@pytest.mark.parametrize("convert_booleans", [True, False])
+def test_effective_convert_booleans_is_readable(config_instance, convert_booleans):
+    """Startup diagnostics report this value, so it has to be observable."""
+    processor = build_processor(config_instance, convert_booleans=convert_booleans)
+    assert processor.convert_booleans is convert_booleans
+
+
+@pytest.mark.asyncio
+async def test_configured_do_not_forward_is_active_after_construction(config_instance):
+    """Regression: the patterns used to need a mutator call no one made."""
+    processor = build_processor(config_instance, do_not_forward=[r"^debug\/.*"])
+
+    assert processor.get_do_not_forward_patterns() == [r"^debug\/.*"]
+
+    processor.process_data("debug/sensor", "value")
+    assert not handed_over(processor.http_handler_obj)
+
+    processor.process_data("normal/sensor", "value")
+    assert [t for t, _, _ in handed_over(processor.http_handler_obj)] == ["normal/sensor"]
+
+
+@pytest.mark.asyncio
+async def test_whitelist_update_keeps_configured_do_not_forward(config_instance):
+    """The Miniserver sync replaces the whitelist and nothing else."""
+    processor = build_processor(config_instance, do_not_forward=[r"^debug\/.*"])
+    processor.update_topic_whitelist(["debug_sensor", "normal_sensor"])
+
+    processor.process_data("debug/sensor", "value")
+    processor.process_data("normal/sensor", "value")
+
+    assert [t for t, _, _ in handed_over(processor.http_handler_obj)] == ["normal/sensor"]
+
+
+def test_invalid_do_not_forward_pattern_fails_construction(config_instance):
+    with pytest.raises(ValueError, match="do_not_forward"):
+        build_processor(config_instance, do_not_forward=[r"^ok\/.*", r"(unclosed"])
+
+
+def test_invalid_do_not_forward_pattern_fails_update(processor):
+    with pytest.raises(ValueError, match="do_not_forward"):
+        processor.update_do_not_forward([r"(unclosed"])
 
 @pytest.mark.asyncio
 async def test_process_data_order_of_filters(config_instance, monkeypatch):

@@ -140,11 +140,17 @@ def derive_whitelist(mode: str | None, targets: list[str]) -> list[str] | None:
 # ---------------------------------------------------------------------------
 
 
-def make_processor(config, expand_json: bool, shape_cache: bool = True):
+def make_processor(
+    config,
+    expand_json: bool,
+    shape_cache: bool = True,
+    convert_booleans: bool = True,
+):
     """Build a processor with the config knobs the Rust side reads once."""
     from loxmqttrelay.compatible._loxmqttrelay import MiniserverDataProcessor, MqttClient
 
     config.processing.expand_json = expand_json
+    config.processing.convert_booleans = convert_booleans
     config.general.base_topic = BASE_TOPIC
     config.general.cache_size = 512
     config.topics.subscription_filters = []
@@ -173,9 +179,13 @@ class Pair:
     unchanged reference.
     """
 
-    def __init__(self, config, expand_json: bool):
-        self.plan, self.plan_rec = make_processor(config, expand_json, shape_cache=True)
-        self.dom, self.dom_rec = make_processor(config, expand_json, shape_cache=False)
+    def __init__(self, config, expand_json: bool, convert_booleans: bool = True):
+        self.plan, self.plan_rec = make_processor(
+            config, expand_json, shape_cache=True, convert_booleans=convert_booleans
+        )
+        self.dom, self.dom_rec = make_processor(
+            config, expand_json, shape_cache=False, convert_booleans=convert_booleans
+        )
 
     def apply(self, scenario: dict[str, Any], whitelist: list[str] | None):
         for processor in (self.plan, self.dom):

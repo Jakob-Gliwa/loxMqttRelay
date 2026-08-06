@@ -290,14 +290,28 @@ Specify topics that should not be forwarded to the miniserver:
 [topics]
 do_not_forward = ["internal/topic","private/data"]
 ```
-Attention: If Whitelist is defined doNotForward will be ignored
+These are regular expressions and are applied to the processed topic (after JSON
+flattening), so a single pattern can also drop individual values out of an
+expanded payload. They stay in effect alongside the whitelist: a topic that is
+whitelisted but matches `do_not_forward` is still dropped, and a whitelist synced
+from the Miniserver does not disable them. An invalid pattern aborts startup with
+an error naming the offending expression instead of being silently skipped.
 
 ### Data Processing Options
 ```toml
 [processing]
 expand_json = false // Expand JSON payloads into individual values
-convert_booleans = false // Convert boolean strings to actual boolean values
+convert_booleans = false // Map boolean-like strings to 1 / 0
 ```
+
+With `convert_booleans = true`, values such as `true`, `yes`, `on`, `enabled`,
+`enable`, `check`, `checked`, `select` and `selected` are forwarded as `1`, and
+`false`, `no`, `off`, `disabled` and `disable` as `0` (case-insensitive,
+surrounding whitespace ignored). JSON `true`/`false` are mapped the same way.
+
+With `convert_booleans = false`, values are forwarded exactly as received - which
+is what you want for payloads like the Zigbee2MQTT `action` field, where `on` and
+`off` are commands rather than states.
 
 ### Communication Protocols
 
