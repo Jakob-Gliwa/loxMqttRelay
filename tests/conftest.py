@@ -4,9 +4,21 @@ import pytest
 import pytest_asyncio
 import asyncio
 from loxmqttrelay.config import AppConfig, global_config
+from tests.harness.mock_miniserver import mock_miniserver
 
 # Add the src directory to Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
+
+
+@pytest.fixture
+def miniserver():
+    """A connected Miniserver stand-in in place of the real websocket.
+
+    For a Miniserver that is down, slow or refusing the handshake, drive
+    ``tests.harness.mock_miniserver.mock_miniserver`` directly.
+    """
+    with mock_miniserver(state="CONNECTED") as fake:
+        yield fake
 
 @pytest.fixture(autouse=True)
 def reset_global_config():

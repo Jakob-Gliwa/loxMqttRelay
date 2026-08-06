@@ -99,8 +99,8 @@ def _build_base_url(ip: str, port: int) -> str:
     Build the plain-HTTP base URL for the Miniserver filesystem API.
 
     The fsget/fslist endpoints are only served as plaintext (they cannot be
-    command-encrypted), so we always use http here, mirroring the URL handling
-    in http_miniserver_handler.
+    command-encrypted), so we always use http here - this is the one place the
+    relay still talks HTTP to the Miniserver; commands go over the websocket.
     """
     if port not in (80, 443):
         return f"http://{ip}:{port}"

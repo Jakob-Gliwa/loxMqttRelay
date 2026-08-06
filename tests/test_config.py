@@ -37,9 +37,7 @@ miniserver_ip = "192.168.1.100"
 miniserver_port = 8080
 miniserver_user = "ms_user"
 miniserver_pass = "ms_pass"
-miniserver_max_parallel_connections = 10
 sync_with_miniserver = false
-use_websocket = false
 
 [topics]
 subscriptions = ["topic1", "topic2"]
@@ -53,10 +51,6 @@ convert_booleans = false
 
 [udp]
 udp_in_port = 12345
-
-[debug]
-mock_ip = "127.0.0.1"
-enable_mock = true
 """
     config_path.write_text(test_config)
     return str(config_path)
@@ -93,9 +87,7 @@ def test_config_load(temp_config_file):
     assert config.miniserver.miniserver_port == 8080
     assert config.miniserver.miniserver_user == "ms_user"
     assert config.miniserver.miniserver_pass == "ms_pass"
-    assert config.miniserver.miniserver_max_parallel_connections == 10
     assert config.miniserver.sync_with_miniserver is False
-    assert config.miniserver.use_websocket is False
     
     # Topics Config Assertions
     assert config.topics.subscriptions == ["topic1", "topic2"]
@@ -110,10 +102,6 @@ def test_config_load(temp_config_file):
     
     # UDP Config Assertions
     assert config.udp.udp_in_port == 12345
-    
-    # Debug Config Assertions
-    assert config.debug.mock_ip == "127.0.0.1"
-    assert config.debug.enable_mock is True
 
 def test_config_missing_file(tmp_path):
     """Test loading configuration from a non-existent file"""
@@ -172,18 +160,18 @@ def test_every_problem_is_named_at_once(tmp_path, caplog):
     """Fixing a config one restart at a time is nobody's idea of a good time."""
     with pytest.raises(SystemExit):
         _load(tmp_path, """
+[general]
+cache_size = -1
+
 [broker]
 port = 70000
-
-[miniserver]
-miniserver_max_parallel_connections = 0
 
 [udp]
 udp_in_port = -1
 """)
 
     assert "'port' must be between 1 and 65535" in caplog.text
-    assert "'miniserver_max_parallel_connections' must be at least 1" in caplog.text
+    assert "'cache_size' cannot be negative" in caplog.text
     assert "'udp_in_port' must be between 1 and 65535" in caplog.text
 
 
@@ -455,10 +443,6 @@ def test_update_fields_accepts_lists_and_single_values(config_instance):
     ("miniserver_port", 8081),
     ("miniserver_user", "admin"),
     ("miniserver_pass", "secret"),
-    # Redirects the Miniserver target just as miniserver_ip does, so leaving
-    # these out would make the whole list bypassable in two lines.
-    ("mock_ip", "203.0.113.5"),
-    ("enable_mock", True),
 ])
 def test_update_fields_refuses_protected_fields(config_instance, field_name, value):
     """Endpoints and credentials must not be settable over MQTT."""

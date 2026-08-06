@@ -40,7 +40,7 @@ else:
 logger.info("Rust extension loaded: %s build", ACTIVE_RUST_BUILD)
 
 from loxmqttrelay.config import global_config
-from .config import AppConfig, GeneralConfig, TopicsConfig, ProcessingConfig, DebugConfig
+from .config import AppConfig, GeneralConfig, TopicsConfig, ProcessingConfig
 # Only expose the version number at package level
 # Let modules import directly from specific files to avoid circular dependencies
 

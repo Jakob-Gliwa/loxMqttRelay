@@ -16,7 +16,7 @@ The MQTT has been created with several goals in mind:
 
 To achieve these goals the MQTT Relay for Loxone uses more opionionted and minimalist approach:
 1. Inbound communication with the MQTT Relay is done exclusively via UDP, with a reduced featureset compared to Loxberry
-2. Outbound communication with the Miniserver is done exclusively via HTTP/Websocket (no UDP capability)
+2. Outbound communication with the Miniserver is done exclusively via Websocket (no UDP capability)
 3. Interaction with the MQTT Relay is done primarily via MQTT, configuration is done exclusively via the `config.toml` file, but no integrated functionality like MQTT-Finder, Incoming Message Overview 
 4. Except for boolean mapping and JSON flatteining, no transformers
 5. No provisioning of an integrated packaged MQTT broker
@@ -90,7 +90,7 @@ Optionally set -e LOG_LEVEL=DEBUG for more detailed logging
 ```mermaid
 graph LR
     MQTT[MQTT Broker] --> |MQTT|Relay[MQTT Relay]
-    Relay -->|HTTP/Websocket| Loxone[Loxone Miniserver]
+    Relay -->|Websocket| Loxone[Loxone Miniserver]
 ```
 #### MQTT Publish
 ```mermaid
@@ -260,6 +260,11 @@ Quoting a boolean or a number is now an error rather than a surprise.
 Fields the relay does not know are only warned about, not rejected, so a
 setting that disappears in an upgrade cannot lock you out of your own relay.
 
+That applies to `use_websocket`, `miniserver_max_parallel_connections` and the
+whole `[debug]` section, which went away with the HTTP path to the Miniserver.
+An older `config.toml` still starts; those entries are logged as unknown and
+ignored, and you can delete them at your convenience.
+
 ### Logging Configuration
 
 The logging level can be set in three ways, with the following priority (highest to lowest):
@@ -343,8 +348,7 @@ has refused authentication ten times in a row. The relay resubscribes and
 republishes `<base_topic>status` = `Connected` after every reconnect.
 
 The other direction is no different. A value on its way to the Miniserver is
-not queued either: over websocket it is written to the socket and never
-acknowledged, over HTTP it is one request whose status code is logged. If the
+not queued either: it is written to the websocket and never acknowledged. If the
 Miniserver cannot be reached, the values of that message are dropped with a log
 line and the relay waits 15 seconds before trying to open the connection again -
 see [Websocket Communication](#websocket-communication).
@@ -423,17 +427,24 @@ is what you want for payloads like the Zigbee2MQTT `action` field, where `on` an
 ### Communication Protocols
 
 #### Websocket Communication
-The MQTT Relay supports secure websocket communication with the Miniserver:
+
+Every value the relay forwards reaches the Miniserver over a single websocket
+connection. There is no second path - the plain HTTP option has been removed.
+
 ```toml
 [miniserver]
-use_websocket = true
+miniserver_ip = "192.168.X.X"
+miniserver_port = 80
+miniserver_user = "your-user"
+miniserver_pass = "your-password"
 ```
 
-This is the default, and the path the relay is built around: one connection
-carries every value, and its loss is what triggers the
+`miniserver_port` is the port of the websocket handshake as well; `443` switches
+it to a secure connection. The socket is opened lazily, with the first message
+forwarded to the Miniserver, and its loss is what triggers the
 [whitelist resync](#automatic-resync-after-a-miniserver-restart).
 
-When websocket communication is enabled:
+The connection provides:
 - Encrypted communication using AES and RSA
 - Token-based authentication, with the token refreshed before it expires
 - Automatic reconnection, retried every 15 seconds for as long as it takes
@@ -449,9 +460,9 @@ came from; the relay then waits 15 seconds before attempting another handshake,
 so an unreachable Miniserver does not turn into a handshake per message. See
 [Delivery Guarantees](#delivery-guarantees).
 
-The HTTP path is the opposite trade-off: a separate request per value, each
-answered with a status code the relay checks and logs, at the cost of a round
-trip - and, with authentication configured, credentials on every one of them.
+The one thing the relay still fetches over plain HTTP is the Miniserver's own
+configuration file, for the [whitelist sync](#automatic-configuration-sync) -
+those endpoints are not served over the websocket.
 
 #### UDP Communication
 ```toml
@@ -463,17 +474,6 @@ udp_allowed_sources = []
 Attention: Do not change `udp_in_port` if you run MQTT Relay from within Docker - use docker port mapping if you need another port
 
 `udp_source_filter_enabled` restricts incoming UDP to the Miniserver address plus any sender in `udp_allowed_sources`. See [Accepted senders](#accepted-senders) for details.
-
-#### HTTP Communication
-```toml
-[miniserver]
-miniserver_ip = "127.0.0.1"
-miniserver_port = 80
-miniserver_user = ""
-miniserver_pass = ""
-miniserver_max_parallel_connections = 5
-use_websocket = false
-```
 
 ## Dynamic Configuration Updates
 
@@ -491,11 +491,11 @@ Two things are refused:
   to the file. Since an update restarts the relay, an unusable value would
   otherwise leave it unable to start.
 - **Endpoints and credentials.** `host`, `port`, `user`, `password`,
-  `miniserver_ip`, `miniserver_port`, `miniserver_user`, `miniserver_pass`,
-  `mock_ip` and `enable_mock` cannot be set over MQTT. Their values are valid,
-  so no type check would catch them - but pointing the relay at another host
-  would make it authenticate there with your Miniserver credentials. Change
-  these in `config.toml` and restart.
+  `miniserver_ip`, `miniserver_port`, `miniserver_user` and `miniserver_pass`
+  cannot be set over MQTT. Their values are valid, so no type check would catch
+  them - but pointing the relay at another host would make it authenticate
+  there with your Miniserver credentials. Change these in `config.toml` and
+  restart.
 
 Everything else - subscriptions, filters, whitelist, `do_not_forward` and the
 processing options - can be changed remotely. Note that anyone able to publish
@@ -558,7 +558,6 @@ Example response on `config/response`:
     "expand_json": true,
     "convert_booleans": true,
     "udpinport": 11884,
-    "use_http": true,
     "miniserver_ip": "192.168.X.X"
 }
 ```
@@ -589,7 +588,7 @@ Caution: This function will assume that every Virtual Input is a possible target
 
 When the websocket connection to the Miniserver is lost and later re-established, the relay resyncs the whitelist automatically. A restart is the usual consequence of uploading a new configuration, so this keeps the whitelist in step without any extra setup.
 
-This requires `use_websocket = true` — a plain HTTP setup has no persistent connection whose loss could be observed. The websocket itself is opened as soon as the first message is forwarded to the Miniserver.
+The websocket itself is opened as soon as the first message is forwarded to the Miniserver, so the relay has to have something to forward before a loss can be observed at all.
 
 ### Trigger Manual Sync
 
@@ -597,29 +596,32 @@ Configure your Miniserver to publish any message to `{base_topic}/miniservereven
 
 ## Testing Setup
 
-For development and testing, you can point the MQTT Relay to a mock Miniserver (basically any HTTP server):
-```toml
-[debug]
-mock_ip = "192.168.X.X:<port>"
-enable_mock = true
+There is no mock Miniserver you can point the relay at any more. The websocket
+negotiates an AES/RSA session and a token, so a stand-in cannot be an arbitrary
+server behind an IP address - it has to take the place of the client library.
+
+For development there is a harness that does exactly that, in
+`tests/harness/mock_miniserver.py`. It records every command the relay would
+have sent and lets you steer the connection: refuse the handshake, delay it,
+drop the socket mid-test, announce a reconnect.
+
+```python
+from tests.harness.mock_miniserver import mock_miniserver
+
+with mock_miniserver(fail_connect=True) as miniserver:
+    ...
+    assert miniserver.commands == [("dev_sensor_temp", "21.5")]
 ```
 
-It is not possible to use the mock Miniserver functionality with the websocket communication.
-To make the mock Miniserver work, you need to set the `use_websocket` option to `false` in the `[miniserver]` section.
-```toml
-[miniserver]
-use_websocket = false
+A ready-made `miniserver` fixture (already connected) is available in every
+test. Worked examples live in `tests/harness/test_mock_miniserver_harness.py`.
+
+These tests carry the `harness` marker and a normal run skips them - they are
+there to be run deliberately:
+
+```bash
+uv run pytest -m harness
 ```
-
-The mock server needs to support the following endpoints:
-- `http://{mock_ip}/dev/sps/io/{topic}/{value}`
-- `http://{mock_ip}/dev/sps/io/{topic}/`
-
-The mock server needs to return a 200 status code for successful requests.
-
-The mock Miniserver functionality can be enabled/disabled without removing the IP configuration:
-- `mock_ip`: The IP address and port of your mock Miniserver
-- `enable_mock`: Enable or disable the mock Miniserver functionality (default: false)
 
 ## Note
 

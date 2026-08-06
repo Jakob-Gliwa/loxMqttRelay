@@ -56,6 +56,9 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --cov=loxmqttrelay --cov-report=term-missing"
+addopts = '-v --cov=loxmqttrelay --cov-report=term-missing -m "not harness"'
+markers = [
+    "harness: developer-driven tests against the mock Miniserver; run with -m harness",
+]
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"

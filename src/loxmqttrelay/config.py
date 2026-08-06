@@ -18,7 +18,6 @@ class ConfigSection(Enum):
     TOPICS = "topics"
     PROCESSING = "processing"
     UDP = "udp"
-    DEBUG = "debug"
 
 @dataclass
 class GeneralConfig:
@@ -40,9 +39,7 @@ class MiniserverConfig:
     miniserver_port: int = 80
     miniserver_user: str = ""
     miniserver_pass: str = ""
-    miniserver_max_parallel_connections: int = 5
     sync_with_miniserver: bool = True
-    use_websocket: bool = True
 
 @dataclass
 class TopicsConfig:
@@ -69,11 +66,6 @@ class UdpConfig:
     udp_allowed_sources: List[str] = field(default_factory=list)
 
 @dataclass
-class DebugConfig:
-    mock_ip: str = ""
-    enable_mock: bool = False
-
-@dataclass
 class AppConfig:
     general: GeneralConfig = field(default_factory=GeneralConfig)
     broker: BrokerConfig = field(default_factory=BrokerConfig)
@@ -81,7 +73,6 @@ class AppConfig:
     topics: TopicsConfig = field(default_factory=TopicsConfig)
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
     udp: UdpConfig = field(default_factory=UdpConfig)
-    debug: DebugConfig = field(default_factory=DebugConfig)
 
     def to_dict(self) -> Dict[str, Any]:
         """Sections as plain dicts, ready to serialize.
@@ -128,9 +119,7 @@ class ConfigError(Exception):
 #
 # Validation cannot catch these: another host is a perfectly valid value, and
 # after the restart that follows an update the relay would authenticate there
-# with the configured credentials. mock_ip/enable_mock are on the list because
-# they override the Miniserver target in http_miniserver_handler and add a UDP
-# destination in udp_handler - the same redirect under a different name.
+# with the configured credentials.
 REMOTE_PROTECTED_FIELDS = frozenset({
     "host",
     "port",
@@ -140,8 +129,6 @@ REMOTE_PROTECTED_FIELDS = frozenset({
     "miniserver_port",
     "miniserver_user",
     "miniserver_pass",
-    "mock_ip",
-    "enable_mock",
 })
 
 
@@ -209,8 +196,6 @@ def _value_problem(field_name: str, value: Any) -> Optional[str]:
     """
     if field_name in _PORT_FIELDS and not 1 <= value <= 65535:
         return f"'{field_name}' must be between 1 and 65535, got {value}"
-    if field_name == "miniserver_max_parallel_connections" and value < 1:
-        return f"'{field_name}' must be at least 1, got {value}"
     if field_name == "cache_size" and value < 0:
         return f"'{field_name}' cannot be negative, got {value}"
     if field_name == "log_level" and value.upper() not in _LOG_LEVELS:
@@ -487,10 +472,6 @@ class Config:
     @property
     def udp(self) -> UdpConfig:
         return self._config.udp
-
-    @property
-    def debug(self) -> DebugConfig:
-        return self._config.debug
 
     def get_safe_config(self) -> Dict[str, Any]:
         """Return a copy of the config with sensitive data removed."""

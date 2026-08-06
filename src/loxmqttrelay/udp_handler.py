@@ -252,8 +252,6 @@ def _resolve(host: str) -> Set[str]:
 def _allowed_source_addresses() -> Set[str]:
     """Numeric addresses that may send UDP datagrams to the relay."""
     hosts = [global_config.miniserver.miniserver_ip]
-    if global_config.debug.enable_mock and global_config.debug.mock_ip:
-        hosts.append(global_config.debug.mock_ip)
     hosts.extend(global_config.udp.udp_allowed_sources)
     addresses: Set[str] = set()
     for host in hosts:
