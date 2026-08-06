@@ -130,6 +130,10 @@ retain home/temperature 22.5
 home/kitchen/light off    # Will be published without retain
 ```
 
+A datagram is forwarded at QoS 0 and is dropped (with a log entry naming the
+sender and the reason) when the broker is not reachable - see
+[Delivery Guarantees](#delivery-guarantees).
+
 ### Accepted senders
 
 By default UDP datagrams are only accepted from the Miniserver configured as `miniserver_ip`; everything else is dropped and logged. Additional senders can be listed in `udp_allowed_sources`, and the whole check can be switched off with `udp_source_filter_enabled = false`:
@@ -265,6 +269,41 @@ The relay speaks MQTT 5 exclusively. Support for MQTT 3.1.x was removed together
 with the Python MQTT client; the client is now implemented in Rust on top of
 [mqtt-glide](https://crates.io/crates/mqtt-glide). MQTT 5 user properties are
 therefore always available (see [MQTT5 User Properties](#mqtt5-user-properties)).
+
+#### Delivery Guarantees
+
+**There are none while the broker is unreachable.** The relay subscribes and
+publishes at QoS 0 and keeps no outbox: a message that cannot be handed to the
+broker at that moment is dropped, not queued and not retried. This applies to
+everything the relay sends - UDP messages coming from the Miniserver, the
+`config/response` payload and the status topic alike.
+
+That is a deliberate choice for a home automation relay. A buffered `.../set`
+command that is delivered minutes later, after the broker comes back, switches a
+light or a blind at a time nobody asked for. A command that is lost is at least
+lost visibly - so instead of guarantees, the relay gives you a record of what it
+lost:
+
+- Every dropped publish is logged at WARNING with topic, payload size and the
+  reason - either `broker not connected` or `publish failed` together with the
+  transport error.
+- UDP messages that never made it are additionally logged on the way in, with
+  the sender address and the original payload.
+- An inbound message the relay fails to process is logged at ERROR with the
+  topic it arrived on. It is not retried either.
+- A subscription the broker rejects (`SUBACK` failure, typically an ACL) is
+  logged at ERROR. The relay stays up, but it will not receive anything on that
+  filter - so this is worth an alert.
+- Disconnects are logged with the reason reported by the broker or transport.
+
+Reconnects are intentionally simple: a fixed 15 second retry, plus one immediate
+attempt when a working session drops, and a 5 minute interval once the broker
+has refused authentication ten times in a row. The relay resubscribes and
+republishes `<base_topic>status` = `Connected` after every reconnect.
+
+If a command must not be lost, do not rely on the relay for it: the Miniserver
+should observe the resulting state (e.g. the device's own status topic) and
+repeat the command if the state does not follow.
 
 ### Topic Management
 

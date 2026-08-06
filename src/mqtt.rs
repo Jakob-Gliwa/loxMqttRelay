@@ -37,15 +37,44 @@ const KEEP_ALIVE: Duration = Duration::from_secs(60);
 const RECONNECT_DELAY: Duration = Duration::from_secs(15);
 const MAX_AUTH_BACKOFF: Duration = Duration::from_secs(300);
 
-/// How many disconnected publishes to remember for diagnostics.
+/// How many dropped publishes to remember for diagnostics.
 const UNDELIVERED_RING: usize = 32;
+
+/// Why a publish never reached the broker.
+///
+/// Everything here is a message that is gone: at QoS 0 with no local queue
+/// there is nothing to retry, so the only thing owed to the operator is a
+/// truthful account of what was lost and why.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropReason {
+    /// There was no broker connection when the publish was attempted.
+    Disconnected,
+    /// The connection existed, but the publish did not make it onto the wire.
+    SendFailed,
+}
+
+impl DropReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            DropReason::Disconnected => "broker not connected",
+            DropReason::SendFailed => "publish failed",
+        }
+    }
+}
+
+/// A publish that was lost, kept for diagnostics.
+struct Undelivered {
+    topic: String,
+    payload: Vec<u8>,
+    reason: DropReason,
+}
 
 /// Connection state shared between the Python-facing [`MqttClient`] and
 /// [`MiniserverDataProcessor`], which answers `config/get` without a detour
 /// through Python.
 pub struct MqttShared {
     client: ArcSwapOption<GlideClient>,
-    undelivered: Mutex<VecDeque<(String, Vec<u8>)>>,
+    undelivered: Mutex<VecDeque<Undelivered>>,
 }
 
 impl MqttShared {
@@ -60,30 +89,52 @@ impl MqttShared {
         self.client.load_full()
     }
 
-    /// Records a publish that had nowhere to go. The message is dropped either
-    /// way, matching the previous gmqtt behaviour; the ring only makes the loss
-    /// observable.
-    fn record_undelivered(&self, topic: &str, payload: &[u8]) {
+    /// Logs and remembers a publish that was lost.
+    ///
+    /// `detail` carries the broker/transport error where there is one; the
+    /// reason alone would not tell an operator whether to look at the network
+    /// or at the broker.
+    fn record_drop(&self, topic: &str, payload: &[u8], reason: DropReason, detail: Option<&str>) {
+        match detail {
+            Some(detail) => warn!(
+                "Dropped MQTT publish to '{}' ({} bytes): {} - {}",
+                topic,
+                payload.len(),
+                reason.as_str(),
+                detail
+            ),
+            None => warn!(
+                "Dropped MQTT publish to '{}' ({} bytes): {}",
+                topic,
+                payload.len(),
+                reason.as_str()
+            ),
+        }
+
         let Ok(mut ring) = self.undelivered.lock() else {
             return;
         };
         if ring.len() >= UNDELIVERED_RING {
             ring.pop_front();
         }
-        ring.push_back((topic.to_owned(), payload.to_vec()));
+        ring.push_back(Undelivered {
+            topic: topic.to_owned(),
+            payload: payload.to_vec(),
+            reason,
+        });
     }
 
     async fn publish_on(
         client: &GlideClient,
-        topic: String,
-        payload: Vec<u8>,
+        topic: &str,
+        payload: &[u8],
         retain: bool,
         user_properties: Vec<(String, String)>,
     ) -> Result<(), AppError> {
         let mut publish = client
             .publish_with()
-            .topic(topic)
-            .payload(payload)
+            .topic(topic.to_owned())
+            .payload(payload.to_vec())
             .qos(QoS::AtMostOnce)
             .retain(retain);
         for (key, value) in user_properties {
@@ -92,34 +143,41 @@ impl MqttShared {
         publish.send().await
     }
 
+    /// Publishes, or reports why the message was lost. Never fails silently.
     async fn publish(
         &self,
         topic: String,
         payload: Vec<u8>,
         retain: bool,
         user_properties: Vec<(String, String)>,
-    ) -> Result<(), AppError> {
+    ) -> Option<DropReason> {
         let Some(client) = self.client() else {
-            warn!("MQTT publish without connection, dropping: {topic}");
-            self.record_undelivered(&topic, &payload);
-            return Ok(());
+            self.record_drop(&topic, &payload, DropReason::Disconnected, None);
+            return Some(DropReason::Disconnected);
         };
-        Self::publish_on(&client, topic, payload, retain, user_properties).await
+        match Self::publish_on(&client, &topic, &payload, retain, user_properties).await {
+            Ok(()) => None,
+            Err(e) => {
+                self.record_drop(&topic, &payload, DropReason::SendFailed, Some(&e.to_string()));
+                Some(DropReason::SendFailed)
+            }
+        }
     }
 
     /// Fire-and-forget publish for callers that hold the GIL and must not await.
     ///
     /// The disconnected case is settled here rather than in the spawned task, so
     /// the drop is visible to the caller as soon as this returns.
-    pub(crate) fn publish_detached(&self, topic: String, payload: Vec<u8>) {
+    pub(crate) fn publish_detached(self: &Arc<Self>, topic: String, payload: Vec<u8>) {
         let Some(client) = self.client() else {
-            warn!("MQTT publish without connection, dropping: {topic}");
-            self.record_undelivered(&topic, &payload);
+            self.record_drop(&topic, &payload, DropReason::Disconnected, None);
             return;
         };
+        let shared = Arc::clone(self);
         get_runtime().spawn(async move {
-            if let Err(e) = Self::publish_on(&client, topic, payload, false, Vec::new()).await {
-                error!("MQTT publish failed: {e}");
+            let result = Self::publish_on(&client, &topic, &payload, false, Vec::new()).await;
+            if let Err(e) = result {
+                shared.record_drop(&topic, &payload, DropReason::SendFailed, Some(&e.to_string()));
             }
         });
     }
@@ -141,7 +199,10 @@ impl LifecycleHook for ConnectSignal {
                 self.notify.notify_one();
             }
             SessionPhase::Disconnected(outcome) => {
-                warn!("MQTT disconnected: {outcome:?}");
+                warn!(
+                    "MQTT disconnected: {outcome:?} - publishes are dropped while there is no \
+                     connection"
+                );
             }
             SessionPhase::NeverConnected => {}
         }
@@ -186,7 +247,13 @@ async fn resubscribe_loop(
             Ok(reasons) => {
                 for (topic, reason) in topics.iter().zip(reasons) {
                     if !is_granted(reason) {
-                        error!("Subscription to '{topic}' rejected: {reason:?}");
+                        // Nothing arriving on this filter is a silent hole
+                        // otherwise: the relay looks healthy and simply never
+                        // sees those messages.
+                        error!(
+                            "Broker rejected subscription to '{topic}': {reason:?} - no messages \
+                             will be received on it"
+                        );
                     }
                 }
                 // Only arm the fast reconnect retry once the session is really
@@ -194,17 +261,16 @@ async fn resubscribe_loop(
                 reconnect.mark_live();
             }
             Err(e) => {
-                error!("Subscribe failed: {e}");
+                error!(
+                    "Subscribe failed: {e} - no messages will be received until the next reconnect"
+                );
                 continue;
             }
         }
 
-        if let Err(e) = shared
+        shared
             .publish(status_topic.clone(), b"Connected".to_vec(), false, Vec::new())
-            .await
-        {
-            warn!("Failed to publish connection status: {e}");
-        }
+            .await;
     }
 }
 
@@ -220,12 +286,15 @@ async fn ingress_worker(
     processor: Py<MiniserverDataProcessor>,
 ) {
     while let Some(message) = rx.recv().await {
+        // ByteString is refcounted, so keeping the topic for the error branch
+        // costs an atomic rather than a second allocation per message.
+        let received_on = message.topic.clone();
         let topic = String::from(message.topic);
         let payload = message.payload.to_vec();
         Python::attach(|py| {
             let bound = processor.bind(py);
             if let Err(e) = bound.borrow().handle_mqtt_message(py, topic, payload) {
-                error!("handle_mqtt_message failed: {e}");
+                error!("Dropped inbound message on '{received_on}': {e}");
             }
         });
     }
@@ -367,6 +436,12 @@ impl MqttClient {
         })
     }
 
+    /// Publishes at QoS 0 and reports the outcome.
+    ///
+    /// Returns `None` when the message was handed to the broker connection, or
+    /// the reason it was dropped. Delivery problems are reported this way
+    /// rather than raised: the UDP path publishes from a detached task, where
+    /// an exception would only surface as an unretrieved task error.
     #[pyo3(signature = (topic, message, retain=false, user_properties=None))]
     #[pyo3(text_signature = "(self, topic, message, retain=False, user_properties=None)")]
     fn publish<'py>(
@@ -389,10 +464,10 @@ impl MqttClient {
         let properties = user_properties.unwrap_or_default();
 
         future_into_py(py, async move {
-            shared
+            Ok(shared
                 .publish(topic, payload, retain, properties)
                 .await
-                .map_err(|e| PyRuntimeError::new_err(format!("MQTT publish failed: {e}")))
+                .map(DropReason::as_str))
         })
     }
 
@@ -403,12 +478,9 @@ impl MqttClient {
 
         future_into_py(py, async move {
             if let Some(client) = shared.client() {
-                if let Err(e) = shared
+                shared
                     .publish(status_topic, b"Disconnecting".to_vec(), false, Vec::new())
-                    .await
-                {
-                    warn!("Failed to publish disconnect status: {e}");
-                }
+                    .await;
                 if let Err(e) = client.shutdown().await {
                     warn!("Error during MQTT shutdown: {e}");
                 }
@@ -418,15 +490,21 @@ impl MqttClient {
         })
     }
 
-    /// Drains publishes that were attempted while disconnected.
+    /// Drains the last dropped publishes as `(topic, payload, reason)`.
     #[pyo3(text_signature = "(self)")]
-    fn take_undelivered(&self, py: Python<'_>) -> PyResult<Vec<(String, Py<PyBytes>)>> {
+    fn take_undelivered(&self, py: Python<'_>) -> PyResult<Vec<(String, Py<PyBytes>, &'static str)>> {
         let Ok(mut ring) = self.shared.undelivered.lock() else {
             return Ok(Vec::new());
         };
         Ok(ring
             .drain(..)
-            .map(|(topic, payload)| (topic, PyBytes::new(py, &payload).unbind()))
+            .map(|entry| {
+                (
+                    entry.topic,
+                    PyBytes::new(py, &entry.payload).unbind(),
+                    entry.reason.as_str(),
+                )
+            })
             .collect())
     }
 }

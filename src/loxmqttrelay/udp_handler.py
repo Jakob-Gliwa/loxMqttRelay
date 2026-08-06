@@ -207,7 +207,14 @@ async def handle_udp_message(mqtt_client, udpmsg: str, addr) -> None:
         "Publishing%s: '%s'='%s' properties=%s",
         ' (retain)' if retain else '', topic, message, user_properties,
     )
-    await mqtt_client.publish(topic, message, retain, user_properties)
+    drop_reason = await mqtt_client.publish(topic, message, retain, user_properties)
+    if drop_reason:
+        # The datagram is gone: QoS 0, no local queue, nothing to retry. Say so
+        # on the way in, where the sender and the payload are still known.
+        logger.warning(
+            "UDP message from %s was not forwarded to MQTT (%s): '%s'='%s'",
+            addr, drop_reason, topic, message,
+        )
 
 
 def _as_bool(value: Any, field_name: str, default: bool) -> bool:

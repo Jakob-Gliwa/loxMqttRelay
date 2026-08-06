@@ -140,7 +140,8 @@ def test_parse_udp_message_mqtt5(udp_message, expected):
 @pytest.fixture
 def mock_mqtt_client():
     mock_client = AsyncMock()
-    mock_client.publish = AsyncMock()
+    # publish returns the drop reason, so None means "handed to the broker"
+    mock_client.publish = AsyncMock(return_value=None)
     return mock_client
 
 
@@ -260,6 +261,40 @@ async def test_handle_udp_message_retain_with_properties(mock_mqtt_client):
         True,
         [("origin", "ms1")]
     )
+
+
+@pytest.mark.asyncio
+async def test_handle_udp_message_logs_dropped_publish(mock_mqtt_client):
+    """A datagram that never reaches the broker must not pass unnoticed.
+
+    Nothing retries it, so the log line is the only trace left of the command
+    the Miniserver sent.
+    """
+    mock_mqtt_client.publish = AsyncMock(return_value="broker not connected")
+
+    with patch('loxmqttrelay.udp_handler.logger') as mock_logger:
+        await handle_udp_message(
+            mock_mqtt_client,
+            "publish test/topic test message",
+            ("127.0.0.1", 1234)
+        )
+
+    mock_logger.warning.assert_called_once()
+    logged = " ".join(str(arg) for arg in mock_logger.warning.call_args[0])
+    assert "broker not connected" in logged
+    assert "test/topic" in logged
+
+
+@pytest.mark.asyncio
+async def test_handle_udp_message_stays_quiet_when_published(mock_mqtt_client):
+    with patch('loxmqttrelay.udp_handler.logger') as mock_logger:
+        await handle_udp_message(
+            mock_mqtt_client,
+            "publish test/topic test message",
+            ("127.0.0.1", 1234)
+        )
+
+    mock_logger.warning.assert_not_called()
 
 
 @pytest.mark.asyncio

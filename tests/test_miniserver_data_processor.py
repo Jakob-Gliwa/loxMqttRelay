@@ -877,9 +877,10 @@ class TestConfigControlTopics:
         ctx.relay_main.miniserver_data_processor.global_config.get_safe_config.assert_called_once()
         ctx.orjson.dumps.assert_called_once()
         # The client is not connected, so the publish lands in the undelivered
-        # ring - which is where the target topic becomes observable.
+        # ring - which is where the target topic becomes observable, together
+        # with the reason the response never went out.
         assert ctx.mqtt_client.take_undelivered() == [
-            (ctx.topics.CONFIG_RESPONSE, b'{"general": {}}')
+            (ctx.topics.CONFIG_RESPONSE, b'{"general": {}}', "broker not connected")
         ]
         # config/get must never restart the relay
         ctx.relay_main.restart_relay.assert_not_called()
