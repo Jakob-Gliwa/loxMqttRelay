@@ -954,6 +954,21 @@ class TestConfigControlTopics:
         assert ctx.mqtt_client.take_undelivered() == []
         ctx.http_handler.send_batch_to_miniserver.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_unknown_topic_under_base_topic_still_takes_data_path(self, ctx):
+        """A topic under base_topic that is not one of the known control
+        topics must not be silently dropped - it has to reach process_data
+        just like any other data topic. Routing used to be gated by a plain
+        `topic.starts_with(base_topic)` check, so e.g. "myrelay/sensor/x"
+        matched the prefix but no `if`/`else if` branch and fell through to
+        nothing at all.
+        """
+        ctx.processor.handle_mqtt_message("myrelay/sensor/temperature", b"21.5")
+        ctx.relay_main.restart_relay.assert_not_called()
+        ctx.relay_main.schedule_miniserver_sync.assert_not_called()
+        assert ctx.mqtt_client.take_undelivered() == []
+        ctx.http_handler.send_batch_to_miniserver.assert_called_once()
+
     def test_data_path_errors_propagate(self, ctx):
         """process_data failures must surface so ingress_worker can log them.
 

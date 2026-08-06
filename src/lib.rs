@@ -547,7 +547,6 @@ pub struct MiniserverDataProcessor {
     http_handler_obj: Py<PyAny>,
     orjson_obj: Py<PyAny>,
     mqtt_topics: Option<MqttTopics>,
-    base_topic: String,
     // Cached once at construction. Config is immutable between restarts (a config
     // change re-execs the process), so the per-message hot path needs no getattr
     // back into Python for this flag.
@@ -579,7 +578,6 @@ impl MiniserverDataProcessor {
             pyget!(global_config_py, py, "general", "cache_size").extract()? 
         };
         let lru_size = NonZeroUsize::new(cache_size).unwrap();
-        let base_topic: String = pyget!(global_config_py, py, "general", "base_topic").extract()?;
         let expand_json: bool = pyget!(global_config_py, py, "processing", "expand_json").extract()?;
         let convert_booleans: bool = pyget!(global_config_py, py, "processing", "convert_booleans").extract()?;
         // Configured filtering has to be live from the first message on: nothing
@@ -634,7 +632,6 @@ impl MiniserverDataProcessor {
             mqtt_shared: mqtt_client.shared(),
             http_handler_obj,
             orjson_obj,
-            base_topic:base_topic,
             expand_json,
             convert_booleans,
         };
@@ -828,65 +825,70 @@ impl MiniserverDataProcessor {
             error!("mqtt_topics was never initialized!");
             return Ok(()); 
         };
-        if topic.starts_with(&self.base_topic) {
-        // Match the topic to whichever action it needs
-            if topic == topics.miniserver_startup_topic {
-                if pyget!(self.global_config, py, "miniserver", "sync_with_miniserver").extract::<bool>()? {
-                    info!("Miniserver startup detected, resyncing whitelist (from Rust)");
-                    let _ = self.relay_main_obj.bind(py).call_method0("schedule_miniserver_sync")?;
-                }
-            }
-            else if topic == topics.config_get_topic {
-                // global_config.get_safe_config -> orjson.dumps -> publish
-                let global_config_py = self
-                    .relay_main_obj
-                    .bind(py)
-                    .getattr(intern!(py, "miniserver_data_processor"))?
-                    .getattr(intern!(py, "global_config"))?;
-                let safe_cfg = global_config_py.call_method0("get_safe_config")?;
-                let serialized = self.orjson_obj.bind(py).call_method1("dumps", (safe_cfg,))?;
-                self.mqtt_shared.publish_detached(
-                    topics.config_response_topic.clone(),
-                    serialized.extract::<Vec<u8>>()?,
-                );
-            }
-            else if topic == topics.config_set_topic || topic == topics.config_add_topic || topic == topics.config_remove_topic {
-                let update_mode = if topic == topics.config_set_topic {
-                    "set"
-                } else if topic == topics.config_add_topic {
-                    "add"
-                } else {
-                    "remove"
-                };
-                let load_res = self.orjson_obj.bind(py).call_method1("loads", (message.as_str(),));
-                match load_res {
-                    Ok(py_obj) => {
-                        let global_config_py = self
-                            .relay_main_obj
-                            .bind(py)
-                            .getattr(intern!(py, "miniserver_data_processor"))?
-                            .getattr(intern!(py, "global_config"))?;
-                        let update_res = global_config_py.call_method1("update_fields", (py_obj, update_mode));
-                        if let Err(e) = update_res {
-                            error!("Error updating configuration: {:?}", e);
-                        } else {
-                            info!("Configuration updated via MQTT. Restarting program (from Rust).");
-                            let _ = self.relay_main_obj.bind(py).call_method0("restart_relay");
-                        }
-                    },
-                    Err(e) => {
-                        error!("Invalid JSON format in MQTT message: {:?}", e);
-                    }
-                }
-            }
-            else if topic == topics.config_update_topic || topic == topics.config_restart_topic {
-                info!("Reloading configuration. Restarting program (from Rust).");
-                let _ = self.relay_main_obj.bind(py).call_method0("restart_relay");
+        // Matched exactly against the known control topics rather than gated by
+        // a `starts_with(base_topic)` prefix check: the prefix alone does not
+        // identify a control topic, so anything under base_topic that is not
+        // one of the cases below used to be silently dropped instead of
+        // reaching process_data - a real risk with an empty/short base_topic
+        // or data subscriptions that happen to live under it.
+        if topic == topics.miniserver_startup_topic {
+            if pyget!(self.global_config, py, "miniserver", "sync_with_miniserver").extract::<bool>()? {
+                info!("Miniserver startup detected, resyncing whitelist (from Rust)");
+                let _ = self.relay_main_obj.bind(py).call_method0("schedule_miniserver_sync")?;
             }
         }
+        else if topic == topics.config_get_topic {
+            // global_config.get_safe_config -> orjson.dumps -> publish
+            let global_config_py = self
+                .relay_main_obj
+                .bind(py)
+                .getattr(intern!(py, "miniserver_data_processor"))?
+                .getattr(intern!(py, "global_config"))?;
+            let safe_cfg = global_config_py.call_method0("get_safe_config")?;
+            let serialized = self.orjson_obj.bind(py).call_method1("dumps", (safe_cfg,))?;
+            self.mqtt_shared.publish_detached(
+                topics.config_response_topic.clone(),
+                serialized.extract::<Vec<u8>>()?,
+            );
+        }
+        else if topic == topics.config_set_topic || topic == topics.config_add_topic || topic == topics.config_remove_topic {
+            let update_mode = if topic == topics.config_set_topic {
+                "set"
+            } else if topic == topics.config_add_topic {
+                "add"
+            } else {
+                "remove"
+            };
+            let load_res = self.orjson_obj.bind(py).call_method1("loads", (message.as_str(),));
+            match load_res {
+                Ok(py_obj) => {
+                    let global_config_py = self
+                        .relay_main_obj
+                        .bind(py)
+                        .getattr(intern!(py, "miniserver_data_processor"))?
+                        .getattr(intern!(py, "global_config"))?;
+                    let update_res = global_config_py.call_method1("update_fields", (py_obj, update_mode));
+                    if let Err(e) = update_res {
+                        error!("Error updating configuration: {:?}", e);
+                    } else {
+                        info!("Configuration updated via MQTT. Restarting program (from Rust).");
+                        let _ = self.relay_main_obj.bind(py).call_method0("restart_relay");
+                    }
+                },
+                Err(e) => {
+                    error!("Invalid JSON format in MQTT message: {:?}", e);
+                }
+            }
+        }
+        else if topic == topics.config_update_topic || topic == topics.config_restart_topic {
+            info!("Reloading configuration. Restarting program (from Rust).");
+            let _ = self.relay_main_obj.bind(py).call_method0("restart_relay");
+        }
         else {
-            // Propagate so ingress_worker can log the topic and reason; a
-            // discarded Err here used to leave those failures silent.
+            // Everything else takes the normal data path, whether or not it
+            // happens to live under base_topic. Propagated so ingress_worker
+            // can log the topic and reason; a discarded Err here used to leave
+            // those failures silent.
             self.process_data(py, &topic, &message)?;
         }
 
