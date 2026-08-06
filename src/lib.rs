@@ -129,9 +129,8 @@ fn convert_bool_value(val: &str) -> Cow<'_, str> {
         for (slot, b) in buf.iter_mut().zip(bytes) {
             *slot = b.to_ascii_lowercase();
         }
-        if let Some(mapped) = std::str::from_utf8(&buf[..bytes.len()])
-            .ok()
-            .and_then(convert_boolean_str)
+        if let Ok(s) = std::str::from_utf8(&buf[..bytes.len()])
+            && let Some(mapped) = convert_boolean_str(s)
         {
             return Cow::Borrowed(mapped);
         }
@@ -722,12 +721,7 @@ impl MiniserverDataProcessor {
             return Ok(set.into());
         }
         match serde_json::from_str::<Value>(val) {
-            Ok(json_val) => {
-                if !json_val.is_object() {
-                    let tuple = (topic.to_string(), val.to_string());
-                    let set = PyFrozenSet::new(py, &[tuple])?;
-                    return Ok(set.into());
-                }
+            Ok(json_val) if json_val.is_object() => {
                 let mut flattened = Vec::new();
                 flatten_json(&json_val, "", &mut flattened);
                 let results: Vec<(String, String)> = flattened
@@ -737,7 +731,7 @@ impl MiniserverDataProcessor {
                 let set = PyFrozenSet::new(py, &results)?;
                 Ok(set.into())
             }
-            Err(_) => {
+            _ => {
                 let tuple = (topic.to_string(), val.to_string());
                 let set = PyFrozenSet::new(py, &[tuple])?;
                 Ok(set.into())
@@ -761,11 +755,11 @@ impl MiniserverDataProcessor {
         debug!("Processing data - topic: {}, message: {}", topic, message);
 
         // subscription filter (on original topic)
-        if let Some(ref regex) = self.compiled_subscription_filter {
-            if regex.is_match(topic) {
-                debug!("Topic '{}' filtered by subscription filter", topic);
-                return Ok(());
-            }
+        if let Some(ref regex) = self.compiled_subscription_filter
+            && regex.is_match(topic)
+        {
+            debug!("Topic '{}' filtered by subscription filter", topic);
+            return Ok(());
         }
 
         let batch = self.build_batch(py, topic, message)?;
@@ -902,22 +896,10 @@ impl MiniserverDataProcessor {
 
     #[pyo3(text_signature = "(self)")]
     fn get_do_not_forward_patterns(&self) -> Vec<String> {
-        if let Some(ref regex) = self.do_not_forward_patterns {
-            // Convert the regex pattern back to individual patterns by:
-            // 1. Remove the outer parentheses
-            // 2. Split on the '|' character
-            let pattern = regex.as_str();
-            if pattern.starts_with('(') && pattern.ends_with(')') {
-                pattern[1..pattern.len()-1]
-                    .split('|')
-                    .map(String::from)
-                    .collect()
-            } else {
-                vec![pattern.to_string()]
-            }
-        } else {
-            Vec::new()
-        }
+        self.do_not_forward_patterns
+            .as_ref()
+            .map(split_combined_pattern)
+            .unwrap_or_default()
     }
 
     /// Route every message through the DOM path, bypassing learned plans.
@@ -952,24 +934,24 @@ impl MiniserverDataProcessor {
 
     #[pyo3(text_signature = "(self)")]
     fn get_subscription_filters(&self) -> Vec<String> {
-        if let Some(ref regex) = self.compiled_subscription_filter {
-            // Convert the regex pattern back to individual patterns by:
-            // 1. Remove the outer parentheses
-            // 2. Split on the '|' character
-            let pattern = regex.as_str();
-            if pattern.starts_with('(') && pattern.ends_with(')') {
-                pattern[1..pattern.len()-1]
-                    .split('|')
-                    .map(String::from)
-                    .collect()
-            } else {
-                vec![pattern.to_string()]
-            }
-        } else {
-            Vec::new()
-        }
+        self.compiled_subscription_filter
+            .as_ref()
+            .map(split_combined_pattern)
+            .unwrap_or_default()
     }
 
+}
+
+/// Undo `compile_filters_strict`'s `(a|b|c)` wrapping for the Python getters.
+fn split_combined_pattern(regex: &Regex) -> Vec<String> {
+    let pattern = regex.as_str();
+    if let Some(inner) = pattern.strip_prefix('(')
+        && let Some(inner) = inner.strip_suffix(')')
+    {
+        inner.split('|').map(String::from).collect()
+    } else {
+        vec![pattern.to_string()]
+    }
 }
 
 /// Internals that are not part of the Python surface.
@@ -1016,10 +998,12 @@ impl MiniserverDataProcessor {
             let mut store = self.shape_cache.lock().unwrap();
             store.plans.get(topic).map(Arc::clone)
         };
-        if let Some(shape) = cached {
-            if self.emit_shape(py, &shape, message, list)? {
-                return Ok(true);
-            }
+        if let Some(ref shape) = cached
+            && self.emit_shape(py, shape, message, list)?
+        {
+            return Ok(true);
+        }
+        if cached.is_some() {
             debug!("Shape plan for '{}' no longer matches, relearning", topic);
         }
 
@@ -1172,15 +1156,15 @@ impl MiniserverDataProcessor {
         if !self.topic_whitelist.is_empty() && !self.topic_whitelist.contains(&normalized) {
             return PlanNode::Drop;
         }
-        if let Some(ref regex) = self.compiled_subscription_filter {
-            if regex.is_match(full_topic) {
-                return PlanNode::Drop;
-            }
+        if let Some(ref regex) = self.compiled_subscription_filter
+            && regex.is_match(full_topic)
+        {
+            return PlanNode::Drop;
         }
-        if let Some(ref regex) = self.do_not_forward_patterns {
-            if regex.is_match(full_topic) {
-                return PlanNode::Drop;
-            }
+        if let Some(ref regex) = self.do_not_forward_patterns
+            && regex.is_match(full_topic)
+        {
+            return PlanNode::Drop;
         }
         PlanNode::Emit {
             topic: PyString::new(py, full_topic).unbind(),
@@ -1220,17 +1204,17 @@ impl MiniserverDataProcessor {
                 debug!("Topic '{}' (normalized: '{}') not in whitelist", t, normalized);
                 continue;
             }
-            if let Some(ref regex) = self.compiled_subscription_filter {
-                if regex.is_match(&t) {
-                    debug!("Topic '{}' filtered by second pass", t);
-                    continue;
-                }
+            if let Some(ref regex) = self.compiled_subscription_filter
+                && regex.is_match(&t)
+            {
+                debug!("Topic '{}' filtered by second pass", t);
+                continue;
             }
-            if let Some(ref regex) = self.do_not_forward_patterns {
-                if regex.is_match(&t) {
-                    debug!("Topic '{}' filtered by do_not_forward", t);
-                    continue;
-                }
+            if let Some(ref regex) = self.do_not_forward_patterns
+                && regex.is_match(&t)
+            {
+                debug!("Topic '{}' filtered by do_not_forward", t);
+                continue;
             }
             if !self.convert_booleans {
                 list.append((t.as_str(), normalized.as_str(), v.as_str()))?;

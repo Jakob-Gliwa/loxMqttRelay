@@ -452,12 +452,16 @@ impl MqttClient {
         retain: bool,
         user_properties: Option<Vec<(String, String)>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let payload = if let Ok(text) = message.cast::<PyString>() {
-            text.to_cow()?.into_owned().into_bytes()
-        } else if let Ok(raw) = message.cast::<PyBytes>() {
-            raw.as_bytes().to_vec()
-        } else {
-            return Err(PyTypeError::new_err("message must be str or bytes"));
+        // Edition 2024 drops if-let temps before `else`; match keeps the borrow
+        // scopes clear while we copy out owned bytes from either cast.
+        let payload = match message.cast::<PyString>() {
+            Ok(text) => text.to_cow()?.into_owned().into_bytes(),
+            Err(_) => match message.cast::<PyBytes>() {
+                Ok(raw) => raw.as_bytes().to_vec(),
+                Err(_) => {
+                    return Err(PyTypeError::new_err("message must be str or bytes"));
+                }
+            },
         };
 
         let shared = Arc::clone(&self.shared);
