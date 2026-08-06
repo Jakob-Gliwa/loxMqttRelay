@@ -288,12 +288,33 @@ fn host_part(address: &str) -> &str {
 /// Kept as addresses rather than their text form: that is one less allocation
 /// per datagram in the filter, and `::1` and `0:0:0:0:0:0:0:1` are then the
 /// same sender rather than two strings that happen to disagree.
+///
+/// IPv6 results are rejected rather than added to the allowlist: the UDP
+/// listener binds `0.0.0.0` only (see [`UdpListener::start`]), so a sender
+/// address that resolved to IPv6 can never actually show up on that socket. An
+/// allowlist that quietly included it would look configured while staying
+/// deaf forever - clearer to say so at resolution time and treat the host as
+/// unresolved, which is what falls out of dropping those addresses here: the
+/// existing "no usable sender address" handling and background retry take
+/// over from there.
 fn resolve_host(host: &str) -> HashSet<IpAddr> {
     if host.is_empty() {
         return HashSet::new();
     }
     match (host, 0u16).to_socket_addrs() {
-        Ok(addrs) => addrs.map(|addr| addr.ip()).collect(),
+        Ok(addrs) => {
+            let (v4, v6): (HashSet<IpAddr>, HashSet<IpAddr>) =
+                addrs.map(|addr| addr.ip()).partition(IpAddr::is_ipv4);
+            if !v6.is_empty() {
+                error!(
+                    "'{host}' resolved to IPv6 address(es) {} - the UDP listener only binds \
+                     IPv4, so datagrams from these can never arrive; they are ignored. \
+                     Configure an IPv4 address, or a hostname with an A record, instead",
+                    sorted_listing(v6.into_iter())
+                );
+            }
+            v4
+        }
         Err(e) => {
             error!("Cannot resolve configured UDP sender '{host}', ignoring it: {e}");
             HashSet::new()
@@ -1271,6 +1292,16 @@ mod tests {
         assert_eq!(host_part("  192.168.1.10  "), "192.168.1.10");
         // A bare IPv6 address has several colons and no port to strip.
         assert_eq!(host_part("fd00::1"), "fd00::1");
+    }
+
+    #[test]
+    fn resolve_host_rejects_ipv6() {
+        // The listener binds IPv4 only, so an IPv6 literal must not end up in
+        // the allowlist looking like a match that can never happen.
+        assert_eq!(resolve_host("2606:4700::1"), HashSet::new());
+        assert_eq!(resolve_host("::1"), HashSet::new());
+        // A resolvable IPv4 address is unaffected.
+        assert_eq!(resolve_host("192.168.1.10"), HashSet::from([ip("192.168.1.10")]));
     }
 
     #[test]
