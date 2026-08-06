@@ -2,6 +2,7 @@ import pytest
 import pytest_asyncio
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
+from loxmqttrelay.config import global_config
 from loxmqttrelay.udp_handler import (
     parse_udp_message_mqtt5,
     handle_udp_message,
@@ -276,6 +277,171 @@ async def test_udp_protocol_publishes_via_injected_client(mock_mqtt_client):
         False,
         None
     )
+
+
+@pytest.mark.asyncio
+async def test_udp_protocol_drops_foreign_source(mock_mqtt_client):
+    global_config._config.miniserver.miniserver_ip = "192.168.1.10"
+
+    with patch('loxmqttrelay.udp_handler._container_gateway', return_value=None):
+        protocol = UDPProtocol(mock_mqtt_client)
+    protocol.datagram_received(b"publish test/topic test message", ("192.168.1.99", 1234))
+    await asyncio.sleep(0.1)
+
+    mock_mqtt_client.publish.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_udp_protocol_accepts_configured_miniserver(mock_mqtt_client):
+    global_config._config.miniserver.miniserver_ip = "192.168.1.10"
+
+    with patch('loxmqttrelay.udp_handler._container_gateway', return_value=None):
+        protocol = UDPProtocol(mock_mqtt_client)
+    protocol.datagram_received(b"publish test/topic test message", ("192.168.1.10", 1234))
+    await asyncio.sleep(0.1)
+
+    mock_mqtt_client.publish.assert_called_once_with(
+        "test/topic",
+        "test message",
+        False,
+        None
+    )
+
+
+@pytest.mark.asyncio
+async def test_udp_protocol_accepts_container_gateway_with_warning(mock_mqtt_client):
+    global_config._config.miniserver.miniserver_ip = "192.168.1.10"
+
+    with patch('loxmqttrelay.udp_handler._container_gateway', return_value="172.17.0.1"):
+        protocol = UDPProtocol(mock_mqtt_client)
+
+    with patch('loxmqttrelay.udp_handler.logger') as mock_logger:
+        protocol.datagram_received(b"publish test/topic test message", ("172.17.0.1", 1234))
+        protocol.datagram_received(b"publish test/topic test message", ("172.17.0.1", 1234))
+        await asyncio.sleep(0.1)
+
+        assert mock_logger.warning.call_count == 1
+
+    assert mock_mqtt_client.publish.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_udp_protocol_resolves_miniserver_hostname(mock_mqtt_client):
+    global_config._config.miniserver.miniserver_ip = "miniserver.local"
+
+    with patch('loxmqttrelay.udp_handler.socket.getaddrinfo',
+               return_value=[(None, None, None, '', ("192.168.1.10", 0))]), \
+         patch('loxmqttrelay.udp_handler._container_gateway', return_value=None):
+        protocol = UDPProtocol(mock_mqtt_client)
+
+    protocol.datagram_received(b"publish test/topic test message", ("192.168.1.10", 1234))
+    await asyncio.sleep(0.1)
+
+    mock_mqtt_client.publish.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_udp_protocol_accepts_additional_allowed_source(mock_mqtt_client):
+    global_config._config.miniserver.miniserver_ip = "192.168.1.10"
+    global_config._config.udp.udp_allowed_sources = ["192.168.1.50"]
+
+    with patch('loxmqttrelay.udp_handler._container_gateway', return_value=None):
+        protocol = UDPProtocol(mock_mqtt_client)
+    protocol.datagram_received(b"publish test/topic test message", ("192.168.1.50", 1234))
+    await asyncio.sleep(0.1)
+
+    mock_mqtt_client.publish.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_udp_protocol_accepts_any_source_when_filter_disabled(mock_mqtt_client):
+    global_config._config.miniserver.miniserver_ip = "192.168.1.10"
+    global_config._config.udp.udp_source_filter_enabled = False
+
+    with patch('loxmqttrelay.udp_handler._container_gateway', return_value=None):
+        protocol = UDPProtocol(mock_mqtt_client)
+    protocol.datagram_received(b"publish test/topic test message", ("192.168.1.99", 1234))
+    await asyncio.sleep(0.1)
+
+    mock_mqtt_client.publish.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_udp_protocol_accepts_single_string_as_allowed_sources(mock_mqtt_client):
+    global_config._config.miniserver.miniserver_ip = "192.168.1.10"
+    global_config._config.udp.udp_allowed_sources = "192.168.1.50"  # type: ignore[assignment]
+
+    with patch('loxmqttrelay.udp_handler._container_gateway', return_value=None):
+        protocol = UDPProtocol(mock_mqtt_client)
+
+    assert protocol._allowed_sources == {"192.168.1.10", "192.168.1.50"}
+
+
+@pytest.mark.asyncio
+async def test_udp_protocol_survives_unusable_allowed_sources(mock_mqtt_client):
+    global_config._config.miniserver.miniserver_ip = "192.168.1.10"
+    global_config._config.udp.udp_allowed_sources = 42  # type: ignore[assignment]
+
+    with patch('loxmqttrelay.udp_handler._container_gateway', return_value=None):
+        protocol = UDPProtocol(mock_mqtt_client)
+
+    assert protocol._allowed_sources == {"192.168.1.10"}
+    protocol.datagram_received(b"publish test/topic test message", ("192.168.1.99", 1234))
+    await asyncio.sleep(0.1)
+    mock_mqtt_client.publish.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_udp_protocol_reads_filter_flag_written_as_string(mock_mqtt_client):
+    global_config._config.miniserver.miniserver_ip = "192.168.1.10"
+    global_config._config.udp.udp_source_filter_enabled = "false"  # type: ignore[assignment]
+
+    with patch('loxmqttrelay.udp_handler._container_gateway', return_value=None):
+        protocol = UDPProtocol(mock_mqtt_client)
+    protocol.datagram_received(b"publish test/topic test message", ("192.168.1.99", 1234))
+    await asyncio.sleep(0.1)
+
+    mock_mqtt_client.publish.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_udp_protocol_starts_when_filter_setup_fails(mock_mqtt_client):
+    with patch('loxmqttrelay.udp_handler._container_gateway', return_value=None), \
+         patch('loxmqttrelay.udp_handler._allowed_source_addresses',
+               side_effect=RuntimeError("broken config")):
+        protocol = UDPProtocol(mock_mqtt_client)
+
+    protocol.datagram_received(b"publish test/topic test message", ("192.168.1.99", 1234))
+    await asyncio.sleep(0.1)
+
+    mock_mqtt_client.publish.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_udp_protocol_warns_about_public_miniserver_address(mock_mqtt_client):
+    global_config._config.miniserver.miniserver_ip = "myhome.loxonecloud.com"
+
+    with patch('loxmqttrelay.udp_handler.socket.getaddrinfo',
+               return_value=[(None, None, None, '', ("84.1.2.3", 0))]), \
+         patch('loxmqttrelay.udp_handler._container_gateway', return_value=None), \
+         patch('loxmqttrelay.udp_handler.logger') as mock_logger:
+        UDPProtocol(mock_mqtt_client)
+
+    assert any("public" in str(call) for call in mock_logger.warning.call_args_list)
+
+
+@pytest.mark.asyncio
+async def test_udp_protocol_allows_everything_when_address_unresolvable(mock_mqtt_client):
+    global_config._config.miniserver.miniserver_ip = "does-not-resolve"
+
+    with patch('loxmqttrelay.udp_handler.socket.getaddrinfo', side_effect=OSError("no dns")), \
+         patch('loxmqttrelay.udp_handler._container_gateway', return_value=None):
+        protocol = UDPProtocol(mock_mqtt_client)
+
+    protocol.datagram_received(b"publish test/topic test message", ("192.168.1.99", 1234))
+    await asyncio.sleep(0.1)
+
+    mock_mqtt_client.publish.assert_called_once()
 
 
 @pytest.mark.asyncio

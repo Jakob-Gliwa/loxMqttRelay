@@ -1,11 +1,18 @@
 import asyncio
-from typing import List, Optional, Tuple
+import ipaddress
+import socket
+import struct
+from typing import Any, List, Optional, Set, Tuple
 from loxmqttrelay.config import global_config
 from loxmqttrelay.logging_config import get_lazy_logger
 
 logger = get_lazy_logger(__name__)
 
 UserProperties = List[Tuple[str, str]]
+
+# Upper bound for the "warn once per sender" bookkeeping, so a flood of spoofed
+# source addresses cannot grow the set (or the log) without limit.
+_MAX_TRACKED_REJECTED_SOURCES = 64
 
 
 def _parse_command(udpmsg: str) -> Optional[Tuple[str, str]]:
@@ -203,11 +210,184 @@ async def handle_udp_message(mqtt_client, udpmsg: str, addr) -> None:
     await mqtt_client.publish(topic, message, retain, user_properties)
 
 
+def _as_bool(value: Any, field_name: str, default: bool) -> bool:
+    """Read a config flag that a hand-edited TOML may hold as a string."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "yes", "on", "1"):
+            return True
+        if lowered in ("false", "no", "off", "0"):
+            return False
+    logger.warning(f"Invalid value for {field_name}: {value!r} - using {default}")
+    return default
+
+
+def _as_host_list(value: Any) -> List[str]:
+    """Read udp_allowed_sources, tolerating a single string instead of a list."""
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [str(item) for item in value]
+    logger.warning(f"Ignoring udp_allowed_sources - expected a list of addresses, got {value!r}")
+    return []
+
+
+def _host_part(address: Any) -> str:
+    """Strip an optional port from a configured address."""
+    address = str(address).strip()
+    if address.startswith("["):  # [::1]:80
+        closing_bracket = address.find("]")
+        if closing_bracket != -1:
+            return address[1:closing_bracket]
+    try:
+        ipaddress.ip_address(address)
+        return address
+    except ValueError:
+        pass
+    # A bare IPv6 address contains several colons and carries no port here
+    if address.count(":") == 1:
+        return address.split(":", 1)[0]
+    return address
+
+
+def _resolve(host: str) -> Set[str]:
+    """Resolve a host (IP literal or DNS name) to its numeric addresses."""
+    if not host:
+        return set()
+    try:
+        return {info[4][0] for info in socket.getaddrinfo(host, None, proto=socket.IPPROTO_UDP)}
+    except (OSError, ValueError) as e:
+        # ValueError covers the UnicodeError getaddrinfo raises on malformed names
+        logger.error(f"Cannot resolve configured UDP sender '{host}', ignoring it: {e}")
+        return set()
+
+
+def _allowed_source_addresses() -> Set[str]:
+    """Numeric addresses that may send UDP datagrams to the relay."""
+    hosts = [global_config.miniserver.miniserver_ip]
+    if global_config.debug.enable_mock and global_config.debug.mock_ip:
+        hosts.append(global_config.debug.mock_ip)
+    hosts.extend(_as_host_list(global_config.udp.udp_allowed_sources))
+    addresses: Set[str] = set()
+    for host in hosts:
+        addresses |= _resolve(_host_part(host))
+    return addresses
+
+
+def _warn_about_public_addresses(addresses: Set[str]) -> None:
+    """
+    Warn when an allowed sender is a public address.
+
+    A DynDNS entry (Loxone Cloud DNS, No-IP, ...) resolves to the WAN address of
+    the internet connection, while the Miniserver sends its datagrams from its
+    local address - so such a configuration drops everything.
+    """
+    public = set()
+    for address in addresses:
+        try:
+            if not ipaddress.ip_address(address).is_private:
+                public.add(address)
+        except ValueError:
+            continue
+    if public:
+        logger.warning(
+            f"Allowed UDP sender(s) {', '.join(sorted(public))} are public addresses. The "
+            "Miniserver sends UDP from its local network address, so its datagrams would be "
+            "dropped - configure its local address instead of a DynDNS entry."
+        )
+
+
+def _container_gateway() -> Optional[str]:
+    """
+    IPv4 default gateway from /proc/net/route, or None if it cannot be read
+    (non-Linux hosts).
+
+    Inside a Docker bridge network this is the address datagrams appear to come
+    from whenever the userland proxy forwards them instead of iptables DNAT.
+    """
+    try:
+        with open("/proc/net/route", "r") as route_table:
+            for line in route_table.readlines()[1:]:
+                fields = line.split()
+                if len(fields) > 2 and fields[1] == "00000000":
+                    gateway = int(fields[2], 16)
+                    if gateway:
+                        return socket.inet_ntoa(struct.pack("<L", gateway))
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 class UDPProtocol(asyncio.DatagramProtocol):
     def __init__(self, mqtt_client):
         self._mqtt_client = mqtt_client
+        self._gateway = _container_gateway()
+        self._gateway_warning_logged = False
+        self._rejected_sources: Set[str] = set()
+        self._allowed_sources: Set[str] = set()
+        try:
+            self._allowed_sources = self._configure_source_filter()
+        except Exception as e:
+            # An unusable config value must never keep the relay from starting
+            logger.error(f"Could not set up UDP source filtering ({e}) - accepting every sender")
+
+    @staticmethod
+    def _configure_source_filter() -> Set[str]:
+        """Senders to accept; an empty set means every sender is accepted."""
+        if not _as_bool(global_config.udp.udp_source_filter_enabled, "udp_source_filter_enabled", True):
+            logger.warning(
+                "UDP source filtering is switched off (udp_source_filter_enabled = false) - "
+                "every host that can reach the UDP port can publish to MQTT"
+            )
+            return set()
+
+        allowed = _allowed_source_addresses()
+        if allowed:
+            logger.info(f"UDP-IN accepts datagrams from {', '.join(sorted(allowed))}")
+            _warn_about_public_addresses(allowed)
+        else:
+            logger.error(
+                "No usable sender address configured "
+                f"(miniserver_ip='{global_config.miniserver.miniserver_ip}') - UDP source "
+                "filtering stays off and every host on the network can publish via UDP"
+            )
+        return allowed
+
+    def _source_allowed(self, source: str) -> bool:
+        if not self._allowed_sources:
+            return True
+
+        if source in self._allowed_sources:
+            return True
+
+        if source == self._gateway:
+            if not self._gateway_warning_logged:
+                self._gateway_warning_logged = True
+                logger.warning(
+                    f"UDP datagrams arrive from the container gateway {source} instead of the "
+                    "Miniserver address, so Docker hides the real sender and source filtering "
+                    "cannot take effect. Accepting them anyway - restrict the UDP port on the "
+                    "host firewall or run the container with network_mode: host."
+                )
+            return True
+
+        if source in self._rejected_sources:
+            logger.debug(f"Dropped UDP datagram from {source}")
+        elif len(self._rejected_sources) < _MAX_TRACKED_REJECTED_SOURCES:
+            self._rejected_sources.add(source)
+            logger.warning(
+                f"Dropped UDP datagram from {source} - only "
+                f"{', '.join(sorted(self._allowed_sources))} may publish via UDP"
+            )
+        else:
+            logger.debug(f"Dropped UDP datagram from {source}")
+        return False
 
     def datagram_received(self, data, addr):
+        if not self._source_allowed(addr[0]):
+            return
         msg = data.decode('utf-8', errors='ignore')
         asyncio.create_task(handle_udp_message(self._mqtt_client, msg, addr))
 

@@ -31,6 +31,8 @@ convert_booleans = false
 
 [udp]
 udp_in_port = 11884
+udp_source_filter_enabled = true
+udp_allowed_sources = []
 
 [debug]
 mock_ip = ""

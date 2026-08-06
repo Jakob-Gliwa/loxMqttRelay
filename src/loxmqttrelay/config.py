@@ -63,6 +63,9 @@ class ProcessingConfig:
 @dataclass
 class UdpConfig:
     udp_in_port: int = 11884
+    udp_source_filter_enabled: bool = True
+    # Additional senders besides the configured Miniserver; IPs or hostnames
+    udp_allowed_sources: List[str] = field(default_factory=list)
 
 @dataclass
 class DebugConfig:

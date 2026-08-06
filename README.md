@@ -130,6 +130,22 @@ retain home/temperature 22.5
 home/kitchen/light off    # Will be published without retain
 ```
 
+### Accepted senders
+
+By default UDP datagrams are only accepted from the Miniserver configured as `miniserver_ip`; everything else is dropped and logged. Additional senders can be listed in `udp_allowed_sources`, and the whole check can be switched off with `udp_source_filter_enabled = false`:
+
+```toml
+[udp]
+udp_source_filter_enabled = true
+udp_allowed_sources = []          # e.g. ["192.168.1.50", "test-host.local"]
+```
+
+Entries may be IP addresses or hostnames and are resolved once at startup. Use the **local** address of your Miniserver here - a DynDNS entry such as Loxone Cloud DNS resolves to the public address of your internet connection, while the Miniserver sends its datagrams from its local address. The relay warns at startup when an allowed sender turns out to be a public address. If no address can be resolved at all, it logs an error and keeps accepting every sender so the bridge does not silently stop working.
+
+Docker bridge networking usually preserves the sender address, so the filter works as expected. If datagrams instead arrive from the container gateway (for example `172.17.0.1` with Docker's userland proxy or Docker Desktop), the real sender is hidden by Docker and cannot be checked. Those datagrams are accepted and a warning is logged once - restrict the UDP port on the host firewall or run the container with `network_mode: host` in that case.
+
+Since anything that can publish to MQTT can control connected devices, restrict the UDP port on your firewall and use broker ACLs (for example in Mosquitto) as a second layer.
+
 ## Basic Setup
 
 1. Copy the provided `default_config.toml` as your starting point:
@@ -339,8 +355,12 @@ The websocket implementation provides:
 ```toml
 [udp]
 udp_in_port = 11884
+udp_source_filter_enabled = true
+udp_allowed_sources = []
 ```
-Attention: Do not change this value if you run MQTT Relay from within Docker - use docker port mapping if you need another port
+Attention: Do not change `udp_in_port` if you run MQTT Relay from within Docker - use docker port mapping if you need another port
+
+`udp_source_filter_enabled` restricts incoming UDP to the Miniserver address plus any sender in `udp_allowed_sources`. See [Accepted senders](#accepted-senders) for details.
 
 #### HTTP Communication
 ```toml
