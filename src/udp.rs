@@ -12,7 +12,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use log::{Level, debug, error, info, log_enabled, warn};
@@ -739,6 +739,33 @@ async fn serve(
     info!("UDP-IN stopped");
 }
 
+/// One run of the receive loop: what ends it, and what to join afterwards.
+///
+/// The `Notify` belongs to the run rather than to the server because [`stop`]
+/// can leave a permit behind (see there), and a permit outliving its run would
+/// end the next one on its first poll.
+///
+/// [`stop`]: UdpServer::stop
+struct Running {
+    shutdown: Arc<Notify>,
+    task: JoinHandle<()>,
+}
+
+impl Running {
+    /// Whether the receive loop is still on the socket. A run that ended on its
+    /// own leaves an entry behind that nothing needs to stop.
+    fn is_live(&self) -> bool {
+        !self.task.is_finished()
+    }
+}
+
+/// The lock is only ever held for a `replace` or a `take`, so no panic can
+/// happen while it is held. If it were poisoned anyway, going on with the
+/// handle beats dropping it: a detached receive loop keeps the socket.
+fn lock_running(slot: &Mutex<Option<Running>>) -> MutexGuard<'_, Option<Running>> {
+    slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// The relay's UDP listener, owned by Python for its lifetime.
 ///
 /// Construct it alongside the MQTT client, then [`UdpServer::start`] once the
@@ -750,9 +777,8 @@ pub struct UdpServer {
     miniserver_ip: String,
     allowed_sources: Vec<String>,
     filter_enabled: bool,
-    shutdown: Arc<Notify>,
     /// Shared with the `start` future, which is what actually spawns the loop.
-    task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    running: Arc<Mutex<Option<Running>>>,
 }
 
 #[pymethods]
@@ -769,8 +795,7 @@ impl UdpServer {
             miniserver_ip: miniserver.getattr("miniserver_ip")?.extract()?,
             allowed_sources: udp.getattr("udp_allowed_sources")?.extract()?,
             filter_enabled: udp.getattr("udp_source_filter_enabled")?.extract()?,
-            shutdown: Arc::new(Notify::new()),
-            task: Arc::new(Mutex::new(None)),
+            running: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -784,14 +809,21 @@ impl UdpServer {
     #[pyo3(text_signature = "(self)")]
     fn start<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let shared = Arc::clone(&self.shared);
-        let shutdown = Arc::clone(&self.shutdown);
-        let slot = Arc::clone(&self.task);
+        let slot = Arc::clone(&self.running);
         let port = self.port;
         let miniserver_ip = self.miniserver_ip.clone();
         let allowed_sources = self.allowed_sources.clone();
         let filter_enabled = self.filter_enabled;
 
         future_into_py(py, async move {
+            // Binding first would report this as "address already in use", which
+            // says nothing about the caller having started the server twice.
+            if lock_running(&slot).as_ref().is_some_and(Running::is_live) {
+                return Err(PyRuntimeError::new_err(format!(
+                    "UDP-IN is already listening on port {port}"
+                )));
+            }
+
             // 0.0.0.0 rather than dual-stack on purpose: an IPv4 peer on a
             // dual-stack socket shows up as ::ffff:192.168.1.10 and would never
             // match a configured address.
@@ -827,10 +859,19 @@ impl UdpServer {
                 get_runtime().spawn(resolve_sources_in_background(sources, found));
             }
 
-            let handle =
-                get_runtime().spawn(serve(socket, shared, filter, late_addresses, shutdown));
-            if let Ok(mut slot) = slot.lock() {
-                slot.replace(handle);
+            let shutdown = Arc::new(Notify::new());
+            let task = get_runtime().spawn(serve(
+                socket,
+                shared,
+                filter,
+                late_addresses,
+                Arc::clone(&shutdown),
+            ));
+            if let Some(previous) = lock_running(&slot).replace(Running { shutdown, task }) {
+                // Only reachable if two starts raced past the check above, and
+                // then the bind would have failed. Abort rather than drop: a
+                // dropped handle detaches its task instead of ending it.
+                previous.task.abort();
             }
             info!("UDP-IN listening on port {port}");
             Ok(())
@@ -838,15 +879,27 @@ impl UdpServer {
     }
 
     /// Close the socket and wait for the receive loop to finish.
+    ///
+    /// Leaves the server startable again: what ends the loop is taken out of
+    /// the slot here, so the next [`start`] gets its own.
+    ///
+    /// [`start`]: UdpServer::start
     #[pyo3(text_signature = "(self)")]
     fn stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        self.shutdown.notify_waiters();
-        self.shutdown.notify_one();
-        let handle = self.task.lock().ok().and_then(|mut slot| slot.take());
+        let running = lock_running(&self.running).take();
+        if let Some(run) = &running {
+            // `notify_waiters` wakes a loop that is already parked on
+            // `notified()` but stores nothing; `notify_one` covers the window
+            // where the task is spawned and not yet polled, by leaving a permit
+            // its first poll consumes. That permit can outlive the loop, and
+            // dropping the run here is what keeps it from reaching the next one.
+            run.shutdown.notify_waiters();
+            run.shutdown.notify_one();
+        }
 
         future_into_py(py, async move {
-            if let Some(handle) = handle
-                && let Err(e) = handle.await
+            if let Some(run) = running
+                && let Err(e) = run.task.await
                 && !e.is_cancelled()
             {
                 warn!("UDP receive loop ended abnormally: {e}");
