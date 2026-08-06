@@ -21,6 +21,15 @@ def client():
     return MqttClient(global_config)
 
 
+def test_connected_is_false_without_a_session(client):
+    """`connected` follows the MQTT session, not the existence of a handle.
+
+    It reported the handle once, which stayed in place across every reconnect
+    and therefore only ever said that connecting had worked at some point.
+    """
+    assert client.connected is False
+
+
 @pytest.mark.asyncio
 async def test_publish_without_connection_reports_the_reason(client):
     assert await client.publish("some/topic", "value") == "broker not connected"

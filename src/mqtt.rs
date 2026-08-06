@@ -8,6 +8,7 @@
 
 use std::collections::VecDeque;
 use std::num::{NonZeroU16, NonZeroUsize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -37,6 +38,9 @@ const COMMAND_CAPACITY: usize = 1024;
 const KEEP_ALIVE: Duration = Duration::from_secs(60);
 const RECONNECT_DELAY: Duration = Duration::from_secs(15);
 const MAX_AUTH_BACKOFF: Duration = Duration::from_secs(300);
+
+/// How long the "Disconnecting" status message may hold up the shutdown.
+const FAREWELL_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// How many dropped publishes to remember for diagnostics.
 const UNDELIVERED_RING: usize = 32;
@@ -75,6 +79,11 @@ struct Undelivered {
 /// through Python.
 pub struct MqttShared {
     client: ArcSwapOption<GlideClient>,
+    /// Whether there is a live MQTT session, maintained by [`ConnectSignal`].
+    ///
+    /// The client handle alone does not say this: it outlives every reconnect,
+    /// so it only records that [`MqttClient::connect`] once succeeded.
+    session_live: AtomicBool,
     undelivered: Mutex<VecDeque<Undelivered>>,
 }
 
@@ -84,11 +93,28 @@ impl MqttShared {
     pub(crate) fn new() -> Self {
         Self {
             client: ArcSwapOption::empty(),
+            session_live: AtomicBool::new(false),
             undelivered: Mutex::new(VecDeque::with_capacity(UNDELIVERED_RING)),
         }
     }
 
-    fn client(&self) -> Option<Arc<GlideClient>> {
+    /// The client handle, but only while a session is actually up.
+    ///
+    /// Glide keeps accepting publishes into its command channel across a
+    /// reconnect and lets them run into the acknowledgement timeout, which
+    /// would report a message lost seconds later and under the wrong reason.
+    /// At QoS 0 with no outbox there is nothing to gain from that wait, so a
+    /// publish without a session is refused here and now.
+    fn live_client(&self) -> Option<Arc<GlideClient>> {
+        if self.session_live.load(Ordering::Acquire) {
+            self.client.load_full()
+        } else {
+            None
+        }
+    }
+
+    /// The client handle regardless of session state, for shutting it down.
+    fn handle(&self) -> Option<Arc<GlideClient>> {
         self.client.load_full()
     }
 
@@ -154,7 +180,7 @@ impl MqttShared {
         retain: bool,
         user_properties: Vec<(String, String)>,
     ) -> Option<DropReason> {
-        let Some(client) = self.client() else {
+        let Some(client) = self.live_client() else {
             self.record_drop(&topic, &payload, DropReason::Disconnected, None);
             return Some(DropReason::Disconnected);
         };
@@ -172,7 +198,7 @@ impl MqttShared {
     /// The disconnected case is settled here rather than in the spawned task, so
     /// the drop is visible to the caller as soon as this returns.
     pub(crate) fn publish_detached(self: &Arc<Self>, topic: String, payload: Vec<u8>) {
-        let Some(client) = self.client() else {
+        let Some(client) = self.live_client() else {
             self.record_drop(&topic, &payload, DropReason::Disconnected, None);
             return;
         };
@@ -186,11 +212,18 @@ impl MqttShared {
     }
 }
 
-/// Wakes the resubscribe task on every session start.
+/// Tracks whether a session is up, and wakes the resubscribe task on every
+/// session start.
 ///
-/// The hook runs on the driver task and must not await, so it only signals;
-/// the actual SUBSCRIBE happens in [`resubscribe_loop`].
+/// The hook runs on the driver task and must not await, so it only sets a flag
+/// and signals; the actual SUBSCRIBE happens in [`resubscribe_loop`].
+///
+/// Glide emits `Connected` before it returns from the initial connect and
+/// again after every reconnect, and `Disconnected` before it enters the
+/// reconnect backoff - which is exactly the window in which a publish has
+/// nowhere to go.
 struct ConnectSignal {
+    shared: Arc<MqttShared>,
     notify: Arc<Notify>,
 }
 
@@ -198,10 +231,12 @@ impl LifecycleHook for ConnectSignal {
     fn on_lifecycle(&self, phase: &SessionPhase) {
         match phase {
             SessionPhase::Connected { generation, .. } => {
+                self.shared.session_live.store(true, Ordering::Release);
                 info!("MQTT connected (session {generation})");
                 self.notify.notify_one();
             }
             SessionPhase::Disconnected(outcome) => {
+                self.shared.session_live.store(false, Ordering::Release);
                 warn!(
                     "MQTT disconnected: {outcome:?} - publishes are dropped while there is no \
                      connection"
@@ -221,10 +256,15 @@ fn is_granted(reason: SubscribeAckReason) -> bool {
     )
 }
 
-/// Re-subscribes and republishes the status topic after every (re)connect.
+/// Subscribes and republishes the status topic after every (re)connect.
 ///
-/// Glide reconnects transparently but does not restore subscriptions, so this
-/// replaces what gmqtt did in its `on_connect` callback.
+/// This is what gmqtt's `on_connect` callback used to do. Glide restores
+/// subscriptions on a reconnect by itself, but only those its own registry
+/// knows, and that registry is filled from the SUBACKs of application
+/// subscribes - so the first pass here is what puts the filters in place at
+/// all. The later passes repeat a SUBSCRIBE glide has already sent, which the
+/// broker treats as a replacement; they are kept because this is also where
+/// the status topic is republished and the reconnect policy is marked live.
 async fn resubscribe_loop(
     shared: Arc<MqttShared>,
     topics: Vec<String>,
@@ -235,8 +275,8 @@ async fn resubscribe_loop(
     loop {
         notify.notified().await;
 
-        let Some(client) = shared.client() else {
-            debug!("Resubscribe skipped: no client handle");
+        let Some(client) = shared.live_client() else {
+            debug!("Resubscribe skipped: the session was gone again already");
             continue;
         };
 
@@ -360,9 +400,13 @@ impl MqttClient {
         })
     }
 
+    /// Whether an MQTT session is up right now.
+    ///
+    /// False while glide is reconnecting, which is also when a publish is
+    /// reported as dropped rather than queued.
     #[getter]
     fn connected(&self) -> bool {
-        self.shared.client().is_some()
+        self.shared.live_client().is_some()
     }
 
     /// Connects, subscribes to `topics` and starts routing inbound messages
@@ -401,6 +445,7 @@ impl MqttClient {
                 .inbound_sink(tx)
                 .reconnect(reconnect.clone())
                 .lifecycle(ConnectSignal {
+                    shared: Arc::clone(&shared),
                     notify: Arc::clone(&notify),
                 })
                 .options(move |options| {
@@ -478,20 +523,31 @@ impl MqttClient {
         })
     }
 
+    /// Says goodbye on the status topic, then closes the session.
+    ///
+    /// The farewell is given a deadline of its own. A socket can be dead
+    /// without glide knowing yet - the keep-alive runs for a minute - and the
+    /// publish would then sit out the acknowledgement timeout. `docker stop`
+    /// allows ten seconds for the whole shutdown, and a status message nobody
+    /// is left to receive must not eat into them.
     #[pyo3(text_signature = "(self)")]
     fn disconnect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let shared = Arc::clone(&self.shared);
         let status_topic = self.status_topic.clone();
 
         future_into_py(py, async move {
-            if let Some(client) = shared.client() {
-                shared
-                    .publish(status_topic, b"Disconnecting".to_vec(), false, Vec::new())
-                    .await;
+            if let Some(client) = shared.handle() {
+                let farewell =
+                    shared.publish(status_topic, b"Disconnecting".to_vec(), false, Vec::new());
+                let announced = tokio::time::timeout(FAREWELL_TIMEOUT, farewell).await;
+                if announced.is_err() {
+                    warn!("Timed out announcing the shutdown on the status topic");
+                }
                 if let Err(e) = client.shutdown().await {
                     warn!("Error during MQTT shutdown: {e}");
                 }
             }
+            shared.session_live.store(false, Ordering::Release);
             shared.client.store(None);
             Ok(())
         })

@@ -358,7 +358,10 @@ lost:
 
 - Every dropped publish is logged at WARNING with topic, payload size and the
   reason - either `broker not connected` or `publish failed` together with the
-  transport error.
+  transport error. While a reconnect is running the message is refused straight
+  away rather than parked until an acknowledgement times out: at QoS 0 there is
+  nothing to gain from the wait, and a late report under the wrong reason is
+  worse than a prompt one.
 - UDP messages that never made it are additionally logged on the way in, with
   the sender address and the original payload.
 - An inbound message the relay fails to process is logged at ERROR with the
