@@ -3,7 +3,7 @@ import pytest
 from loxmqttrelay.config import (
     Config, BrokerConfig, AppConfig,
      MiniserverConfig,
-    ConfigSection, global_config
+    ConfigError, ConfigSection, global_config
 )
 @pytest.fixture(autouse=True)
 def reset_config():
@@ -351,6 +351,82 @@ def test_update_fields(config_instance):
     
     assert config_instance.general.log_level == "WARNING"
     assert config_instance.general.cache_size == 200000
+
+def test_update_fields_accepts_lists_and_single_values(config_instance):
+    """A bare element stands for a one-element list, as it did before."""
+    config_instance.update_fields({"subscriptions": ["a/#", "b/#"], "do_not_forward": "private/.*"})
+
+    assert config_instance.topics.subscriptions == ["a/#", "b/#"]
+    assert config_instance.topics.do_not_forward == ["private/.*"]
+
+@pytest.mark.parametrize("field_name,value", [
+    ("host", "attacker.example.com"),
+    ("port", 1884),
+    ("user", "someone"),
+    ("password", "hunter2"),
+    ("miniserver_ip", "203.0.113.5"),
+    ("miniserver_port", 8081),
+    ("miniserver_user", "admin"),
+    ("miniserver_pass", "secret"),
+    # Redirects the Miniserver target just as miniserver_ip does, so leaving
+    # these out would make the whole list bypassable in two lines.
+    ("mock_ip", "203.0.113.5"),
+    ("enable_mock", True),
+])
+def test_update_fields_refuses_protected_fields(config_instance, field_name, value):
+    """Endpoints and credentials must not be settable over MQTT."""
+    section, _ = config_instance._get_field_info(field_name)
+    before = getattr(getattr(config_instance, section.value), field_name)
+
+    with pytest.raises(ConfigError, match=field_name):
+        config_instance.update_fields({field_name: value})
+
+    assert getattr(getattr(config_instance, section.value), field_name) == before
+
+def test_protected_field_rejects_the_whole_batch(config_instance):
+    """An allowed field must not slip through next to a refused one."""
+    with pytest.raises(ConfigError):
+        config_instance.update_fields({"log_level": "DEBUG", "miniserver_ip": "203.0.113.5"})
+
+    assert config_instance.general.log_level == "INFO"
+    assert config_instance.miniserver.miniserver_ip == "192.168.1.100"
+
+@pytest.mark.parametrize("updates,expected", [
+    # bool is an int subclass, so a naive isinstance check would let this pass
+    # and the relay would fail to start on the config it just wrote.
+    ({"cache_size": True}, "cache_size"),
+    ({"cache_size": "loads"}, "cache_size"),
+    ({"expand_json": "yes"}, "expand_json"),
+    ({"log_level": 5}, "log_level"),
+    ({"subscriptions": [1, 2]}, "subscriptions"),
+    ({"topic_whitelist": [None]}, "topic_whitelist"),
+    ({"no_such_field": 1}, "no_such_field"),
+])
+def test_update_fields_refuses_unusable_values(config_instance, updates, expected):
+    with pytest.raises(ConfigError, match=expected):
+        config_instance.update_fields(updates)
+
+def test_rejected_update_is_not_persisted(config_instance):
+    """Nothing may reach the file, or the relay restarts into a broken config."""
+    before = open(config_instance.config_path).read()
+
+    with pytest.raises(ConfigError):
+        config_instance.update_fields({"log_level": "DEBUG", "cache_size": "loads"})
+
+    assert open(config_instance.config_path).read() == before
+    assert config_instance.general.log_level == "INFO"
+
+def test_protection_does_not_apply_to_local_updates(config_instance):
+    """The Miniserver sync and local code keep full access.
+
+    Only update_fields() is reachable from the MQTT control topics; the
+    whitelist sync in main.py goes through update_config().
+    """
+    config_instance.update_config(ConfigSection.MINISERVER, {"miniserver_ip": "192.168.1.200"})
+    config_instance.update_config(ConfigSection.TOPICS, {"topic_whitelist": ["synced_topic"]})
+
+    assert config_instance.miniserver.miniserver_ip == "192.168.1.200"
+    assert config_instance.topics.topic_whitelist == {"synced_topic"}
 
 def test_thread_safety(tmp_path):
     """Test that Config is thread-safe"""

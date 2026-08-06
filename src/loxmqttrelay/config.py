@@ -2,7 +2,7 @@ import os
 import logging
 from dataclasses import dataclass, field, asdict, replace, fields
 import threading
-from typing import Dict, Any, List, Optional, Literal, get_type_hints, Set
+from typing import Dict, Any, List, Optional, Literal, Union, get_args, get_origin, get_type_hints, Set
 import tomlkit
 from enum import Enum
 
@@ -122,6 +122,68 @@ class AppConfig:
 class ConfigError(Exception):
     pass
 
+
+# Fields the MQTT control topics must not touch.
+#
+# Validation cannot catch these: another host is a perfectly valid value, and
+# after the restart that follows an update the relay would authenticate there
+# with the configured credentials. mock_ip/enable_mock are on the list because
+# they override the Miniserver target in http_miniserver_handler and add a UDP
+# destination in udp_handler - the same redirect under a different name.
+REMOTE_PROTECTED_FIELDS = frozenset({
+    "host",
+    "port",
+    "user",
+    "password",
+    "miniserver_ip",
+    "miniserver_port",
+    "miniserver_user",
+    "miniserver_pass",
+    "mock_ip",
+    "enable_mock",
+})
+
+
+def _matches_type(value: Any, expected: Any) -> bool:
+    """``isinstance`` without the bool/int conflation.
+
+    ``isinstance(True, int)`` holds in Python, so a plain check would accept
+    ``{"cache_size": true}``. That value only fails once the Rust side extracts
+    an i32 - by then it has been written to the config file and the relay has
+    restarted into it.
+    """
+    if expected is bool:
+        return isinstance(value, bool)
+    if expected is int:
+        return isinstance(value, int) and not isinstance(value, bool)
+    return isinstance(value, expected)
+
+
+def _type_mismatch(field_name: str, expected: Any, value: Any) -> Optional[str]:
+    """Why *value* does not fit *expected*, or None if it does."""
+    origin = get_origin(expected)
+
+    if origin is Union:
+        allowed = [arg for arg in get_args(expected) if arg is not type(None)]
+        if value is None or any(_matches_type(value, arg) for arg in allowed):
+            return None
+        return f"'{field_name}' expects {expected}, got {type(value).__name__}"
+
+    if origin in (list, set):
+        args = get_args(expected)
+        item_type = args[0] if args else str
+        # A bare element stands for a one-element collection, the same way the
+        # update itself unwraps the payload.
+        items = list(value) if isinstance(value, (list, set)) else [value]
+        if all(_matches_type(item, item_type) for item in items):
+            return None
+        return f"'{field_name}' expects a list of {item_type.__name__}"
+
+    if _matches_type(value, expected):
+        return None
+    return f"'{field_name}' expects {expected.__name__}, got {type(value).__name__}"
+
+
 class Config:
     _instance = None
     _lock = threading.Lock()
@@ -192,7 +254,11 @@ class Config:
             logger.error(f"Error saving config: {e}")
 
     def update_field(self, field_name: str, value: Any, list_mode: Literal["set", "add", "remove"] = "set") -> None:
-        section, field_type = self._get_field_info(field_name)
+        self._apply_field(field_name, value, list_mode)
+        self.save_config()
+
+    def _apply_field(self, field_name: str, value: Any, list_mode: Literal["set", "add", "remove"]) -> None:
+        section, _ = self._get_field_info(field_name)
         current_value = getattr(getattr(self._config, section.value), field_name)
 
         if isinstance(current_value, (list, set)):
@@ -215,11 +281,36 @@ class Config:
             value = new_value
 
         setattr(getattr(self._config, section.value), field_name, value)
-        self.save_config()
 
     def update_fields(self, updates: Dict[str, Any], list_mode: Literal["set", "add", "remove"] = "set") -> None:
+        """Apply a batch of updates, or none of them.
+
+        This is what the MQTT control topics call, so everything is checked
+        before the first field is touched: a rejected field must not leave the
+        ones before it applied and written out, and a value the Rust side
+        cannot read must never reach the file at all - the update triggers a
+        restart, and the relay would not come back up.
+        """
+        self._reject_unusable(updates)
         for field_name, value in updates.items():
-            self.update_field(field_name, value, list_mode)
+            self._apply_field(field_name, value, list_mode)
+        self.save_config()
+
+    def _reject_unusable(self, updates: Dict[str, Any]) -> None:
+        problems: List[str] = []
+        for field_name, value in updates.items():
+            if field_name in REMOTE_PROTECTED_FIELDS:
+                problems.append(f"'{field_name}' cannot be changed remotely")
+                continue
+            try:
+                _, field_type = self._get_field_info(field_name)
+            except ValueError as e:
+                problems.append(str(e))
+                continue
+            if problem := _type_mismatch(field_name, field_type, value):
+                problems.append(problem)
+        if problems:
+            raise ConfigError(f"Rejected configuration update: {'; '.join(problems)}")
 
     def update_config(self, section: ConfigSection, updates: Dict[str, Any], list_mode: Literal["set", "add", "remove"] = "set") -> None:
         section_config = getattr(self._config, section.value)

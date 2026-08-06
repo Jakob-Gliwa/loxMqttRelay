@@ -377,6 +377,29 @@ use_websocket = false
 
 You can update the relays's configuration on the fly using MQTT messages. All topics are prefixed with your configured `base_topic`.
 
+### What can be changed remotely
+
+An update is applied in full or not at all. Every field is checked before
+anything is written, and a rejected update is logged and leaves both the running
+configuration and `config.toml` untouched - no restart is triggered either.
+
+Two things are refused:
+
+- **Wrong types.** `{"cache_size": "many"}` is rejected instead of being written
+  to the file. Since an update restarts the relay, an unusable value would
+  otherwise leave it unable to start.
+- **Endpoints and credentials.** `host`, `port`, `user`, `password`,
+  `miniserver_ip`, `miniserver_port`, `miniserver_user`, `miniserver_pass`,
+  `mock_ip` and `enable_mock` cannot be set over MQTT. Their values are valid,
+  so no type check would catch them - but pointing the relay at another host
+  would make it authenticate there with your Miniserver credentials. Change
+  these in `config.toml` and restart.
+
+Everything else - subscriptions, filters, whitelist, `do_not_forward` and the
+processing options - can be changed remotely. Note that anyone able to publish
+to `{base_topic}config/#` can do so, so restrict that prefix in your broker ACL
+separately from your data topics.
+
 ### List Management
 
 #### Set Complete Lists

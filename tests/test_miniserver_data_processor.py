@@ -3,7 +3,7 @@ import pytest_asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch, MagicMock
-from loxmqttrelay.config import Config, AppConfig, global_config
+from loxmqttrelay.config import Config, AppConfig, ConfigError, global_config
 import asyncio
 from loxmqttrelay.compatible._loxmqttrelay import MiniserverDataProcessor, MqttClient  # Assuming 'librs' is the compiled Rust module
 
@@ -900,6 +900,20 @@ class TestConfigControlTopics:
         assert global_config_mock.update_fields.call_args[0][1] == expected_mode
         # a successful update restarts the relay (verifies the restart_relay rename)
         ctx.relay_main.restart_relay.assert_called_once()
+
+    def test_rejected_config_update_does_not_restart(self, ctx):
+        """A refused update must not send the relay through os.execv.
+
+        The config would be unchanged, so the restart would achieve nothing but
+        a dropped MQTT session - and a publisher could trigger it at will.
+        """
+        global_config_mock = ctx.relay_main.miniserver_data_processor.global_config
+        global_config_mock.update_fields.side_effect = ConfigError("refused")
+
+        ctx.processor.handle_mqtt_message(ctx.topics.CONFIG_SET, b'{"miniserver_ip": "203.0.113.5"}')
+
+        global_config_mock.update_fields.assert_called_once()
+        ctx.relay_main.restart_relay.assert_not_called()
 
     @pytest.mark.parametrize("topic_attr", ["CONFIG_UPDATE", "CONFIG_RESTART"])
     def test_config_update_and_restart_only_restart(self, ctx, topic_attr):
