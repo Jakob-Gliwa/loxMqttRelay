@@ -76,7 +76,13 @@ def main() -> int:
         except BaseException as exc:  # noqa: BLE001 - report any load failure (incl. SIGILL-ish)
             failures.append(f"'{variant}' extension at {so_path} failed to load: {exc!r}")
             continue
-        for symbol in ("MiniserverDataProcessor", "MqttClient", "UdpServer", "init_rust_logger"):
+        for symbol in (
+            "MiniserverDataProcessor",
+            "MiniserverClient",
+            "MqttClient",
+            "UdpServer",
+            "init_rust_logger",
+        ):
             if not hasattr(module, symbol):
                 failures.append(f"'{variant}' extension missing symbol '{symbol}'")
         print(f"OK: '{variant}' -> {os.path.basename(so_path)} (loaded, symbols present)")

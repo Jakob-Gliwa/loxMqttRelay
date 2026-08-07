@@ -1,12 +1,14 @@
 //! MQTT 5 ingress and egress on top of mqtt-glide.
 //!
-//! Inbound messages take no detour through a Python callback: the connection
-//! read task hands them to a bounded channel and a worker feeds
-//! [`MiniserverDataProcessor::handle_mqtt_message`] directly, which does the
-//! routing and filtering in Rust and only calls into Python where the work is
-//! Python's - the websocket egress to the Miniserver, orjson, a restart. The
-//! UDP path in [`crate::udp`] publishes through [`MqttShared`] and needs no GIL
-//! at all.
+//! Inbound messages take no detour through Python at all: the connection read
+//! task hands them to a bounded channel, and [`ingress_worker`] feeds them
+//! straight into [`Core`], which flattens, filters and forwards them to the
+//! Miniserver without ever taking the GIL. Only the relay's own control
+//! topics (`config/get`, `config/set` and the restart triggers) are handed
+//! back to Python, and the split is decided in Rust before any attach happens.
+//!
+//! The UDP path in [`crate::udp`] publishes through [`MqttShared`] and needs no
+//! GIL either.
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -26,11 +28,12 @@ use mqtt_glide::{
 use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString};
-use pyo3_async_runtimes::TaskLocals;
 use pyo3_async_runtimes::tokio::{future_into_py, get_runtime};
 use tokio::sync::{Notify, mpsc};
 
 use crate::MiniserverDataProcessor;
+use crate::miniserver::LoxEgress;
+use crate::process::Core;
 use crate::util::{lock_recover, loggable, loggable_bytes};
 
 /// Inbound queue depth. Also drives the MQTT Receive Maximum so the broker's
@@ -492,28 +495,55 @@ async fn resubscribe_loop(
     }
 }
 
-/// Drains the inbound channel and drives the Rust message handler.
+/// How long one message's writes to the Miniserver may take.
 ///
-/// One `Python::attach` per message. Batching attaches was measured at ~0.03 µs
-/// saved per message against a ~0.28 µs handle path — not worth the complexity.
+/// A backstop, not a policy: [`LoxClient::send_control`] has its own command
+/// timeout, but a session dying between two leaves of the same message would
+/// otherwise be able to hold this worker - and with it the whole inbound
+/// channel - for as long as the crate takes to notice.
+const BATCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Drains the inbound channel and drives the message path.
 ///
-/// Runs inside a `pyo3_async_runtimes::tokio::scope` so the task locals of the
-/// asyncio loop are available when the handler hands coroutines back to Python.
+/// The split between control and data happens here, in Rust, *before* any
+/// attach: a data message goes to [`Core::process_data`] and never touches the
+/// GIL, and only the relay's own control topics - which genuinely have to reach
+/// `global_config` and `orjson` - are handed back to Python.
+///
+/// Sequential on purpose. Awaiting the egress means a slow Miniserver backs up
+/// into the inbound channel and from there into the broker's Receive Maximum,
+/// which is the behaviour worth having: the alternative is a growing pile of
+/// detached tasks all writing to the same socket.
 async fn ingress_worker(
     mut rx: mpsc::Receiver<PublishMessage>,
+    core: Arc<Core<LoxEgress>>,
     processor: Py<MiniserverDataProcessor>,
 ) {
     while let Some(message) = rx.recv().await {
-        // Handed over borrowed: the message outlives the attach, so neither the
-        // topic nor the payload has to be copied out of it first.
+        let Some(kind) = core.control_kind(&message.topic) else {
+            // Borrowed all the way through: nothing is copied out of the
+            // message, and no lock is held across the awaits inside.
+            if tokio::time::timeout(
+                BATCH_TIMEOUT,
+                core.handle_data(&message.topic, &message.payload),
+            )
+            .await
+            .is_err()
+            {
+                warn!(
+                    "Gave up forwarding '{}' after {}s; the rest of the message was dropped",
+                    loggable(&message.topic),
+                    BATCH_TIMEOUT.as_secs()
+                );
+            }
+            continue;
+        };
+
         Python::attach(|py| {
             let bound = processor.bind(py);
-            if let Err(e) = bound
-                .borrow()
-                .handle_mqtt_message(py, &message.topic, &message.payload)
-            {
+            if let Err(e) = bound.borrow().dispatch_control(py, kind, &message.payload) {
                 error!(
-                    "Dropped inbound message on '{}': {e}",
+                    "Dropped control message on '{}': {e}",
                     loggable(&message.topic)
                 );
             }
@@ -596,9 +626,9 @@ impl MqttClient {
         topics: Vec<String>,
         processor: Py<MiniserverDataProcessor>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        // Captured here, on the asyncio thread: the ingress worker runs on tokio
-        // and would otherwise find no running loop to hand coroutines back to.
-        let locals = TaskLocals::with_running_loop(py)?.copy_context(py)?;
+        // Pulled out here so the worker holds it directly. The data path never
+        // borrows the pyclass, so it never needs the GIL to reach the core.
+        let core = processor.bind(py).borrow().core();
 
         let shared = Arc::clone(&self.shared);
         let reconnect = self.reconnect.clone();
@@ -646,10 +676,7 @@ impl MqttClient {
                 .map_err(|e| PyRuntimeError::new_err(format!("MQTT connect failed: {e}")))?;
             shared.client.store(Some(Arc::new(client)));
 
-            get_runtime().spawn(pyo3_async_runtimes::tokio::scope(
-                locals,
-                ingress_worker(rx, processor),
-            ));
+            get_runtime().spawn(ingress_worker(rx, core, processor));
             get_runtime().spawn(resubscribe_loop(
                 Arc::clone(&shared),
                 topics,

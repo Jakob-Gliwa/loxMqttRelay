@@ -119,6 +119,33 @@ graph LR
     Loxone[Loxone Miniserver] -->|UDP Message| UPD[UDP Client]
 ```
 
+#### Where the work happens
+
+The relay is a Python program with a Rust extension, and the division is by
+temperature rather than by feature: everything a message touches is Rust,
+everything else is Python.
+
+```mermaid
+graph LR
+    subgraph rust [Rust - per message]
+        A[MQTT ingress] --> B[flatten and filter]
+        B --> C[Miniserver websocket]
+        D[UDP listener] --> E[MQTT publish]
+    end
+    subgraph python [Python - startup and config]
+        F[config.toml] --> G[whitelist sync]
+        G --> H[restart on config change]
+    end
+```
+
+A forwarded value never enters Python: the MQTT client, the JSON flattening,
+the filters and the encrypted websocket write all run on one tokio runtime, and
+the interpreter lock is not taken anywhere along that path. Python is reached
+for the relay's own control topics (`config/get`, `config/set`, the restart
+triggers), for reading `config.toml`, and for the
+[whitelist sync](#automatic-configuration-sync), which downloads and parses the
+Miniserver's configuration - all of them cold paths that run at startup or when
+something is deliberately changed.
 
 ## Features
 
@@ -406,8 +433,8 @@ relay receives nothing.
 The other direction is no different. A value on its way to the Miniserver is
 not queued either: it is written to the websocket and never acknowledged. If the
 Miniserver cannot be reached, the values of that message are dropped with a log
-line and the relay waits 15 seconds before trying to open the connection again -
-see [Websocket Communication](#websocket-communication).
+line naming the topic and how many were lost, while the client reconnects on its
+own - see [Websocket Communication](#websocket-communication).
 
 If a command must not be lost, do not rely on the relay for it: the Miniserver
 should observe the resulting state (e.g. the device's own status topic) and
@@ -450,6 +477,10 @@ Alternatively to (or in combination with subscription filters) a topic whitelist
 [topics]
 topic_whitelist = ["device_status","sensor_data"]
 ```
+
+An empty whitelist means different things depending on sync:
+- `sync_with_miniserver = false`: no whitelist filter (everything not held back by the other filters is forwarded).
+- `sync_with_miniserver = true`: fail-closed — nothing is forwarded until the sync fills the list. Startup syncs **before** MQTT connects for that reason.
 
 #### Topics to Ignore
 Specify topics that should not be forwarded to the miniserver:
@@ -496,15 +527,18 @@ miniserver_pass = "your-password"
 ```
 
 `miniserver_port` is the port of the websocket handshake as well; `443` switches
-it to a secure connection. The socket is opened lazily, with the first message
-forwarded to the Miniserver, and its loss is what triggers the
+it to a secure connection. Because a Miniserver reached by IP presents a
+CloudDNS certificate whose name never matches the address dialled, that case
+pins the certificate on first use instead of validating it against the public
+root store. The connection is opened during startup, and its loss is what
+triggers the
 [whitelist resync](#automatic-resync-after-a-miniserver-restart).
 
 The connection provides:
 - Encrypted communication using AES and RSA
 - Token-based authentication, with the token refreshed before it expires
-- Automatic reconnection, retried every 15 seconds for as long as it takes
-- A keepalive every 60 seconds, so a dead connection is noticed without traffic
+- Automatic reconnection, retried for as long as it takes
+- A keepalive, so a dead connection is noticed without traffic
 - Support for both ws:// and wss:// (secure websocket) connections
 
 What it does not provide is a confirmation per value. A command is written to
@@ -512,9 +546,8 @@ the socket and that is the end of it - the Miniserver does not answer it, and
 the relay only learns that something is wrong when the connection itself
 breaks. If the socket is down when a message arrives, the values from that
 message are dropped and logged, naming how many were lost and which topic they
-came from; the relay then waits 15 seconds before attempting another handshake,
-so an unreachable Miniserver does not turn into a handshake per message. See
-[Delivery Guarantees](#delivery-guarantees).
+came from. Reconnecting is the client's own business and does not cost a
+handshake per message. See [Delivery Guarantees](#delivery-guarantees).
 
 The one thing the relay still fetches over plain HTTP is the Miniserver's own
 configuration file, for the [whitelist sync](#automatic-configuration-sync) -
@@ -637,8 +670,9 @@ sync_with_miniserver = true
 ```
 
 When enabled, the relay will:
-- Automatically load Miniserver configuration on startup
+- Automatically load Miniserver configuration on startup (**before** subscribing to MQTT)
 - Update the topic whitelist based on Miniserver inputs
+- Treat that whitelist as mandatory: an empty list forwards nothing
 - Resync when Miniserver configuration changes
 
 Caution: This function will assume that every Virtual Input is a possible target for forwarding mqtt messaages.
@@ -647,7 +681,7 @@ Caution: This function will assume that every Virtual Input is a possible target
 
 When the websocket connection to the Miniserver is lost and later re-established, the relay resyncs the whitelist automatically. A restart is the usual consequence of uploading a new configuration, so this keeps the whitelist in step without any extra setup.
 
-The websocket itself is opened as soon as the first message is forwarded to the Miniserver, so the relay has to have something to forward before a loss can be observed at all.
+Only a reconnect does this. The first connect does not, because startup already syncs.
 
 ### Trigger Manual Sync
 
@@ -655,54 +689,49 @@ Configure your Miniserver to publish any message to `{base_topic}/miniservereven
 
 ## Testing Setup
 
-There is no mock Miniserver you can point the relay at any more. The websocket
-negotiates an AES/RSA session and a token, so a stand-in cannot be an arbitrary
-server behind an IP address - it has to take the place of the client library.
-
-For development there is a harness that does exactly that, in
-`tests/harness/mock_miniserver.py`. It records every command the relay would
-have sent and lets you steer the connection: refuse the handshake, delay it,
-drop the socket mid-test, announce a reconnect.
-
-```python
-from tests.harness.mock_miniserver import mock_miniserver
-
-with mock_miniserver(fail_connect=True) as miniserver:
-    ...
-    assert miniserver.commands == [("dev_sensor_temp", "21.5")]
-```
-
-A ready-made `miniserver` fixture (already connected) is available in every
-test. Worked examples live in `tests/harness/test_mock_miniserver_harness.py`.
-
-These tests carry the `harness` marker and a normal run skips them - they are
-there to be run deliberately:
-
-```bash
-uv run pytest -m harness
-```
+The tests are split the same way the code is. Everything a message touches is
+tested in Rust, against the processing core with a recording egress in place of
+the Miniserver; the Python tests cover what genuinely crosses the language
+boundary.
 
 ### The Rust tests
-
-The UDP listener and the MQTT client are implemented in Rust, and so are their
-tests. They cover the parts a Python test can no longer reach: the datagram
-parser with its greedy topic rule, the sender filter and the address handling
-around it.
-
-```bash
-cargo nextest run
-```
-
-The crate builds without pyo3's `extension-module` feature here, so the test
-harness links libpython itself. Point it at an interpreter that ships a shared
-library - the project's own virtualenv will do:
 
 ```bash
 PYO3_PYTHON="$PWD/.venv/bin/python" cargo nextest run
 ```
 
-The shipped wheel is unaffected: `setup.py` turns `extension-module` back on for
-every build that is packaged.
+They cover the UDP datagram parser with its greedy topic rule, the sender
+filter, the MQTT and Miniserver clients' drop accounting, and the flattener.
+
+The flattener is tested differentially: it has a fast route that learns a
+topic's JSON layout once and afterwards only reads values with a byte scanner,
+and a slow route that builds a DOM and stays in the binary as the fallback.
+Every message in the corpus goes through both, and they have to agree exactly -
+same values, same order, including which value wins when two JSON paths
+normalize onto the same Miniserver input. The shape-cache counters are asserted
+alongside, because a fast path that silently stopped engaging would otherwise
+compare the slow route against itself and pass.
+
+The corpus - anonymized real device payloads, handcrafted oddities and seeded
+synthetics - lives in `src/process/corpus/`. It is checked in rather than
+generated: it was always fully determined by its seed, so freezing it costs
+nothing.
+
+`PYO3_PYTHON` matters because the crate builds without pyo3's
+`extension-module` feature here, so the test harness links libpython itself.
+Point it at an interpreter that ships a shared library - the project's own
+virtualenv will do. The shipped wheel is unaffected: `setup.py` turns
+`extension-module` back on for every build that is packaged.
+
+### The Python tests
+
+```bash
+uv run pytest
+```
+
+Config parsing, the whitelist sync, the startup and shutdown sequence, and the
+control topics - the one part of the message path that still calls back into
+Python.
 
 ## Releasing
 

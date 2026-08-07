@@ -10,12 +10,16 @@ import uvloop
 from loxmqttrelay.config import ConfigError, ConfigSection, global_config
 from loxmqttrelay.logging_config import get_lazy_logger
 from loxmqttrelay.miniserver_sync import sync_miniserver_whitelist
-from loxmqttrelay.http_miniserver_handler import http_miniserver_handler
-from loxwebsocket.lox_ws_api import loxwebsocket
 import loxmqttrelay.utils as utils
 
 # The imports are now handled by __init__.py
-from loxmqttrelay import MiniserverDataProcessor, MqttClient, UdpServer, init_rust_logger
+from loxmqttrelay import (
+    MiniserverClient,
+    MiniserverDataProcessor,
+    MqttClient,
+    UdpServer,
+    init_rust_logger,
+)
 
 TOPIC = types.SimpleNamespace(
     CONFIG_SET = f"{global_config.general.base_topic}config/set",
@@ -43,10 +47,13 @@ if not init_rust_logger(logging.getLevelName(logging.getLogger().getEffectiveLev
 
 class MQTTRelay:
     def __init__(self):
-        # The client owns the connection state that the Rust processor shares,
-        # so it has to exist before the processor is built.
+        # Both clients own connection state that the Rust processor shares, so
+        # they have to exist before the processor is built.
         self.mqtt_client = MqttClient(global_config)
-        self.miniserver_data_processor = MiniserverDataProcessor(TOPIC, global_config, self, self.mqtt_client, http_miniserver_handler, orjson)
+        self.miniserver_client = MiniserverClient(global_config)
+        self.miniserver_data_processor = MiniserverDataProcessor(
+            TOPIC, global_config, self, self.mqtt_client, self.miniserver_client, orjson
+        )
         # Shares the client's connection state, so a datagram is parsed and
         # published entirely in Rust. Binds nothing until start().
         self.udp_server = UdpServer(global_config, self.mqtt_client)
@@ -67,11 +74,16 @@ class MQTTRelay:
         self._stop = asyncio.Event()
         self._install_signal_handlers()
 
-        await self.connect_and_subscribe_mqtt()
+        # Websocket first so writes have somewhere to go, then the whitelist
+        # sync, and only then MQTT. Subscribing with an empty whitelist while
+        # sync_with_miniserver is on would either flood every retained topic at
+        # the Miniserver (old open semantics) or drop everything until the sync
+        # finishes (fail-closed) - both worse than having the list ready first.
+        # A reconnect resyncs from the Rust side, which is why the relay itself
+        # is handed over here.
+        await self.miniserver_client.connect(self)
         await self.handle_miniserver_sync()
-        # A websocket reconnect means the Miniserver went away and came back,
-        # which usually follows a configuration upload - so resync the whitelist.
-        loxwebsocket.add_event_callback(self.handle_miniserver_sync, [loxwebsocket.EventType.RECONNECTED])
+        await self.connect_and_subscribe_mqtt()
         # Awaited rather than spawned: a failed bind has to abort startup, not
         # vanish into a discarded task and leave a relay with no inbound path.
         await self.udp_server.start()
@@ -134,11 +146,10 @@ class MQTTRelay:
         except Exception:
             logger.warning("Error during MQTT shutdown", exc_info=True)
 
-        if "CONNECTED" in loxwebsocket.state:
-            try:
-                await loxwebsocket.stop()
-            except Exception:
-                logger.warning("Error while closing the Miniserver websocket", exc_info=True)
+        try:
+            await self.miniserver_client.stop()
+        except Exception:
+            logger.warning("Error while closing the Miniserver websocket", exc_info=True)
 
         logger.info("Shutdown complete")
 
@@ -152,9 +163,23 @@ class MQTTRelay:
 
         try:
             inputs = await sync_miniserver_whitelist()
+            # An empty extract would install a fail-closed gate and stop every
+            # forward. That is almost never intentional - keep what we had and
+            # say so, rather than wiping a working list.
+            if not inputs:
+                logger.warning(
+                    "Miniserver sync returned no virtual inputs; keeping whitelist "
+                    f"from config ({len(initial_whitelist)} entries)"
+                )
+                self.miniserver_data_processor.update_topic_whitelist(
+                    list(initial_whitelist)
+                )
+                return
             global_config.update_config(ConfigSection.TOPICS, {'topic_whitelist': inputs})
             self.miniserver_data_processor.update_topic_whitelist(list(inputs))
-            logger.info("Whitelist updated from miniserver configuration")
+            logger.info(
+                f"Whitelist updated from miniserver configuration ({len(inputs)} entries)"
+            )
         except Exception as e:
             logger.error(f"Failed to sync with miniserver: {str(e)}")
             logger.info("Keeping whitelist from config")
@@ -163,12 +188,16 @@ class MQTTRelay:
     
     # UPDATED: Synchronous wrapper with added logging to help testing
     def schedule_miniserver_sync(self):
-        """Schedule the asynchronous handle_miniserver_sync in the event loop."""
-        logger.info("Miniserver startup detected, resyncing whitelist")
+        """Schedule the asynchronous handle_miniserver_sync in the event loop.
+
+        Called from Rust on a Miniserver startup event and after every websocket
+        reconnect; both mean the Miniserver may accept different inputs now.
+        """
+        logger.debug("Whitelist resync requested")
         if self._loop is None:
             logger.error("Cannot resync whitelist: event loop not running")
             return
-        # Reached from the Rust ingress worker, i.e. off the event loop thread.
+        # Reached from a tokio thread, i.e. off the event loop thread.
         asyncio.run_coroutine_threadsafe(self.handle_miniserver_sync(), self._loop)
 
     async def connect_and_subscribe_mqtt(self):
@@ -197,8 +226,8 @@ class MQTTRelay:
 
         Reached from the Rust ingress worker, i.e. off the event loop thread.
         The exec itself is left to main() once the loop is closed - doing it
-        here would replace the process image from inside handle_mqtt_message,
-        with the MQTT session and the UDP socket still open.
+        here would replace the process image from inside the control-topic
+        handler, with the MQTT session and the UDP socket still open.
         """
         if self._loop is None:
             os.execv(sys.executable, [sys.executable] + sys.argv)

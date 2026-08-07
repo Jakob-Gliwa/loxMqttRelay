@@ -5,18 +5,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "loxmqttrelay"
-version = "0.3.0"
+version = "0.4.0"
 description = "MQTT Relay for Loxone"
 requires-python = ">=3.14"
+# The Miniserver websocket and its crypto are Rust now (the `loxwebsocket`
+# crate), so neither the Python client nor pycryptodome is a dependency any
+# more. What is left is the cold path: config, the whitelist sync, logging.
 dependencies = [
     "aiohttp>=3.14.1",
     "orjson>=3.11.9",
-    "pycryptodome>=3.23.0",
     "uvloop>=0.22.1",
-    "construct>=2.10.70",
     "tomlkit>=0.15.0",
     "lxml>=6.1.1",
-    "loxwebsocket>=0.6.0",
     "lz4>=4.4.5",
     "pygixml>=0.11.0",
 ]
@@ -56,9 +56,6 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = '-v --cov=loxmqttrelay --cov-report=term-missing -m "not harness"'
-markers = [
-    "harness: developer-driven tests against the mock Miniserver; run with -m harness",
-]
+addopts = "-v --cov=loxmqttrelay --cov-report=term-missing"
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"

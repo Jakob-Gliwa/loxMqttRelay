@@ -41,12 +41,9 @@ Temp/
 *.log
 logs/
 config/config.toml
-src/loxwebsocket/cython_modules/extractor.c
 target/
 benchmark.py
 newbench.py
 benchmarks/
 lib copy.rs
-src/loxwebsocket/cython_modules/extractor_compatible.c
-src/loxwebsocket/cython_modules/extractor_optimized.c
 config/sps0.LoxCC

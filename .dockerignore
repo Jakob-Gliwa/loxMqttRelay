@@ -35,8 +35,3 @@ logs/
 dist/
 build/
 *.egg-info/
-
-# Cython build files
-src/loxmqttrelay/cython_modules/*.c
-src/loxmqttrelay/cython_modules/benchmark.py
-src/loxmqttrelay/cython_modules/bechmark_expand_json.py 

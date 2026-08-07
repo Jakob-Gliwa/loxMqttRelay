@@ -12,9 +12,10 @@ logger = logging.getLogger(__name__)
 # Rust Setup
 ################################################################################
 
+# No version here: pyproject.toml declares it, and check_version_parity.py holds
+# that one to Cargo.toml and __init__.py. A second one would win over all three.
 base_setup = {
     "name": "loxmqttrelay",
-    "version": "1.0",
     "packages": find_packages(where="src"),
     "package_dir": {"": "src"},
 }

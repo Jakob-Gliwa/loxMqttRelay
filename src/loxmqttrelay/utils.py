@@ -187,12 +187,10 @@ def setup_logging():
 _KEY_PACKAGES = (
     "aiohttp",
     "orjson",
-    "pycryptodome",
     "uvloop",
     "lxml",
     "pygixml",
     "lz4",
-    "loxwebsocket",
 )
 
 

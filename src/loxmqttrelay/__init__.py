@@ -4,7 +4,7 @@ MQTT Relay for Loxone
 This package provides a bridge between MQTT and Loxone Miniserver, allowing bidirectional
 communication between MQTT topics and Loxone controls.
 """
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from loxmqttrelay.utils import prefer_optimized_build, setup_logging
 from loxmqttrelay.logging_config import get_lazy_logger
@@ -22,6 +22,7 @@ logger = get_lazy_logger(__name__)
 if prefer_optimized_build():
     logger.info("Loading Rust extension: optimized build (x86_64 + AVX2) ...")
     from loxmqttrelay.optimized._loxmqttrelay import (
+        MiniserverClient,
         MiniserverDataProcessor,
         MqttClient,
         UdpServer,
@@ -32,6 +33,7 @@ if prefer_optimized_build():
 else:
     logger.info("Loading Rust extension: compatible build (arm64 or no AVX2) ...")
     from loxmqttrelay.compatible._loxmqttrelay import (
+        MiniserverClient,
         MiniserverDataProcessor,
         MqttClient,
         UdpServer,
@@ -48,6 +50,7 @@ from .config import AppConfig, GeneralConfig, TopicsConfig, ProcessingConfig
 
 __all__ = [
     'global_config',
+    'MiniserverClient',
     'MiniserverDataProcessor',
     'MqttClient',
     'UdpServer',

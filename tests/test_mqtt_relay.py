@@ -1,20 +1,21 @@
-import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
-import logging
-import json
-from loxwebsocket.lox_ws_api import loxwebsocket
-from loxmqttrelay.main import MQTTRelay, TOPIC
-from loxmqttrelay.config import (
-    Config, AppConfig, GeneralConfig,
-    TopicsConfig, MiniserverConfig, global_config
-)
+"""Der Whitelist-Sync und was ihn auslöst.
+
+Der Sync selbst ist Kaltpfad und bleibt in Python. Was ihn nach einem
+Websocket-Reconnect anstößt, liegt inzwischen in Rust
+(``src/miniserver.rs``) und wird dort geprüft - hier bleibt der
+Startup-Event über MQTT, der weiterhin über die Sprachgrenze läuft.
+"""
+
 import asyncio
 import typing
-from typing import AsyncGenerator, Generator, List
+from typing import List
+from unittest.mock import MagicMock, patch
 
-def _stub_udp_server() -> MagicMock:
-    """A UdpServer that binds nothing - these tests are about the sync path."""
-    return MagicMock(start=AsyncMock(), stop=AsyncMock())
+import pytest
+
+from loxmqttrelay.config import AppConfig, Config, global_config
+from loxmqttrelay.main import TOPIC, MQTTRelay
+
 
 @pytest.fixture(autouse=True)
 def cleanup_singletons() -> typing.Generator[None, None, None]:
@@ -57,7 +58,7 @@ async def test_whitelist_loading_sequence(config_instance: Config, mock_logger: 
         relay = MQTTRelay()
         with patch('loxmqttrelay.main.sync_miniserver_whitelist') as mock_sync:
             mock_sync.return_value = ["synced_topic1", "synced_topic2"]
-            
+
             await relay.handle_miniserver_sync()
 
             # Logger-Infos einsammeln
@@ -106,14 +107,31 @@ async def test_whitelist_loading_with_sync_disabled(config_instance: Config, moc
             # Whitelist bleibt bei den Config-Werten
             assert global_config.topics.topic_whitelist == {"initial_topic1", "initial_topic2"}
 
+
+@pytest.mark.asyncio
+async def test_empty_sync_keeps_existing_whitelist(config_instance: Config, mock_logger: MagicMock) -> None:
+    """An empty extract must not wipe a working whitelist into the fail-closed gate."""
+    with patch.object(config_instance, '_load_config', return_value=None):
+        relay = MQTTRelay()
+        with patch('loxmqttrelay.main.sync_miniserver_whitelist', return_value=[]):
+            await relay.handle_miniserver_sync()
+
+            warn_msgs: list[str] = [args[0] for args, kwargs in mock_logger.warning.call_args_list]
+            assert any("no virtual inputs" in m for m in warn_msgs)
+            assert global_config.topics.topic_whitelist == {"initial_topic1", "initial_topic2"}
+            assert relay.miniserver_data_processor.topic_whitelist == {
+                "initial_topic1",
+                "initial_topic2",
+            }
+
 @pytest.mark.asyncio
 async def test_whitelist_sync_on_miniserver_startup(config_instance: Config, mock_logger: MagicMock) -> None:
     """Test: Bei miniserverevent/startup wird erneut gesynct."""
     with patch.object(config_instance, '_load_config', return_value=None):
         relay = MQTTRelay()
-        # The startup event normally arrives from the Rust ingress thread, so the
-        # relay schedules onto a loop it captured in main(). This test drives it
-        # directly and has to supply that loop itself.
+        # Das Startup-Event kommt sonst vom Rust-Ingress-Worker, der auf die in
+        # main() gemerkte Loop plant. Dieser Test treibt es direkt und muss die
+        # Loop deshalb selbst stellen.
         relay._loop = asyncio.get_running_loop()
         with patch('loxmqttrelay.main.sync_miniserver_whitelist', return_value=["synced_topic1", "synced_topic2"]) as mock_sync:
             # Erstmalig syncen
@@ -123,58 +141,16 @@ async def test_whitelist_sync_on_miniserver_startup(config_instance: Config, moc
             mock_sync.reset_mock()
             mock_logger.reset_mock()
 
-            # Startup-Event per MQTT simulieren - now using the Rust implementation
-            # Since handle_mqtt_message is synchronous in Rust, we call it directly
-            relay.miniserver_data_processor.handle_mqtt_message(
-                TOPIC.MINISERVER_STARTUP_EVENT,
-                b""
-            )
+            # Startup-Event per MQTT simulieren
+            assert relay.miniserver_data_processor.handle_control(
+                TOPIC.MINISERVER_STARTUP_EVENT, b""
+            ) is True
 
-            # Add a small delay to allow async operations to complete
-            await asyncio.sleep(1)
+            # Der Sync wird auf die Loop geplant, also einmal durchlaufen lassen.
+            await asyncio.sleep(0.1)
 
-            # Wurde sync erneut aufgerufen?
             mock_sync.assert_called_once()
-
-            # Ist die erwartete Log-Message dabei?
-            info_msgs: List[str] = [args[0] for args, kwargs in mock_logger.info.call_args_list]
-            assert any("Miniserver startup detected, resyncing whitelist" in m for m in info_msgs)
-
-            # Neue Whitelist sollte wieder "synced_topic1", "synced_topic2" enthalten
             assert global_config.topics.topic_whitelist == {"synced_topic1", "synced_topic2"}
-
-@pytest.mark.asyncio
-async def test_whitelist_sync_on_websocket_reconnect(config_instance: Config, mock_logger: MagicMock) -> None:
-    """Test: Ein Websocket-Reconnect löst einen erneuten Sync aus."""
-    with patch.object(config_instance, '_load_config', return_value=None):
-        relay = MQTTRelay()
-        with patch('loxmqttrelay.main.sync_miniserver_whitelist', return_value=["reconnect_topic"]) as mock_sync, \
-             patch.object(relay, 'connect_and_subscribe_mqtt', new=AsyncMock()), \
-             patch.object(relay, 'udp_server', new=_stub_udp_server()):
-            main_task = asyncio.create_task(relay.main())
-            try:
-                # main() läuft bis zum abschließenden await asyncio.Future()
-                await asyncio.sleep(0.1)
-
-                # Reset, damit nur der Reconnect-Sync gezählt wird
-                mock_sync.reset_mock()
-
-                await loxwebsocket.send_event(loxwebsocket.EventType.RECONNECTED)
-                await asyncio.sleep(0.1)
-            finally:
-                main_task.cancel()
-                # _event_callbacks ist ein Klassenattribut und würde sonst in andere Tests lecken
-                loxwebsocket._event_callbacks.pop(relay.handle_miniserver_sync, None)
-
-            mock_sync.assert_called_once()
-            assert global_config.topics.topic_whitelist == {"reconnect_topic"}
-
-def _forwarded_topics(handler: MagicMock) -> List[str]:
-    return [
-        item[0]
-        for call in handler.send_batch_to_miniserver.call_args_list
-        for item in call[0][0]
-    ]
 
 @pytest.mark.asyncio
 async def test_configured_do_not_forward_survives_startup_and_sync(config_instance: Config, mock_logger: MagicMock) -> None:
@@ -186,21 +162,15 @@ async def test_configured_do_not_forward_survives_startup_and_sync(config_instan
     config_instance._config.topics.topic_whitelist = set()
     config_instance._config.topics.do_not_forward = [r"^private\/.*"]
 
-    with patch('loxmqttrelay.main.http_miniserver_handler', new=MagicMock()) as handler:
-        relay = MQTTRelay()
-        processor = relay.miniserver_data_processor
+    relay = MQTTRelay()
+    processor = relay.miniserver_data_processor
+    assert processor.get_do_not_forward_patterns() == [r"^private\/.*"]
 
-        processor.process_data("private/secret", "value")
-        processor.process_data("public/sensor", "value")
-        assert _forwarded_topics(handler) == ["public/sensor"]
+    with patch('loxmqttrelay.main.sync_miniserver_whitelist', return_value=["private_secret", "public_sensor"]):
+        await relay.handle_miniserver_sync()
 
-        with patch('loxmqttrelay.main.sync_miniserver_whitelist', return_value=["private_secret", "public_sensor"]):
-            await relay.handle_miniserver_sync()
-
-        handler.send_batch_to_miniserver.reset_mock()
-        processor.process_data("private/secret", "value")
-        processor.process_data("public/sensor", "value")
-        assert _forwarded_topics(handler) == ["public/sensor"]
+    assert processor.topic_whitelist == {"private_secret", "public_sensor"}
+    assert processor.get_do_not_forward_patterns() == [r"^private\/.*"]
 
 @pytest.mark.asyncio
 async def test_invalid_do_not_forward_pattern_fails_startup(config_instance: Config, mock_logger: MagicMock) -> None:
@@ -209,25 +179,3 @@ async def test_invalid_do_not_forward_pattern_fails_startup(config_instance: Con
 
     with pytest.raises(ValueError, match="do_not_forward"):
         MQTTRelay()
-
-@pytest.mark.asyncio
-async def test_no_sync_on_other_websocket_events(config_instance: Config, mock_logger: MagicMock) -> None:
-    """Test: Nur RECONNECTED synct - der erste Connect hat das bereits erledigt."""
-    with patch.object(config_instance, '_load_config', return_value=None):
-        relay = MQTTRelay()
-        with patch('loxmqttrelay.main.sync_miniserver_whitelist', return_value=["reconnect_topic"]) as mock_sync, \
-             patch.object(relay, 'connect_and_subscribe_mqtt', new=AsyncMock()), \
-             patch.object(relay, 'udp_server', new=_stub_udp_server()):
-            main_task = asyncio.create_task(relay.main())
-            try:
-                await asyncio.sleep(0.1)
-                mock_sync.reset_mock()
-
-                await loxwebsocket.send_event(loxwebsocket.EventType.CONNECTED)
-                await loxwebsocket.send_event(loxwebsocket.EventType.CONNECTION_CLOSED)
-                await asyncio.sleep(0.1)
-            finally:
-                main_task.cancel()
-                loxwebsocket._event_callbacks.pop(relay.handle_miniserver_sync, None)
-
-            mock_sync.assert_not_called()

@@ -24,8 +24,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Modern stable Rust toolchain via rustup (understands Cargo.lock v4).
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain stable --profile minimal
+# Downloaded to a file rather than piped into sh: /bin/sh here is dash, which
+# has no pipefail, so a curl that fails feeds sh an empty script and the layer
+# succeeds without a compiler. The failure would then surface far downstream as
+# setuptools-rust's "can't find Rust compiler".
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh \
+    && sh /tmp/rustup-init.sh -y --default-toolchain stable --profile minimal \
+    && rm /tmp/rustup-init.sh \
+    && cargo --version
 
 WORKDIR /app
 RUN uv venv
