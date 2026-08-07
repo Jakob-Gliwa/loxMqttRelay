@@ -45,10 +45,14 @@ class MockMiniserver:
         state: str = "CLOSED",
         fail_connect: bool = False,
         connect_delay: float = 0.0,
+        fail_targets: set[str] | None = None,
     ):
         self.state = state
         self.fail_connect = fail_connect
         self.connect_delay = connect_delay
+        # Loxone inputs that reject whatever is sent to them, so a test can watch
+        # what one bad value does to the rest of a message.
+        self.fail_targets = fail_targets or set()
         self.commands: list[tuple[str, str]] = []
         self.connects: list[dict[str, Any]] = []
         self._event_callbacks: dict[Any, list["MockMiniserver.EventType"]] = {}
@@ -82,6 +86,8 @@ class MockMiniserver:
     async def send_websocket_command(self, device_uuid: str, value: str) -> None:
         if self.state != "CONNECTED":
             raise ConnectionError(f"mock Miniserver is {self.state}, not connected")
+        if device_uuid in self.fail_targets:
+            raise RuntimeError(f"mock Miniserver refuses '{device_uuid}'")
         self.commands.append((device_uuid, value))
 
     async def stop(self) -> int:

@@ -22,6 +22,13 @@ from tests.flatten_payloads import PAYLOADS
 
 BASE_TOPIC = "myrelay/"
 
+# Mirrors the two constants of the same name in ``src/lib.rs``. Nothing enforces
+# that from here, but the tests that use them assert the resulting behaviour
+# message by message, so a change on the Rust side fails them rather than
+# quietly making them test nothing.
+NEGATIVE_STRIKES = 8
+NEGATIVE_RETRY_EVERY = 64
+
 
 class TopicNS:
     """Control topics kept under BASE_TOPIC so data topics never collide."""

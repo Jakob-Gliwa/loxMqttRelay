@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
+use bytes::Bytes;
+use bytestring::ByteString;
 use log::{debug, error, info, warn};
 use mqtt_glide::{
     AppError, ClientBuilder, ClientId, LifecycleHook, MqttClient as GlideClient, PublishMessage,
@@ -175,18 +177,26 @@ impl MqttShared {
         });
     }
 
+    /// Hand a message to the broker connection.
+    ///
+    /// Takes the buffers by value because that is what the builder wants: glide
+    /// publishes a `ByteString` topic and a `Bytes` payload, both refcounted, so
+    /// a caller that already owns its `String`/`Vec<u8>` can pass them straight
+    /// through. Borrowing here instead meant copying every topic and every
+    /// payload once more at the very end of the path, after the caller had
+    /// already allocated them.
     async fn publish_on(
         client: &GlideClient,
-        topic: &str,
-        payload: &[u8],
+        topic: ByteString,
+        payload: Bytes,
         retain: bool,
         qos: QoS,
         user_properties: Vec<(String, String)>,
     ) -> Result<(), AppError> {
         let mut publish = client
             .publish_with()
-            .topic(topic.to_owned())
-            .payload(payload.to_vec())
+            .topic(topic)
+            .payload(payload)
             .qos(qos)
             .retain(retain);
         for (key, value) in user_properties {
@@ -198,23 +208,34 @@ impl MqttShared {
     /// Publish, or report why the message was lost. Never fails silently.
     async fn deliver(
         &self,
-        topic: &str,
-        payload: &[u8],
+        topic: ByteString,
+        payload: Bytes,
         retain: bool,
         qos: QoS,
         user_properties: Vec<(String, String)>,
         source: Option<SocketAddr>,
     ) -> Option<DropReason> {
         let Some(client) = self.live_client() else {
-            self.record_drop(topic, payload, DropReason::Disconnected, None, source);
+            self.record_drop(&topic, &payload, DropReason::Disconnected, None, source);
             return Some(DropReason::Disconnected);
         };
-        match Self::publish_on(&client, topic, payload, retain, qos, user_properties).await {
+        // Kept for the error path, where the log needs the same topic and
+        // payload. Both clones are a refcount increment, not a copy.
+        let result = Self::publish_on(
+            &client,
+            topic.clone(),
+            payload.clone(),
+            retain,
+            qos,
+            user_properties,
+        )
+        .await;
+        match result {
             Ok(()) => None,
             Err(e) => {
                 self.record_drop(
-                    topic,
-                    payload,
+                    &topic,
+                    &payload,
                     DropReason::SendFailed,
                     Some(&e.to_string()),
                     source,
@@ -230,8 +251,8 @@ impl MqttShared {
     /// message was lost.
     pub(crate) async fn publish(
         &self,
-        topic: &str,
-        payload: &[u8],
+        topic: ByteString,
+        payload: Bytes,
         retain: bool,
         user_properties: Vec<(String, String)>,
         source: Option<SocketAddr>,
@@ -259,8 +280,8 @@ impl MqttShared {
     /// then logged and kept like any other lost publish.
     pub(crate) async fn publish_status(&self, topic: &str, state: &str) -> Option<DropReason> {
         self.deliver(
-            topic,
-            state.as_bytes(),
+            ByteString::from(topic),
+            Bytes::copy_from_slice(state.as_bytes()),
             true,
             QoS::AtLeastOnce,
             Vec::new(),
@@ -274,15 +295,25 @@ impl MqttShared {
     /// The disconnected case is settled here rather than in the spawned task, so
     /// the drop is visible to the caller as soon as this returns.
     pub(crate) fn publish_detached(self: &Arc<Self>, topic: String, payload: Vec<u8>) {
+        // Both take the caller's buffer over rather than copying it, so the
+        // publish and the error log share one allocation each.
+        let topic = ByteString::from(topic);
+        let payload = Bytes::from(payload);
         let Some(client) = self.live_client() else {
             self.record_drop(&topic, &payload, DropReason::Disconnected, None, None);
             return;
         };
         let shared = Arc::clone(self);
         get_runtime().spawn(async move {
-            let result =
-                Self::publish_on(&client, &topic, &payload, false, QoS::AtMostOnce, Vec::new())
-                    .await;
+            let result = Self::publish_on(
+                &client,
+                topic.clone(),
+                payload.clone(),
+                false,
+                QoS::AtMostOnce,
+                Vec::new(),
+            )
+            .await;
             if let Err(e) = result {
                 shared.record_drop(
                     &topic,
@@ -473,15 +504,18 @@ async fn ingress_worker(
     processor: Py<MiniserverDataProcessor>,
 ) {
     while let Some(message) = rx.recv().await {
-        // ByteString is refcounted, so keeping the topic for the error branch
-        // costs an atomic rather than a second allocation per message.
-        let received_on = message.topic.clone();
-        let topic = String::from(message.topic);
-        let payload = message.payload.to_vec();
+        // Handed over borrowed: the message outlives the attach, so neither the
+        // topic nor the payload has to be copied out of it first.
         Python::attach(|py| {
             let bound = processor.bind(py);
-            if let Err(e) = bound.borrow().handle_mqtt_message(py, topic, payload) {
-                error!("Dropped inbound message on '{}': {e}", loggable(&received_on));
+            if let Err(e) = bound
+                .borrow()
+                .handle_mqtt_message(py, &message.topic, &message.payload)
+            {
+                error!(
+                    "Dropped inbound message on '{}': {e}",
+                    loggable(&message.topic)
+                );
             }
         });
     }
@@ -645,11 +679,14 @@ impl MqttClient {
         user_properties: Option<Vec<(String, String)>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         // Edition 2024 drops if-let temps before `else`; match keeps the borrow
-        // scopes clear while we copy out owned bytes from either cast.
+        // scopes clear while we copy out owned bytes from either cast. The one
+        // copy out of Python's buffer is unavoidable - it belongs to the
+        // interpreter and the publish outlives the call - but it is the only one
+        // on this path now.
         let payload = match message.cast::<PyString>() {
-            Ok(text) => text.to_cow()?.into_owned().into_bytes(),
+            Ok(text) => Bytes::from(text.to_cow()?.into_owned().into_bytes()),
             Err(_) => match message.cast::<PyBytes>() {
-                Ok(raw) => raw.as_bytes().to_vec(),
+                Ok(raw) => Bytes::copy_from_slice(raw.as_bytes()),
                 Err(_) => {
                     return Err(PyTypeError::new_err("message must be str or bytes"));
                 }
@@ -658,10 +695,11 @@ impl MqttClient {
 
         let shared = Arc::clone(&self.shared);
         let properties = user_properties.unwrap_or_default();
+        let topic = ByteString::from(topic);
 
         future_into_py(py, async move {
             Ok(shared
-                .publish(&topic, &payload, retain, properties, None)
+                .publish(topic, payload, retain, properties, None)
                 .await
                 .map(DropReason::as_str))
         })

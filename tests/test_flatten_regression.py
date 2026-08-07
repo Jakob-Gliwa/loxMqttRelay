@@ -3,9 +3,8 @@ Regression suite for the shape-plan flattener.
 
 The flattener has two routes. The fast one learns a topic's JSON layout once
 and afterwards only reads values with a byte scanner. The slow one builds a
-``serde_json`` DOM and is, unchanged, the implementation from before the
-optimization; it stays in the binary as the fallback for every document the
-scanner refuses.
+``serde_json`` DOM and stays in the binary as the fallback for every document
+the scanner refuses.
 
 Every test here drives both routes with the same message and demands identical
 output - same values, same order, including which value wins when two JSON
@@ -14,6 +13,13 @@ that up: without it a fast path that silently stopped engaging would compare
 the slow route against itself and pass. A plan is only cached once it has
 flattened a whole document, so a message that builds no plan and leaves none
 behind is a message that went down the DOM route.
+
+What the route comparison covers is therefore the part where the two genuinely
+differ: which leaves a document yields, in which order, and which of them
+survive the filters. The two per-leaf transformations are shared code, so they
+are pinned separately against the cached ``_convert_boolean`` and
+``normalize_topic``, which remain independent implementations of the same two
+answers.
 
 Corpus: anonymized real device payloads, deterministic synthetics and a pile of
 handcrafted oddities, each under seven filter/whitelist scenarios, plus a seeded
@@ -55,9 +61,9 @@ def pairs():
 def raw_pair():
     """A plan/DOM pair built with ``processing.convert_booleans`` turned off.
 
-    Boolean handling is the one step the two routes each implement themselves,
-    so switching it off needs its own parity check rather than riding along on
-    the pairs above.
+    The setting is read once per route at construction and gates the converter
+    in two different places, so whether it is honoured needs its own parity
+    check rather than riding along on the pairs above.
     """
     return fc.Pair(global_config, True, convert_booleans=False)
 
@@ -170,23 +176,208 @@ async def test_unplannable_payloads_fall_back(pairs, payload_name, reason):
 
 
 @pytest.mark.asyncio
-async def test_boolean_mapping_is_pinned(pairs):
-    """Edge cases around the mapping that the payload corpus does not contain.
+async def test_a_plan_the_document_outgrew_is_dropped(pairs):
+    """A plan that stops fitting must not sit in the cache being retried.
 
-    The routes no longer share their boolean conversion - the DOM path uses the
-    original ``_convert_boolean`` - so every value in the corpus already gets
-    compared. This adds the inputs the corpus has no reason to produce:
-    surrounding whitespace, mixed case, near-misses and non-ASCII.
+    Left behind, it would be fetched and run against every following message,
+    fail, and only leave once the LRU evicted it.
+    """
+    pair = pairs[True]
+    pair.apply(fc.SCENARIOS["plain"], None)
+    topic = "dev/outgrown"
+
+    before = pair.plan.get_shape_metrics()
+    for _ in range(2):
+        plan, dom = pair.run(topic, PAYLOADS["real_heating"])
+        assert plan == dom
+    planned = pair.plan.get_shape_metrics()
+    assert planned["plans"] == before["plans"] + 1, "the payload should have planned"
+    assert planned["hits"] == before["hits"] + 1, "the second message replayed it"
+
+    # Same topic, a document no plan can be built for at all.
+    plan, dom = pair.run(topic, PAYLOADS["odd_escaped_quote"])
+    assert plan == dom
+    after = pair.plan.get_shape_metrics()
+
+    assert after["plans"] == before["plans"], "the plan that no longer fits must go"
+    assert after["learn_failures"] == before["learn_failures"] + 1
+    # Fetching the plan counted a hit; it was taken back when the plan turned
+    # out not to carry the document.
+    assert after["hits"] == planned["hits"], "a plan that did not fit is not a hit"
+
+
+@pytest.mark.asyncio
+async def test_a_topic_that_refuses_everything_stops_being_offered_a_plan(pairs):
+    """Nothing is gained by scanning a document that will be refused again."""
+    pair = pairs[True]
+    pair.apply(fc.SCENARIOS["plain"], None)
+    topic = "dev/never_plannable"
+    payload = PAYLOADS["odd_escaped_quote"]
+
+    before = pair.plan.get_shape_metrics()
+    for _ in range(fc.NEGATIVE_STRIKES):
+        plan, dom = pair.run(topic, payload)
+        assert plan == dom
+    armed = pair.plan.get_shape_metrics()
+
+    assert armed["learn_failures"] == before["learn_failures"] + fc.NEGATIVE_STRIKES
+    assert armed["negative_skips"] == before["negative_skips"], "not held back yet"
+    assert armed["unplannable"] == before["unplannable"] + 1
+
+    for _ in range(20):
+        plan, dom = pair.run(topic, payload)
+        assert plan == dom, "being held back must not change what is forwarded"
+    after = pair.plan.get_shape_metrics()
+
+    assert after["learn_failures"] == armed["learn_failures"], (
+        "a held-back topic must stop paying for a scan that cannot succeed"
+    )
+    assert after["negative_skips"] == armed["negative_skips"] + 20
+    assert after["plans"] == before["plans"], "nothing was ever planned here"
+
+
+@pytest.mark.asyncio
+async def test_an_occasional_refusal_does_not_cost_the_fast_path(pairs):
+    """The expensive mistake is skipping a plan that would have worked.
+
+    A topic that sends one unplannable document among plannable ones must keep
+    its fast path; at a threshold of one refusal it lost it for 64 messages.
+    """
+    pair = pairs[True]
+    pair.apply(fc.SCENARIOS["plain"], None)
+    topic = "dev/mostly_plannable"
+
+    before = pair.plan.get_shape_metrics()
+    for i in range(30):
+        payload = PAYLOADS["odd_escaped_quote" if i % 5 == 4 else "real_solar"]
+        plan, dom = pair.run(topic, payload)
+        assert plan == dom
+    after = pair.plan.get_shape_metrics()
+
+    assert after["negative_skips"] == before["negative_skips"], (
+        "an occasional refusal must not arm the skip"
+    )
+    # Six refusals, each dropping the plan, so the next plannable message
+    # rebuilds it - and the 24 plannable ones all got the plan route.
+    assert after["learn_failures"] == before["learn_failures"] + 6
+    assert after["learns"] >= before["learns"] + 6
+
+
+@pytest.mark.asyncio
+async def test_a_topic_that_becomes_plannable_again_recovers(pairs):
+    """Held back is not given up on: the plan route is offered again."""
+    pair = pairs[True]
+    pair.apply(fc.SCENARIOS["plain"], None)
+    topic = "dev/recovers"
+
+    for _ in range(fc.NEGATIVE_STRIKES):
+        pair.run(topic, PAYLOADS["odd_escaped_quote"])
+    armed = pair.plan.get_shape_metrics()
+
+    # Plannable from here on, but the topic is held back for the moment.
+    for _ in range(fc.NEGATIVE_RETRY_EVERY - 1):
+        plan, dom = pair.run(topic, PAYLOADS["real_sensor"])
+        assert plan == dom
+    waiting = pair.plan.get_shape_metrics()
+    assert waiting["plans"] == armed["plans"], "still on the DOM route"
+    assert waiting["negative_skips"] == armed["negative_skips"] + fc.NEGATIVE_RETRY_EVERY - 1
+
+    plan, dom = pair.run(topic, PAYLOADS["real_sensor"])
+    assert plan == dom
+    recovered = pair.plan.get_shape_metrics()
+
+    assert recovered["plans"] == armed["plans"] + 1, (
+        f"a plannable topic must recover within {fc.NEGATIVE_RETRY_EVERY} messages"
+    )
+    assert recovered["unplannable"] == armed["unplannable"] - 1
+
+    # And from now on it is a plain cache hit again.
+    plan, dom = pair.run(topic, PAYLOADS["real_sensor"])
+    assert plan == dom
+    assert pair.plan.get_shape_metrics()["hits"] == recovered["hits"] + 1
+
+
+@pytest.mark.asyncio
+async def test_shape_metrics_and_shape_stats_agree(pairs):
+    """The 2-tuple stays what it was; the dict is the same numbers plus more."""
+    pair = pairs[True]
+    pair.apply(fc.SCENARIOS["plain"], None)
+    pair.run("dev/metrics", PAYLOADS["real_heating"])
+
+    cached, built = pair.plan.get_shape_stats()
+    metrics = pair.plan.get_shape_metrics()
+
+    assert metrics["plans"] == cached
+    assert metrics["learns"] == built
+    assert set(metrics) == {
+        "plans", "learns", "hits", "learn_failures",
+        "dom_fallbacks", "negative_skips", "unplannable",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_filter_change_clears_the_hold_backs(pairs):
+    """A plan is void after a filter change, and so is a refusal record.
+
+    The record has nothing to do with the filters, but keeping it would make a
+    topic go on paying for a refusal from before the change.
+    """
+    pair = pairs[True]
+    pair.apply(fc.SCENARIOS["plain"], None)
+    topic = "dev/cleared"
+
+    for _ in range(fc.NEGATIVE_STRIKES):
+        pair.run(topic, PAYLOADS["odd_escaped_quote"])
+    assert pair.plan.get_shape_metrics()["unplannable"] > 0
+
+    pair.apply(fc.SCENARIOS["do_not_forward"], None)
+    assert pair.plan.get_shape_metrics()["unplannable"] == 0
+
+    # Offered the plan route again straight away, not in 64 messages.
+    before = pair.plan.get_shape_metrics()
+    plan, dom = pair.run(topic, PAYLOADS["real_solar"])
+    assert plan == dom
+    assert pair.plan.get_shape_metrics()["plans"] == before["plans"] + 1
+
+
+@pytest.mark.asyncio
+async def test_boolean_mapping_is_pinned(pairs):
+    """The whole keyword table, diffed against the cached implementation.
+
+    Both flattening routes share one uncached converter, so comparing them to
+    each other no longer says anything about the mapping - this is what pins it
+    instead. ``_convert_boolean`` stays in the binary as a second, independent
+    implementation of the same table and is the expectation here.
+
+    Every keyword in every spelling, plus what the payload corpus has no reason
+    to produce: surrounding whitespace, near-misses, non-ASCII, and values on
+    both sides of the short-ASCII buffer the shared converter lowercases into.
     """
     pair = pairs[True]
     pair.apply(fc.SCENARIOS["plain"], None)
 
-    raw = [
-        "true", "TRUE", "True", "yes", "on", "ON", "enabled", "enable", "1",
+    keywords = [
+        "true", "yes", "on", "enabled", "enable", "1",
         "check", "checked", "select", "selected",
-        "false", "FALSE", "no", "off", "OFF", "disabled", "disable", "0",
-        " true ", "\ton\t", "        true", "tru", "truthy", "offline",
-        "yesplease", "", "   ", "TrUe", "\u00b0C", "W\u00e4rme", "disabledx",
+        "false", "no", "off", "disabled", "disable", "0",
+    ]
+    raw = [
+        spelling
+        for word in keywords
+        for spelling in (word, word.upper(), word.capitalize())
+    ]
+    raw += [
+        # Whitespace is trimmed before the lookup but must not reach the output.
+        " true ", "\ton\t", "        true", "on\n", "\r\nOFF",
+        # Near-misses: a keyword must be the whole value, not a part of it.
+        "tru", "truthy", "offline", "yesplease", "disabledx", "on off", "1.0",
+        # Nothing to map.
+        "", "   ", "\u00b0C", "W\u00e4rme", "-", "null",
+        # Non-ASCII takes the Unicode-lowercasing route, and U+212A lowercases
+        # into a keyword there - so that route has to stay reachable.
+        "CHEC\u212a", "\u00c4NABLED", "TrUe",
+        # Either side of the 16-byte buffer the fast route uses.
+        "a" * 16, "a" * 17, "enabled_but_not_quite",
     ]
     payload = json.dumps({f"k{i:03d}": v for i, v in enumerate(raw)})
 
@@ -196,6 +387,40 @@ async def test_boolean_mapping_is_pinned(pairs):
     assert [value for _, _, value in plan] == [
         pair.plan._convert_boolean(v) for v in raw
     ]
+    # The table is only pinned if the inputs actually reach both verdicts.
+    mapped = {pair.plan._convert_boolean(v) for v in raw}
+    assert {"1", "0"} <= mapped
+
+
+@pytest.mark.asyncio
+async def test_normalization_is_pinned(pairs):
+    """Every target the flattener builds, diffed against ``normalize_topic``.
+
+    Same reason as the boolean mapping: both routes normalize through one
+    uncached helper now, so the cached ``normalize_topic`` is what the result is
+    held against. It covers the separators the relay replaces, doubled and
+    adjacent ones, and non-ASCII around them.
+    """
+    pair = pairs[True]
+    pair.apply(fc.SCENARIOS["plain"], None)
+
+    keys = [
+        "plain", "with/slash", "with%percent", "with/both%kinds",
+        "double//slash", "double%%percent", "mixed/%adjacent",
+        "/leading", "trailing/", "%", "/", "//", "s p a c e s",
+        "W\u00e4rme%Z\u00e4hler", "\u00b5/unit", "a" * 40,
+    ]
+    payload = json.dumps({k: "v" for k in keys})
+
+    for topic in ("dev/norm", "dev/a%b/norm", "dev%norm"):
+        plan, dom = pair.run(topic, payload)
+
+        assert plan == dom
+        assert plan, "the payload must produce targets to compare"
+        for full_topic, normalized, _ in plan:
+            assert normalized == pair.plan.normalize_topic(full_topic)
+        # A normalized target may not carry a separator the relay replaces.
+        assert not any("/" in n or "%" in n for _, n, _ in plan)
 
 
 @pytest.mark.parametrize("payload_name", sorted(PAYLOADS))

@@ -77,6 +77,27 @@ class HttpMiniserverHandler:
                 return False
             return loxwebsocket.state == "CONNECTED"
 
+    async def _send(
+        self,
+        topic: str,
+        normalized_topic: str,
+        value: Any,
+    ) -> None:
+        """Put one value on the wire, with the connection already established.
+
+        Split out so a batch pays the connection check once instead of once per
+        value: all values of a message share the socket, so re-deciding per value
+        cost a coroutine and a state read for an answer that cannot have changed.
+        """
+        logger.debug("Sending %s (as %s)=%s to Miniserver", topic, normalized_topic, value)
+        try:
+            await loxwebsocket.send_websocket_command(normalized_topic, str(value))
+            logger.debug("Sent %s (as %s)=%s to Miniserver successfully.", topic, normalized_topic, value)
+        except Exception as e:
+            logger.error(
+                f"Error sending {topic} (as {normalized_topic})={value} to Miniserver: {str(e)}"
+            )
+
     async def send_to_miniserver(
         self,
         topic: str,
@@ -86,8 +107,6 @@ class HttpMiniserverHandler:
         """
         Send a single value to the Loxone Miniserver over the websocket.
         """
-        logger.debug("Sending %s (as %s)=%s to Miniserver", topic, normalized_topic, value)
-
         if not await self._ensure_websocket():
             logger.warning(
                 "Dropped %s (as %s)=%s: no websocket connection to the Miniserver",
@@ -95,13 +114,7 @@ class HttpMiniserverHandler:
             )
             return
 
-        try:
-            await loxwebsocket.send_websocket_command(normalized_topic, str(value))
-            logger.debug("Sent %s (as %s)=%s to Miniserver successfully.", topic, normalized_topic, value)
-        except Exception as e:
-            logger.error(
-                f"Error sending {topic} (as {normalized_topic})={value} to Miniserver: {str(e)}"
-            )
+        await self._send(topic, normalized_topic, value)
 
     async def send_batch_to_miniserver(
         self,
@@ -115,7 +128,9 @@ class HttpMiniserverHandler:
 
         The batch is walked sequentially: all values share one connection, so
         sending them in order also removes the race where several concurrent
-        values each found the socket disconnected and opened it.
+        values each found the socket disconnected and opened it. That shared fate
+        is also why the connection is settled once here and the loop below sends
+        through `_send`, which does not check again.
         """
         if not items:
             return
@@ -131,9 +146,11 @@ class HttpMiniserverHandler:
             return
 
         for topic, normalized_topic, value in items:
-            # One bad value must not take the rest of the message with it.
+            # One bad value must not take the rest of the message with it. `_send`
+            # already absorbs a failing send; this catches what it cannot, such as
+            # a value whose own formatting raises.
             try:
-                await self.send_to_miniserver(topic, normalized_topic, value)
+                await self._send(topic, normalized_topic, value)
             except Exception as e:
                 logger.error(
                     "Error sending %s (as %s)=%s to Miniserver: %s",

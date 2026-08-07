@@ -386,6 +386,8 @@ version = "0.3.0"
 dependencies = [
  "arc-swap",
  "base64",
+ "bytes",
+ "bytestring",
  "env_logger",
  "log",
  "lru",

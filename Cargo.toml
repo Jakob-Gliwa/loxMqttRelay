@@ -38,6 +38,11 @@ base64 = "0.22.1"
 # builds without cmake/NASM on the ARM targets this ships to.
 mqtt-glide = { version = "0.1.1", default-features = false, features = ["tls-rustls-ring"] }
 arc-swap = "1.9"
+# The topic and payload types glide's publish builder takes. Named here so a
+# publish can hand its buffers over instead of being copied into them; the
+# majors are the ones mqtt-glide already resolves, so the graph keeps one of each.
+bytes = "1.12"
+bytestring = "1.5"
 
 [build-dependencies]
 pyo3-build-config = "0.28.3"

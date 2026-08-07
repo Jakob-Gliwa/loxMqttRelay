@@ -15,6 +15,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bytes::Bytes;
+use bytestring::ByteString;
 use log::{Level, debug, error, info, log_enabled, warn};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -727,8 +729,11 @@ fn handle_datagram(shared: &Arc<MqttShared>, data: &[u8], addr: SocketAddr) {
     }
 
     let shared = Arc::clone(shared);
-    let topic = topic.into_owned();
-    let payload = payload.into_owned();
+    // The datagram buffer is gone by the time the task runs, so both have to be
+    // taken out of it. Handed over as the refcounted types the publish wants, so
+    // this one copy is the only one either of them gets.
+    let topic = ByteString::from(topic.into_owned());
+    let payload = Bytes::from(payload.into_owned().into_bytes());
     let properties = user_properties.unwrap_or_default();
     // The sender travels with the publish so that a loss is reported once, with
     // everything in it: who sent the datagram, what was in it and why it is
@@ -737,7 +742,7 @@ fn handle_datagram(shared: &Arc<MqttShared>, data: &[u8], addr: SocketAddr) {
     get_runtime().spawn(async move {
         // The reason is not read here: record_drop has already logged it.
         let _ = shared
-            .publish(&topic, payload.as_bytes(), retain, properties, Some(addr))
+            .publish(topic, payload, retain, properties, Some(addr))
             .await;
     });
 }

@@ -72,19 +72,45 @@ async def test_batch_keeps_order(miniserver, handler: HttpMiniserverHandler) -> 
 
 
 @pytest.mark.asyncio
-async def test_batch_survives_a_failing_value(miniserver, handler: HttpMiniserverHandler) -> None:
-    """One bad value must not take the rest of the message down with it."""
-    calls: list[str] = []
+async def test_batch_survives_a_failing_value(handler: HttpMiniserverHandler) -> None:
+    """One bad value must not take the rest of the message down with it.
 
-    async def flaky(topic, normalized_topic, value):
-        calls.append(topic)
-        if topic == "dev/sensor/hum":
-            raise RuntimeError("boom")
-
-    with patch.object(handler, "send_to_miniserver", side_effect=flaky):
+    Driven by making the Miniserver reject one input rather than by patching the
+    handler's own send: the batch no longer routes through the single-value entry
+    point, and a failing input is what the relay actually meets.
+    """
+    with mock_miniserver(state="CONNECTED", fail_targets={"dev_sensor_hum"}) as fake:
         await handler.send_batch_to_miniserver(BATCH)
 
-    assert calls == [topic for topic, _, _ in BATCH]
+        assert fake.commands == [
+            (normalized, value)
+            for _, normalized, value in BATCH
+            if normalized != "dev_sensor_hum"
+        ]
+
+
+@pytest.mark.asyncio
+async def test_batch_decides_the_connection_once(
+    miniserver, handler: HttpMiniserverHandler
+) -> None:
+    """All values of a message share the socket, so they share one decision.
+
+    Re-deciding per value cost a coroutine and a state read for an answer that
+    cannot have changed within the batch.
+    """
+    checks = 0
+    real = handler._ensure_websocket
+
+    async def counting():
+        nonlocal checks
+        checks += 1
+        return await real()
+
+    with patch.object(handler, "_ensure_websocket", side_effect=counting):
+        await handler.send_batch_to_miniserver(BATCH)
+
+    assert len(miniserver.commands) == len(BATCH)
+    assert checks == 1
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,4 @@
-use pyo3::{prelude::*, types::{PyList, PyString}};
+use pyo3::{prelude::*, types::{PyDict, PyList, PyString}};
 use regex::{Regex, RegexSet};
 use pyo3::exceptions::PyValueError;
 use pyo3::intern;
@@ -188,15 +188,26 @@ fn number_value(text: &str) -> Option<Cow<'_, str>> {
     Some(Cow::Owned(serde_json::Number::from_f64(parsed)?.to_string()))
 }
 
-/// `topic.replace('/', "_").replace('%', "_")`, allocation-free when unchanged.
+/// `topic.replace('/', "_").replace('%', "_")` in one pass and one allocation.
+///
+/// Both separators and their replacement are ASCII, so the result is exactly as
+/// long as the input and the segments between them can be copied wholesale. The
+/// obvious `chars().map().collect()` cannot know that: `Chars::size_hint` only
+/// promises a quarter of the byte length, so it reserves too little and grows
+/// the string again while filling it.
 fn normalize_topic_str(topic: &str) -> String {
     if !topic.as_bytes().iter().any(|&c| c == b'/' || c == b'%') {
         return topic.to_string();
     }
-    topic
-        .chars()
-        .map(|c| if c == '/' || c == '%' { '_' } else { c })
-        .collect()
+    let mut out = String::with_capacity(topic.len());
+    let mut rest = topic;
+    while let Some(at) = rest.find(['/', '%']) {
+        out.push_str(&rest[..at]);
+        out.push('_');
+        rest = &rest[at + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +227,29 @@ fn normalize_topic_str(topic: &str) -> String {
 /// Number of topics that keep a learned plan. Plans hold interned Python
 /// strings per leaf, so this trades memory for a bounded working set.
 const SHAPE_CACHE_ENTRIES: usize = 512;
+
+/// How many documents in a row a topic has to have refused before its plan
+/// attempts are skipped.
+///
+/// The two mistakes here are not the same size. Attempting a plan that fails
+/// wastes one scan and then costs the DOM route that was going to run anyway -
+/// well under half the message. Skipping a plan that would have worked costs
+/// the whole difference between the two routes, which is a factor of three.
+/// So skipping needs real evidence that this topic cannot be planned at all,
+/// and a single refusal is not it: a topic that only occasionally sends an
+/// escaped string would lose its fast path for everything else.
+///
+/// Measured on the fuzz corpus, which is exactly that mixed case: at a
+/// threshold of one, plans built and replayed dropped from 150 to 17.
+const NEGATIVE_STRIKES: u32 = 8;
+
+/// Once skipping, how many messages pass before the plan route is offered again.
+///
+/// Bounded rather than permanent: a publisher whose payloads become plannable
+/// again - a firmware update that stops escaping a string, a value that leaves
+/// the range where it renders as `1e3` - must not be stuck on the slow route
+/// for the rest of the process.
+const NEGATIVE_RETRY_EVERY: u32 = 64;
 /// Matches serde_json's own recursion limit; deeper documents are rejected
 /// there anyway, and it keeps the recursive scanner off the stack cliff.
 const MAX_PLAN_DEPTH: u32 = 128;
@@ -246,9 +280,53 @@ struct Shape {
 /// plan - never writes to it. It exists because the two flattening routes are
 /// output-identical by design: without it, a fast path that silently stopped
 /// engaging would leave every test comparing the slow route against itself.
+/// A topic's record of refusals, kept only while it has one.
+#[derive(Default)]
+struct Refusals {
+    /// Documents refused in a row. Reset by any plan this topic manages to
+    /// build, so a topic that only fails now and then never arms the skip.
+    strikes: u32,
+    /// Messages waved through since the skip armed, for the periodic retry.
+    skipped: u32,
+}
+
 struct ShapeStore {
     plans: LruCache<String, Arc<Shape>>,
+    /// Topics that have refused a document recently. Bounded like `plans`, so a
+    /// flood of one-off topics cannot grow it.
+    unplannable: LruCache<String, Refusals>,
     learns: u64,
+    hits: u64,
+    learn_failures: u64,
+    dom_fallbacks: u64,
+    negative_skips: u64,
+}
+
+impl ShapeStore {
+    /// Whether this topic's plan attempt is skipped this time round.
+    ///
+    /// Only asked for topics without a plan. Counting the skipped messages here
+    /// is what makes the skip expire on its own.
+    fn hold_back(&mut self, topic: &str) -> bool {
+        let Some(record) = self.unplannable.get_mut(topic) else {
+            return false;
+        };
+        if record.strikes < NEGATIVE_STRIKES {
+            return false;
+        }
+        record.skipped += 1;
+        record.skipped % NEGATIVE_RETRY_EVERY != 0
+    }
+
+    /// Note that no plan could be built for this topic.
+    fn refused(&mut self, topic: &str) {
+        if let Some(record) = self.unplannable.get_mut(topic) {
+            record.strikes = record.strikes.saturating_add(1);
+            return;
+        }
+        self.unplannable
+            .put(topic.to_string(), Refusals { strikes: 1, skipped: 0 });
+    }
 }
 
 /// One extracted value, borrowed from the plan and the message where possible.
@@ -658,7 +736,12 @@ impl MiniserverDataProcessor {
             normalize_topic_cache: Mutex::new(LruCache::new(lru_size)),
             shape_cache: Mutex::new(ShapeStore {
                 plans: LruCache::new(NonZeroUsize::new(SHAPE_CACHE_ENTRIES).unwrap()),
+                unplannable: LruCache::new(NonZeroUsize::new(SHAPE_CACHE_ENTRIES).unwrap()),
                 learns: 0,
+                hits: 0,
+                learn_failures: 0,
+                dom_fallbacks: 0,
+                negative_skips: 0,
             }),
             shape_cache_enabled: true,
             global_config: global_config_py,
@@ -712,8 +795,15 @@ impl MiniserverDataProcessor {
     /// The keyword mapping itself, always applied.
     ///
     /// `processing.convert_booleans` decides whether the forwarding path calls
-    /// this at all; the mapping stays available on its own so both settings can
-    /// be described against the same reference.
+    /// the mapping at all; it stays available on its own so both settings can be
+    /// described against the same reference.
+    ///
+    /// Neither flattening route goes through here any more - both use
+    /// [`convert_bool_value`], which reaches the same answer without a cache.
+    /// This is now the second, independent implementation that
+    /// `test_boolean_mapping_is_pinned` diffs the shared one against over the
+    /// whole keyword table, which is what keeps the mapping pinned once the two
+    /// routes no longer disagree by construction.
     #[pyo3(text_signature = "(self, val)")]
     fn _convert_boolean(&self, val: &str) -> PyResult<Option<String>> {
         let mut cache = lock_recover(&self.convert_bool_cache);
@@ -733,6 +823,13 @@ impl MiniserverDataProcessor {
         }
     }
 
+    /// The Miniserver input name for a topic.
+    ///
+    /// The cache pays off here because callers ask about the same handful of
+    /// subscribed topics repeatedly. The flattening routes do not: every leaf
+    /// they normalize is a freshly built `topic/key`, so they use
+    /// [`normalize_topic_str`] and this stays the reference a normalization test
+    /// pins them against.
     #[pyo3(text_signature = "(self, topic)")]
     fn normalize_topic(&self, topic: &str) -> PyResult<String> {
         let mut cache = lock_recover(&self.normalize_topic_cache);
@@ -802,33 +899,39 @@ impl MiniserverDataProcessor {
     /// Called from [`crate::mqtt`]'s ingress worker, which holds the GIL for the
     /// duration. The control topics are compared against the strings resolved
     /// once at construction rather than fetched from Python per message.
+    ///
+    /// Both arguments are borrowed. Owning them meant copying every topic and
+    /// every payload once per message, on the one path every message takes -
+    /// the caller's buffers outlive the call, and UTF-8 payloads are handed on
+    /// without a copy at all.
     #[pyo3(text_signature = "(self,topic, message)")]
     pub(crate) fn handle_mqtt_message(
         &self,
         py: Python<'_>,
-        topic: String,
-        message_in: Vec<u8>
+        topic: &str,
+        message_in: &[u8]
     ) -> PyResult<()> {
         // Try UTF-8 conversion, but don't crash on failure
-        let message = match String::from_utf8(message_in) {
-            Ok(s) => s,
-            Err(e) => {
-                // e.into_bytes() gives us the original bytes back
-                let original_bytes = e.into_bytes();
+        let message = match std::str::from_utf8(message_in) {
+            Ok(s) => Cow::Borrowed(s),
+            Err(_) => {
                 warn!(
                     "Received binary MQTT message on topic '{}': {} bytes. Encoding as base64 for exact preservation.",
-                    loggable(&topic),
-                    original_bytes.len()
+                    loggable(topic),
+                    message_in.len()
                 );
 
                 // Encode binary data as base64 to preserve exact data
-                format!("[base64:{}]", general_purpose::STANDARD.encode(original_bytes))
+                Cow::Owned(format!(
+                    "[base64:{}]",
+                    general_purpose::STANDARD.encode(message_in)
+                ))
             }
         };
 
         debug!(
             "(Rust) handle_mqtt_message: {} => {}",
-            loggable(&topic),
+            loggable(topic),
             loggable(&message)
         );
 
@@ -867,7 +970,7 @@ impl MiniserverDataProcessor {
             } else {
                 "remove"
             };
-            let load_res = self.orjson_obj.bind(py).call_method1("loads", (message.as_str(),));
+            let load_res = self.orjson_obj.bind(py).call_method1("loads", (&*message,));
             match load_res {
                 Ok(py_obj) => {
                     let update_res = self
@@ -895,7 +998,7 @@ impl MiniserverDataProcessor {
             // happens to live under base_topic. Propagated so ingress_worker
             // can log the topic and reason; a discarded Err here used to leave
             // those failures silent.
-            self.process_data(py, &topic, &message)?;
+            self.process_data(py, topic, &message)?;
         }
 
         Ok(())
@@ -939,6 +1042,39 @@ impl MiniserverDataProcessor {
         (store.plans.len(), store.learns)
     }
 
+    /// Everything the shape cache counts, as a dict.
+    ///
+    /// `get_shape_stats` stays a 2-tuple because it is unpacked positionally all
+    /// over the regression suite; this is where the rest lives:
+    ///
+    /// - `plans`, `learns` - as in `get_shape_stats`
+    /// - `hits` - messages a stored plan carried end to end
+    /// - `learn_failures` - documents no plan could be built for
+    /// - `dom_fallbacks` - messages that reached the plan route and left it
+    /// - `negative_skips` - of those, the ones held back without even trying
+    /// - `unplannable` - topics currently held back
+    ///
+    /// All of them count only messages the plan route was offered at all, so
+    /// `hits + learns + dom_fallbacks` is that population; a message with
+    /// `expand_json` off, one whose payload is not a JSON object, or anything at
+    /// all while the cache is switched off never appears here.
+    ///
+    /// A relay whose `dom_fallbacks` keeps climbing alongside `hits` is
+    /// forwarding something the scanner refuses on some of its topics.
+    #[pyo3(text_signature = "(self)")]
+    fn get_shape_metrics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let store = lock_recover(&self.shape_cache);
+        let metrics = PyDict::new(py);
+        metrics.set_item(intern!(py, "plans"), store.plans.len())?;
+        metrics.set_item(intern!(py, "learns"), store.learns)?;
+        metrics.set_item(intern!(py, "hits"), store.hits)?;
+        metrics.set_item(intern!(py, "learn_failures"), store.learn_failures)?;
+        metrics.set_item(intern!(py, "dom_fallbacks"), store.dom_fallbacks)?;
+        metrics.set_item(intern!(py, "negative_skips"), store.negative_skips)?;
+        metrics.set_item(intern!(py, "unplannable"), store.unplannable.len())?;
+        Ok(metrics)
+    }
+
     #[pyo3(text_signature = "(self)")]
     fn get_subscription_filters(&self) -> Vec<String> {
         self.compiled_subscription_filter
@@ -956,7 +1092,12 @@ impl MiniserverDataProcessor {
     /// A poisoned lock must not skip this: a plan that survives a filter change
     /// keeps forwarding what the new filter was meant to hold back.
     fn invalidate_shapes(&mut self) {
-        lock_recover(&self.shape_cache).plans.clear();
+        let mut store = lock_recover(&self.shape_cache);
+        store.plans.clear();
+        // The hold-backs go with them: whether a document is plannable does not
+        // depend on the filters, but a topic held back would keep paying for a
+        // refusal that has nothing to do with the change just made.
+        store.unplannable.clear();
     }
 
     /// Everything this message should hand over, in the order the DOM path
@@ -967,84 +1108,121 @@ impl MiniserverDataProcessor {
         topic: &str,
         message: &str,
     ) -> PyResult<Bound<'py, PyList>> {
-        let list = PyList::empty(py);
         if self.shape_cache_enabled
             && self.expand_json
             && message.trim_ascii_start().starts_with('{')
+            && let Some(list) = self.shape_batch(py, topic, message)?
         {
-            // Appends nothing unless the plan matched the whole document.
-            if self.shape_batch(py, topic, message, &list)? {
-                return Ok(list);
-            }
+            return Ok(list);
         }
-        self.generic_batch(topic, message, &list)?;
-        Ok(list)
+        self.generic_batch(py, topic, message)
     }
 
     /// Try the learned layout for this topic, learning a fresh one if the
-    /// document moved on. Returns false when the plan route gave up entirely.
+    /// document moved on. `None` when the plan route gave up entirely.
+    ///
+    /// One lock on the path that matters. A message replaying a cached plan
+    /// takes it once, to fetch the plan and count the hit; everything else -
+    /// removing a plan the document outgrew, recording a refusal, storing a
+    /// fresh plan - happens on paths that were already going to lock.
     fn shape_batch<'py>(
         &self,
         py: Python<'py>,
         topic: &str,
         message: &str,
-        list: &Bound<'py, PyList>,
-    ) -> PyResult<bool> {
+    ) -> PyResult<Option<Bound<'py, PyList>>> {
         let cached = {
             let mut store = lock_recover(&self.shape_cache);
-            store.plans.get(topic).map(Arc::clone)
+            let cached = store.plans.get(topic).map(Arc::clone);
+            match cached {
+                // Counted here rather than after the plan ran, so the hit costs
+                // no second lock; a plan that then turns out not to fit takes it
+                // back below, on a path that locks anyway.
+                Some(_) => store.hits += 1,
+                // No plan, and this topic has refused everything for a while:
+                // the scan would walk the document only to give up again.
+                None if store.hold_back(topic) => {
+                    store.negative_skips += 1;
+                    store.dom_fallbacks += 1;
+                    return Ok(None);
+                }
+                None => {}
+            }
+            cached
         };
-        if let Some(ref shape) = cached
-            && self.emit_shape(py, shape, message, list)?
-        {
-            return Ok(true);
-        }
-        if cached.is_some() {
+
+        if let Some(ref shape) = cached {
+            if let Some(list) = self.emit_shape(py, shape, message)? {
+                return Ok(Some(list));
+            }
             debug!(
                 "Shape plan for '{}' no longer matches, relearning",
                 loggable(topic)
             );
+            let mut store = lock_recover(&self.shape_cache);
+            store.hits -= 1;
+            // Dropped rather than left for the LRU to evict: a plan that does
+            // not fit the documents arriving now would be tried, and fail,
+            // on every one of them.
+            store.plans.pop(topic);
         }
 
-        let Some(shape) = self.learn(py, topic, message) else {
-            return Ok(false);
-        };
-        // Only cache once the plan has carried a whole document, so a stored
+        // Only cached once the plan has carried a whole document, so a stored
         // plan is always one that works.
-        if !self.emit_shape(py, &shape, message, list)? {
-            return Ok(false);
-        }
+        let learned = match self.learn(py, topic, message) {
+            Some(shape) => self.emit_shape(py, &shape, message)?.map(|list| (shape, list)),
+            None => None,
+        };
+
         let mut store = lock_recover(&self.shape_cache);
-        store.learns += 1;
-        store.plans.put(topic.to_string(), Arc::new(shape));
-        Ok(true)
+        match learned {
+            Some((shape, list)) => {
+                store.learns += 1;
+                store.plans.put(topic.to_string(), Arc::new(shape));
+                store.unplannable.pop(topic);
+                Ok(Some(list))
+            }
+            None => {
+                store.learn_failures += 1;
+                store.dom_fallbacks += 1;
+                store.refused(topic);
+                Ok(None)
+            }
+        }
     }
 
-    /// Run a plan and append its values. Nothing is appended unless the whole
-    /// document matched, so a caller can safely fall back afterwards.
+    /// Run a plan and hand back its values, or `None` if the plan did not carry
+    /// the whole document.
+    ///
+    /// The list is built at its final length from slots the plan already sized,
+    /// rather than grown one `append` at a time. That also makes "a miss leaves
+    /// nothing behind" structural: there is no list yet for a partial run to
+    /// have written into, so the caller cannot fall back onto a half-filled one.
     fn emit_shape<'py>(
         &self,
         py: Python<'py>,
         shape: &Shape,
         message: &str,
-        list: &Bound<'py, PyList>,
-    ) -> PyResult<bool> {
+    ) -> PyResult<Option<Bound<'py, PyList>>> {
         let mut out: Vec<Option<Emitted<'_, '_>>> = Vec::new();
         out.resize_with(shape.emits, || None);
 
         let mut sc = Scan::new(message.as_bytes());
         if !exec_node(&shape.root, &mut sc, &mut out, self.convert_booleans) || !sc.at_end() {
-            return Ok(false);
+            return Ok(None);
         }
         if out.iter().any(|slot| slot.is_none()) {
-            return Ok(false);
+            return Ok(None);
         }
 
-        for slot in &out {
-            let (topic, normalized, value) = slot.as_ref().expect("all slots filled");
-            list.append((topic.bind(py), normalized.bind(py), &**value))?;
-        }
-        Ok(true)
+        let list = PyList::new(
+            py,
+            out.iter().map(|slot| {
+                let (topic, normalized, value) = slot.as_ref().expect("all slots filled");
+                (topic.bind(py), normalized.bind(py), &**value)
+            }),
+        )?;
+        Ok(Some(list))
     }
 
     /// Derive a plan from one message, or `None` if this document cannot be
@@ -1179,12 +1357,20 @@ impl MiniserverDataProcessor {
     /// The DOM route: build a `serde_json::Value`, flatten it, filter it. Slow,
     /// but it is the definition of correct behaviour and the fallback for every
     /// document the plan route refuses.
-    fn generic_batch(
+    ///
+    /// It shares the leaf helpers with the plan route, so the differential suite
+    /// no longer covers those two by comparing the routes to each other; the
+    /// dedicated pinning tests do that against [`MiniserverDataProcessor::_convert_boolean`]
+    /// and [`MiniserverDataProcessor::normalize_topic`]. What the route
+    /// comparison still establishes on its own is the part that actually differs
+    /// between them: which leaves exist, in which order, and which survive the
+    /// filters.
+    fn generic_batch<'py>(
         &self,
+        py: Python<'py>,
         topic: &str,
         message: &str,
-        list: &Bound<'_, PyList>,
-    ) -> PyResult<()> {
+    ) -> PyResult<Bound<'py, PyList>> {
         let flattened: Vec<(String, String)> = if self.expand_json {
             match serde_json::from_str::<Value>(message) {
                 Ok(json_val) if json_val.is_object() => {
@@ -1201,41 +1387,49 @@ impl MiniserverDataProcessor {
             vec![(topic.to_string(), message.to_string())]
         };
 
-        for (t, v) in flattened {
-            let normalized = self.normalize_topic(&t)?;
+        // Borrowed from `flattened`, which outlives the list being built, so a
+        // value the converter passed through does not have to be copied to
+        // survive until then.
+        let mut kept: Vec<(&str, String, Cow<'_, str>)> = Vec::with_capacity(flattened.len());
+        for (t, v) in &flattened {
+            // The plan path's helpers, not the `#[pymethods]` wrappers around
+            // them: those consult an LRU cache behind a mutex, and a cache that
+            // does hit still costs a lock, a hash and a copy of the answer -
+            // more than recomputing it from a topic that is already at hand.
+            let normalized = normalize_topic_str(t);
             if !self.topic_whitelist.is_empty() && !self.topic_whitelist.contains(&normalized) {
                 debug!(
                     "Topic '{}' (normalized: '{}') not in whitelist",
-                    loggable(&t),
+                    loggable(t),
                     loggable(&normalized)
                 );
                 continue;
             }
             if let Some(ref filters) = self.compiled_subscription_filter
-                && filters.is_match(&t)
+                && filters.is_match(t)
             {
-                debug!("Topic '{}' filtered by second pass", loggable(&t));
+                debug!("Topic '{}' filtered by second pass", loggable(t));
                 continue;
             }
             if let Some(ref filters) = self.do_not_forward_patterns
-                && filters.is_match(&t)
+                && filters.is_match(t)
             {
-                debug!("Topic '{}' filtered by do_not_forward", loggable(&t));
+                debug!("Topic '{}' filtered by do_not_forward", loggable(t));
                 continue;
             }
-            if !self.convert_booleans {
-                list.append((t.as_str(), normalized.as_str(), v.as_str()))?;
-                continue;
-            }
-            // Deliberately the cached, allocating variant and not the plan
-            // path's `convert_bool_value`: this route is the reference the
-            // regression suite diffs against, so it has to stay the code that
-            // shipped before the shape plans existed.
-            if let Some(value) = self._convert_boolean(&v)? {
-                list.append((t.as_str(), normalized.as_str(), value.as_str()))?;
-            }
+            let value = if self.convert_booleans {
+                convert_bool_value(v)
+            } else {
+                Cow::Borrowed(v.as_str())
+            };
+            kept.push((t.as_str(), normalized, value));
         }
-        Ok(())
+
+        PyList::new(
+            py,
+            kept.iter()
+                .map(|(t, normalized, value)| (*t, normalized.as_str(), &**value)),
+        )
     }
 }
 
