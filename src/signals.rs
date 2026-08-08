@@ -27,14 +27,14 @@ pub(crate) trait ResyncTrigger: Send + Sync {
 
 /// Why the relay is stopping, and whether it should come back.
 #[derive(Clone, Debug)]
-pub(crate) struct StopReason {
-    pub(crate) reason: String,
-    pub(crate) restart: bool,
+pub struct StopReason {
+    pub reason: String,
+    pub restart: bool,
 }
 
 /// The relay's two internal signals.
 #[derive(Clone)]
-pub(crate) struct Signals {
+pub struct Signals {
     /// Wakes the resync worker.
     ///
     /// Coalescing by construction: a request that arrives while one is pending
@@ -47,7 +47,7 @@ pub(crate) struct Signals {
 }
 
 impl Signals {
-    pub(crate) fn new() -> (Self, watch::Receiver<Option<StopReason>>) {
+    pub fn new() -> (Self, watch::Receiver<Option<StopReason>>) {
         let (stop, stop_rx) = watch::channel(None);
         (
             Signals {

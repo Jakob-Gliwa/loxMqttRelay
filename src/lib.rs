@@ -20,10 +20,18 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-mod config;
+// Public for `src/main.rs`, which is a separate crate and can only reach what
+// the library exports. The PyO3 surface below is what goes when Python does;
+// these are what stay.
+pub mod banner;
+pub mod cli;
+pub mod config;
+pub mod logging;
+pub mod relay;
+
 mod control;
 mod egress;
-mod error;
+pub mod error;
 mod miniserver;
 mod mqtt;
 mod process;
@@ -31,6 +39,9 @@ mod signals;
 mod udp;
 mod util;
 mod whitelist;
+
+pub use relay::{Exit, Relay};
+pub use signals::Signals;
 
 use config::AppConfig;
 use config::value::CfgValue;

@@ -15,7 +15,7 @@
 
 /// The six tables a configuration file has.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
-pub(crate) enum ConfigSection {
+pub enum ConfigSection {
     General,
     Broker,
     Miniserver,

@@ -31,10 +31,11 @@ pub(crate) mod value;
 #[cfg(test)]
 mod tests;
 
-use schema::{ConfigSection, FieldSpec, fields_of};
+use schema::{FieldSpec, fields_of};
 use value::CfgValue;
 
-pub(crate) use update::{ConfigError, ListMode};
+pub(crate) use update::ListMode;
+pub use schema::ConfigSection;
 
 // ---------------------------------------------------------------------------
 // The model
@@ -97,7 +98,7 @@ pub(crate) struct UdpConfig {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct AppConfig {
+pub struct AppConfig {
     pub(crate) general: GeneralConfig,
     pub(crate) broker: BrokerConfig,
     pub(crate) miniserver: MiniserverConfig,
@@ -352,7 +353,7 @@ fn write_json_string(out: &mut String, text: &str) {
 /// operator has been told everything that is wrong, one line per problem; the
 /// caller's only remaining job is to exit non-zero.
 #[derive(Debug)]
-pub(crate) struct StartupAbort;
+pub struct StartupAbort;
 
 impl fmt::Display for StartupAbort {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -368,7 +369,7 @@ impl std::error::Error for StartupAbort {}
 /// was imported from everywhere, and the tests then had to reach into it to get
 /// a fresh state. Here it is passed in, which is also what lets the config tests
 /// run in parallel against their own files.
-pub(crate) struct ConfigStore {
+pub struct ConfigStore {
     path: PathBuf,
     config: RwLock<AppConfig>,
 }
@@ -387,7 +388,7 @@ impl ConfigStore {
     /// writes them out on the first change. Anything else that is wrong is
     /// reported in full, every problem at once, before a single socket is
     /// opened.
-    pub(crate) fn load(path: impl Into<PathBuf>) -> Result<Self, StartupAbort> {
+    pub fn load(path: impl Into<PathBuf>) -> Result<Self, StartupAbort> {
         let path = path.into();
         if !path.exists() {
             warn!(
@@ -434,7 +435,7 @@ impl ConfigStore {
         Ok(ConfigStore::new(path, config))
     }
 
-    pub(crate) fn snapshot(&self) -> AppConfig {
+    pub fn snapshot(&self) -> AppConfig {
         self.read().clone()
     }
 

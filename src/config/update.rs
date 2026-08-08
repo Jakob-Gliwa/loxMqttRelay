@@ -42,6 +42,19 @@ impl ListMode {
             ListMode::Remove => "remove",
         }
     }
+
+    /// The mode a control topic names.
+    ///
+    /// The same three words `ControlTopic::update_mode` hands to Python, read
+    /// back on the native side so the two cannot spell them differently.
+    pub(crate) fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "set" => ListMode::Set,
+            "add" => ListMode::Add,
+            "remove" => ListMode::Remove,
+            _ => return None,
+        })
+    }
 }
 
 /// An update that was refused, with every reason it was refused.

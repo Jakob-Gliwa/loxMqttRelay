@@ -16,6 +16,13 @@ name = "loxmqttrelay"
 # working while the binary grows next to it; "cdylib" goes away once Python does.
 crate-type = ["cdylib", "rlib"]
 
+[[bin]]
+# The relay itself. Named `-relay` because on x86 a small launcher takes the
+# plain `loxmqttrelay` name and execs whichever of the two builds this CPU can
+# run; see src/launcher.rs.
+name = "loxmqttrelay-relay"
+path = "src/main.rs"
+
 [features]
 # On by default for the wheel: `extension-module` leaves libpython unlinked,
 # which is right for a shared object Python loads but breaks `cargo test`, whose
@@ -79,7 +86,7 @@ quick-xml = "0.41.0"
 hyper = { version = "1.11.0", features = ["client", "http1"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 http-body-util = "0.1.4"
-clap = { version = "4.6.6", features = ["derive"] }
+clap = { version = "4.6.6", features = ["derive", "env"] }
 
 [build-dependencies]
 pyo3-build-config = "0.28.3"

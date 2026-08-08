@@ -18,7 +18,7 @@ use log::{debug, error, info, warn};
 use loxwebsocket::{ClientEvent, ConnState, ConnectConfig, Error as LoxError, LoxClient, LoxHandler, TlsMode};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3_async_runtimes::tokio::{future_into_py, get_runtime};
+use pyo3_async_runtimes::tokio::future_into_py;
 use tokio::sync::mpsc;
 
 use crate::config::AppConfig;
@@ -120,7 +120,7 @@ impl MsShared {
     /// `killtoken` is awaited - so the handle has to come back out of the
     /// `ArcSwap` first. A second holder would leave only `Drop`, which requests
     /// the same shutdown but cannot wait for it.
-    async fn shutdown(&self) {
+    pub(crate) async fn shutdown(&self) {
         let Some(client) = self.client.swap(None) else {
             return;
         };

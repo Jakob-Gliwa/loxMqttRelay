@@ -7,7 +7,7 @@
 use std::fmt;
 
 #[derive(Debug)]
-pub(crate) enum RelayError {
+pub enum RelayError {
     /// The broker could not be reached, or the url was not usable.
     Mqtt(String),
     /// The Miniserver websocket could not be opened.

@@ -16,8 +16,11 @@ use log::{error, info};
 use pyo3::intern;
 use pyo3::prelude::*;
 
+use crate::config::value::CfgValue;
+use crate::config::{ConfigStore, ListMode};
 use crate::mqtt::MqttShared;
 use crate::process::{self, ControlTopic};
+use crate::signals::{ResyncTrigger as _, Signals};
 use crate::util::loggable;
 
 /// Somewhere a recognised control topic can be acted on.
@@ -28,6 +31,86 @@ pub(crate) trait ControlSink: Send + Sync {
     /// logs it, next to the topic the message arrived on, and implementors do
     /// not share an error type.
     fn dispatch(&self, kind: ControlTopic, payload: &[u8]) -> Result<(), String>;
+}
+
+/// The control topics, natively.
+///
+/// The same four actions, with the two that used to be Python callbacks now
+/// signals: a resync is a `Notify`, and a restart is the stop channel carrying
+/// `restart: true`. Nothing here can fail in a way the caller could act on, so
+/// unlike the Python-backed implementation it never has anything to report.
+pub(crate) struct NativeControlSink {
+    config: Arc<ConfigStore>,
+    mqtt: Arc<MqttShared>,
+    config_response: String,
+    signals: Signals,
+}
+
+impl NativeControlSink {
+    pub(crate) fn new(
+        config: Arc<ConfigStore>,
+        mqtt: Arc<MqttShared>,
+        config_response: String,
+        signals: Signals,
+    ) -> Self {
+        NativeControlSink {
+            config,
+            mqtt,
+            config_response,
+            signals,
+        }
+    }
+}
+
+impl ControlSink for NativeControlSink {
+    fn dispatch(&self, kind: ControlTopic, payload: &[u8]) -> Result<(), String> {
+        match kind {
+            ControlTopic::MiniserverStartup => {
+                if self.config.snapshot().miniserver.sync_with_miniserver {
+                    info!("Miniserver startup detected, resyncing whitelist");
+                    self.signals.request_resync();
+                }
+            }
+            ControlTopic::ConfigGet => {
+                self.mqtt
+                    .publish_detached(self.config_response.clone(), self.config.safe_json());
+            }
+            ControlTopic::ConfigSet | ControlTopic::ConfigAdd | ControlTopic::ConfigRemove => {
+                let mode = kind
+                    .update_mode()
+                    .and_then(ListMode::parse)
+                    .expect("set/add/remove carry a mode");
+                let text = process::decode_payload("config", payload);
+                match crate::config::value::parse_json(&text) {
+                    Ok(CfgValue::Table(updates)) => {
+                        match self.config.update_fields(&updates, mode) {
+                            Err(e) => error!("Error updating configuration: {e}"),
+                            Ok(()) => {
+                                info!("Configuration updated via MQTT. Restarting program.");
+                                self.signals.request_stop("configuration changed", true);
+                            }
+                        }
+                    }
+                    // A payload that is valid JSON but not an object named no
+                    // fields, so there is nothing to apply.
+                    Ok(other) => error!(
+                        "Configuration update on '{}' is a {}, not an object",
+                        loggable(&text),
+                        other.py_type()
+                    ),
+                    Err(e) => error!(
+                        "Invalid JSON format in MQTT message '{}': {e}",
+                        loggable(&text)
+                    ),
+                }
+            }
+            ControlTopic::ConfigReload => {
+                info!("Reloading configuration. Restarting program.");
+                self.signals.request_stop("configuration changed", true);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The control topics as they behave while `main.py` is still in charge.

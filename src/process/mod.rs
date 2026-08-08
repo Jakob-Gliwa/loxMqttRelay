@@ -64,6 +64,43 @@ pub(crate) struct MqttTopics {
     pub(crate) config_restart: String,
 }
 
+impl MqttTopics {
+    /// The eight control topics a `base_topic` implies.
+    ///
+    /// Derived in one place, because they are also the topics the relay
+    /// subscribes to and the order it subscribes in matters - `review_suback`
+    /// zips the SUBACK reasons against that list.
+    pub(crate) fn from_base(base: &str) -> Self {
+        MqttTopics {
+            miniserver_startup: format!("{base}miniserverevent/startup"),
+            config_get: format!("{base}config/get"),
+            config_response: format!("{base}config/response"),
+            config_set: format!("{base}config/set"),
+            config_add: format!("{base}config/add"),
+            config_remove: format!("{base}config/remove"),
+            config_update: format!("{base}config/update"),
+            config_restart: format!("{base}config/restart"),
+        }
+    }
+
+    /// What the relay subscribes to besides the configured subscriptions.
+    ///
+    /// In the order `main.py` listed them, which is the order the SUBACK
+    /// reasons come back in. `config_response` is not here: the relay publishes
+    /// it, it does not listen for it.
+    pub(crate) fn subscriptions(&self) -> [String; 7] {
+        [
+            self.config_set.clone(),
+            self.config_add.clone(),
+            self.config_remove.clone(),
+            self.config_update.clone(),
+            self.config_restart.clone(),
+            self.config_get.clone(),
+            self.miniserver_startup.clone(),
+        ]
+    }
+}
+
 /// A control topic, identified without taking the GIL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ControlTopic {
