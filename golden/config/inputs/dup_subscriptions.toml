@@ -1,0 +1,2 @@
+[topics]
+subscriptions = ["a/#", "b/#", "a/#", "c/#"]

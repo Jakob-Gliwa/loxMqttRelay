@@ -1,0 +1,14 @@
+[general] 'log_level' must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL, got 'x'
+[general] 'cache_size' expects int, got str
+[broker] 'port' expects int, got str
+[miniserver] 'miniserver_port' expects int, got str
+[miniserver] 'sync_with_miniserver' expects bool, got str
+[topics] 'subscriptions' expects a list, got str
+[topics] 'subscription_filters' expects a list, got str
+[topics] 'topic_whitelist' expects a list, got str
+[topics] 'do_not_forward' expects a list, got str
+[processing] 'expand_json' expects bool, got str
+[processing] 'convert_booleans' expects bool, got str
+[udp] 'udp_in_port' expects int, got str
+[udp] 'udp_source_filter_enabled' expects bool, got str
+[udp] 'udp_allowed_sources' expects a list, got str

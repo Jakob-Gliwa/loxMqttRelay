@@ -1,0 +1,8 @@
+[broker]
+port = 0
+
+[miniserver]
+miniserver_port = 70000
+
+[udp]
+udp_in_port = -5

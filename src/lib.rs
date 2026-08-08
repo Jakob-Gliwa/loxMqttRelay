@@ -14,12 +14,13 @@ use std::collections::HashSet;
 use std::io::Write as _;
 use std::sync::Arc;
 
-use log::{debug, error, info};
+use log::debug;
 use pyo3::exceptions::PyValueError;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+mod control;
 mod egress;
 mod miniserver;
 mod mqtt;
@@ -27,11 +28,11 @@ mod process;
 mod udp;
 mod util;
 
+use control::PyControlSink;
 use miniserver::{LoxEgress, MiniserverClient};
-use mqtt::{MqttClient, MqttShared};
-use process::{ControlTopic, Core, CoreConfig, FilterError, MqttTopics};
+use mqtt::MqttClient;
+use process::{Core, CoreConfig, FilterError, MqttTopics};
 use udp::UdpServer;
-use util::loggable;
 
 /// `obj.a.b.c` with interned attribute names.
 macro_rules! pyget {
@@ -57,11 +58,10 @@ impl From<FilterError> for PyErr {
 pub struct MiniserverDataProcessor {
     #[pyo3(get)]
     global_config: Py<PyAny>,
-    relay_main_obj: Py<PyAny>,
-    // Shared with the Python-facing MqttClient so config responses publish
-    // straight from Rust instead of calling back into Python.
-    mqtt_shared: Arc<MqttShared>,
-    orjson_obj: Py<PyAny>,
+    /// Everything the control topics still need from Python. Behind a trait so
+    /// [`mqtt::ingress_worker`] does not know a Python object is on the other
+    /// side - see [`control`].
+    sink: Arc<PyControlSink>,
     core: Arc<Core<LoxEgress>>,
 }
 
@@ -127,12 +127,17 @@ impl MiniserverDataProcessor {
         };
 
         let core = Core::new(config, LoxEgress::new(miniserver_client.shared()))?;
+        let sink = PyControlSink::new(
+            global_config_py.clone_ref(py),
+            relay_main_obj,
+            mqtt_client.shared(),
+            orjson_obj,
+            core.topics().config_response.clone(),
+        );
         debug!("MiniserverDataProcessor initialization complete");
         Ok(MiniserverDataProcessor {
             global_config: global_config_py,
-            relay_main_obj,
-            mqtt_shared: mqtt_client.shared(),
-            orjson_obj,
+            sink: Arc::new(sink),
             core: Arc::new(core),
         })
     }
@@ -203,7 +208,7 @@ impl MiniserverDataProcessor {
         let Some(kind) = self.core.control_kind(topic) else {
             return Ok(false);
         };
-        self.dispatch_control(py, kind, message)?;
+        self.sink.dispatch_py(py, kind, message)?;
         Ok(true)
     }
 
@@ -264,83 +269,13 @@ impl MiniserverDataProcessor {
         Arc::clone(&self.core)
     }
 
-    /// Act on one control topic.
+    /// The control-topic handler, for [`mqtt::ingress_worker`] to hold directly.
     ///
-    /// The only place in the message path that needs the GIL, which is why
-    /// [`mqtt::ingress_worker`] decides in Rust whether to come here at all.
-    pub(crate) fn dispatch_control(
-        &self,
-        py: Python<'_>,
-        kind: ControlTopic,
-        message: &[u8],
-    ) -> PyResult<()> {
-        match kind {
-            ControlTopic::MiniserverStartup => {
-                if pyget!(self.global_config, py, "miniserver", "sync_with_miniserver")
-                    .extract::<bool>()?
-                {
-                    info!("Miniserver startup detected, resyncing whitelist");
-                    self.relay_main_obj
-                        .bind(py)
-                        .call_method0(intern!(py, "schedule_miniserver_sync"))?;
-                }
-            }
-            ControlTopic::ConfigGet => {
-                // global_config.get_safe_config -> orjson.dumps -> publish.
-                // Straight off the field: the same object used to be looked up
-                // the long way round, through the relay and back into this very
-                // processor.
-                let safe_cfg = self
-                    .global_config
-                    .bind(py)
-                    .call_method0(intern!(py, "get_safe_config"))?;
-                let serialized = self
-                    .orjson_obj
-                    .bind(py)
-                    .call_method1(intern!(py, "dumps"), (safe_cfg,))?;
-                self.mqtt_shared.publish_detached(
-                    self.core.topics().config_response.clone(),
-                    serialized.extract::<Vec<u8>>()?,
-                );
-            }
-            ControlTopic::ConfigSet | ControlTopic::ConfigAdd | ControlTopic::ConfigRemove => {
-                let mode = kind.update_mode().expect("set/add/remove carry a mode");
-                let text = process::decode_payload("config", message);
-                match self
-                    .orjson_obj
-                    .bind(py)
-                    .call_method1(intern!(py, "loads"), (&*text,))
-                {
-                    Ok(py_obj) => {
-                        let updated = self
-                            .global_config
-                            .bind(py)
-                            .call_method1(intern!(py, "update_fields"), (py_obj, mode));
-                        if let Err(e) = updated {
-                            error!("Error updating configuration: {e:?}");
-                        } else {
-                            info!("Configuration updated via MQTT. Restarting program.");
-                            let _ = self
-                                .relay_main_obj
-                                .bind(py)
-                                .call_method0(intern!(py, "restart_relay"));
-                        }
-                    }
-                    Err(e) => error!(
-                        "Invalid JSON format in MQTT message '{}': {e:?}",
-                        loggable(&text)
-                    ),
-                }
-            }
-            ControlTopic::ConfigReload => {
-                info!("Reloading configuration. Restarting program.");
-                let _ = self
-                    .relay_main_obj
-                    .bind(py)
-                    .call_method0(intern!(py, "restart_relay"));
-            }
-        }
-        Ok(())
+    /// Handed over as the trait object rather than the concrete type: the worker
+    /// has no business knowing that acting on a control topic currently means
+    /// taking the GIL.
+    pub(crate) fn sink(&self) -> Arc<dyn control::ControlSink> {
+        Arc::clone(&self.sink) as Arc<dyn control::ControlSink>
     }
 }
 

@@ -245,6 +245,31 @@ mod tests {
         );
     }
 
+    /// Keys come out sorted, whatever order they arrived in.
+    ///
+    /// `serde_json::Map` is a `BTreeMap` unless the `preserve_order` feature is
+    /// on, and [`flatten_json`] just iterates it - so the sort is a property of
+    /// that feature being off, not of anything written here. The plan route in
+    /// [`super::shape`] assigns its slots in sorted-key order to match, which is
+    /// why the two routes agree at all.
+    ///
+    /// Turning `preserve_order` on - tempting, because it is exactly what the
+    /// config control topics want for their payloads - would silently reorder
+    /// every value the relay writes to the Miniserver. This test is what makes
+    /// that show up as a failure instead of as a support ticket.
+    #[test]
+    fn object_keys_flatten_in_sorted_order_not_document_order() {
+        let flat = dom_targets("dev/x", r#"{"zulu":1,"alpha":2,"mike":3}"#, true);
+        assert_eq!(
+            flat,
+            vec![
+                ("dev/x/alpha".to_string(), "2".to_string()),
+                ("dev/x/mike".to_string(), "3".to_string()),
+                ("dev/x/zulu".to_string(), "1".to_string()),
+            ]
+        );
+    }
+
     #[test]
     fn a_non_object_payload_is_forwarded_whole() {
         assert_eq!(

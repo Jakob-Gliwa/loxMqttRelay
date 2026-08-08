@@ -1,0 +1,33 @@
+[general]
+log_level = 42
+base_topic = 42
+cache_size = 42
+
+[broker]
+host = 42
+port = 42
+user = 42
+password = 42
+client_id = 42
+
+[miniserver]
+miniserver_ip = 42
+miniserver_port = 42
+miniserver_user = 42
+miniserver_pass = 42
+sync_with_miniserver = 42
+
+[topics]
+subscriptions = 42
+subscription_filters = 42
+topic_whitelist = 42
+do_not_forward = 42
+
+[processing]
+expand_json = 42
+convert_booleans = 42
+
+[udp]
+udp_in_port = 42
+udp_source_filter_enabled = 42
+udp_allowed_sources = 42

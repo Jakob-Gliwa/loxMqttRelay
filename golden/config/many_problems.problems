@@ -1,0 +1,6 @@
+[general] 'log_level' must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL, got 'NOPE'
+[general] 'cache_size' cannot be negative, got -1
+[broker] 'port' must be between 1 and 65535, got 0
+[broker] 'host' cannot be empty
+[topics] 'subscription_filters' has an empty pattern - an empty expression matches every topic
+[udp] 'udp_in_port' must be between 1 and 65535, got 99999

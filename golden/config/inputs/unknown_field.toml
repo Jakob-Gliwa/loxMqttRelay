@@ -1,0 +1,3 @@
+[general]
+log_level = "INFO"
+not_a_field = 1

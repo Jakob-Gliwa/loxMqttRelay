@@ -1,0 +1,2 @@
+[topics]
+do_not_forward = ["(a)\\1"]

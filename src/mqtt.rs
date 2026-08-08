@@ -32,6 +32,7 @@ use pyo3_async_runtimes::tokio::{future_into_py, get_runtime};
 use tokio::sync::{Notify, mpsc};
 
 use crate::MiniserverDataProcessor;
+use crate::control::ControlSink;
 use crate::miniserver::LoxEgress;
 use crate::process::Core;
 use crate::util::{lock_recover, loggable, loggable_bytes};
@@ -505,10 +506,10 @@ const BATCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Drains the inbound channel and drives the message path.
 ///
-/// The split between control and data happens here, in Rust, *before* any
-/// attach: a data message goes to [`Core::process_data`] and never touches the
-/// GIL, and only the relay's own control topics - which genuinely have to reach
-/// `global_config` and `orjson` - are handed back to Python.
+/// The split between control and data happens here, in Rust: a data message goes
+/// to [`Core::process_data`], and only the relay's own control topics reach
+/// [`ControlSink`]. Whether acting on one of those needs the GIL is the sink's
+/// business, not this worker's - which is what keeps the data path free of it.
 ///
 /// Sequential on purpose. Awaiting the egress means a slow Miniserver backs up
 /// into the inbound channel and from there into the broker's Receive Maximum,
@@ -517,7 +518,7 @@ const BATCH_TIMEOUT: Duration = Duration::from_secs(30);
 async fn ingress_worker(
     mut rx: mpsc::Receiver<PublishMessage>,
     core: Arc<Core<LoxEgress>>,
-    processor: Py<MiniserverDataProcessor>,
+    control: Arc<dyn ControlSink>,
 ) {
     while let Some(message) = rx.recv().await {
         let Some(kind) = core.control_kind(&message.topic) else {
@@ -539,15 +540,12 @@ async fn ingress_worker(
             continue;
         };
 
-        Python::attach(|py| {
-            let bound = processor.bind(py);
-            if let Err(e) = bound.borrow().dispatch_control(py, kind, &message.payload) {
-                error!(
-                    "Dropped control message on '{}': {e}",
-                    loggable(&message.topic)
-                );
-            }
-        });
+        if let Err(e) = control.dispatch(kind, &message.payload) {
+            error!(
+                "Dropped control message on '{}': {e}",
+                loggable(&message.topic)
+            );
+        }
     }
 
     info!("MQTT ingress worker stopped");
@@ -626,9 +624,13 @@ impl MqttClient {
         topics: Vec<String>,
         processor: Py<MiniserverDataProcessor>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        // Pulled out here so the worker holds it directly. The data path never
-        // borrows the pyclass, so it never needs the GIL to reach the core.
-        let core = processor.bind(py).borrow().core();
+        // Both pulled out here so the worker holds them directly and never
+        // borrows the pyclass again - which is what keeps the GIL off the data
+        // path, and off the decision of whether a message is data at all.
+        let (core, control) = {
+            let bound = processor.bind(py).borrow();
+            (bound.core(), bound.sink())
+        };
 
         let shared = Arc::clone(&self.shared);
         let reconnect = self.reconnect.clone();
@@ -676,7 +678,7 @@ impl MqttClient {
                 .map_err(|e| PyRuntimeError::new_err(format!("MQTT connect failed: {e}")))?;
             shared.client.store(Some(Arc::new(client)));
 
-            get_runtime().spawn(ingress_worker(rx, core, processor));
+            get_runtime().spawn(ingress_worker(rx, core, control));
             get_runtime().spawn(resubscribe_loop(
                 Arc::clone(&shared),
                 topics,

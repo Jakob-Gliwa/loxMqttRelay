@@ -1,0 +1,13 @@
+[general]
+log_level = "NOPE"
+cache_size = -1
+
+[broker]
+port = 0
+host = ""
+
+[topics]
+subscription_filters = [""]
+
+[udp]
+udp_in_port = 99999

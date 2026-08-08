@@ -1,0 +1,33 @@
+[general]
+log_level = { k = "v" }
+base_topic = { k = "v" }
+cache_size = { k = "v" }
+
+[broker]
+host = { k = "v" }
+port = { k = "v" }
+user = { k = "v" }
+password = { k = "v" }
+client_id = { k = "v" }
+
+[miniserver]
+miniserver_ip = { k = "v" }
+miniserver_port = { k = "v" }
+miniserver_user = { k = "v" }
+miniserver_pass = { k = "v" }
+sync_with_miniserver = { k = "v" }
+
+[topics]
+subscriptions = { k = "v" }
+subscription_filters = { k = "v" }
+topic_whitelist = { k = "v" }
+do_not_forward = { k = "v" }
+
+[processing]
+expand_json = { k = "v" }
+convert_booleans = { k = "v" }
+
+[udp]
+udp_in_port = { k = "v" }
+udp_source_filter_enabled = { k = "v" }
+udp_allowed_sources = { k = "v" }

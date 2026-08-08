@@ -1,0 +1,33 @@
+[general]
+log_level = "x"
+base_topic = "x"
+cache_size = "x"
+
+[broker]
+host = "x"
+port = "x"
+user = "x"
+password = "x"
+client_id = "x"
+
+[miniserver]
+miniserver_ip = "x"
+miniserver_port = "x"
+miniserver_user = "x"
+miniserver_pass = "x"
+sync_with_miniserver = "x"
+
+[topics]
+subscriptions = "x"
+subscription_filters = "x"
+topic_whitelist = "x"
+do_not_forward = "x"
+
+[processing]
+expand_json = "x"
+convert_booleans = "x"
+
+[udp]
+udp_in_port = "x"
+udp_source_filter_enabled = "x"
+udp_allowed_sources = "x"

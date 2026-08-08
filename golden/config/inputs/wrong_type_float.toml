@@ -1,0 +1,33 @@
+[general]
+log_level = 1.5
+base_topic = 1.5
+cache_size = 1.5
+
+[broker]
+host = 1.5
+port = 1.5
+user = 1.5
+password = 1.5
+client_id = 1.5
+
+[miniserver]
+miniserver_ip = 1.5
+miniserver_port = 1.5
+miniserver_user = 1.5
+miniserver_pass = 1.5
+sync_with_miniserver = 1.5
+
+[topics]
+subscriptions = 1.5
+subscription_filters = 1.5
+topic_whitelist = 1.5
+do_not_forward = 1.5
+
+[processing]
+expand_json = 1.5
+convert_booleans = 1.5
+
+[udp]
+udp_in_port = 1.5
+udp_source_filter_enabled = 1.5
+udp_allowed_sources = 1.5

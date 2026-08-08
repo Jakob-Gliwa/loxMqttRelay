@@ -1,0 +1,3 @@
+[broker] 'port' must be between 1 and 65535, got 0
+[miniserver] 'miniserver_port' must be between 1 and 65535, got 70000
+[udp] 'udp_in_port' must be between 1 and 65535, got -5

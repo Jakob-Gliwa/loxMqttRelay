@@ -1,0 +1,2 @@
+[topics]
+subscription_filters = ["^ok/", ""]

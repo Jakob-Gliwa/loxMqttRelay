@@ -1,0 +1,22 @@
+[general] 'log_level' expects str, got dict
+[general] 'base_topic' expects str, got dict
+[general] 'cache_size' expects int, got dict
+[broker] 'host' expects str, got dict
+[broker] 'port' expects int, got dict
+[broker] 'user' expects str | None, got dict
+[broker] 'password' expects str | None, got dict
+[broker] 'client_id' expects str, got dict
+[miniserver] 'miniserver_ip' expects str, got dict
+[miniserver] 'miniserver_port' expects int, got dict
+[miniserver] 'miniserver_user' expects str, got dict
+[miniserver] 'miniserver_pass' expects str, got dict
+[miniserver] 'sync_with_miniserver' expects bool, got dict
+[topics] 'subscriptions' expects a list, got dict
+[topics] 'subscription_filters' expects a list, got dict
+[topics] 'topic_whitelist' expects a list, got dict
+[topics] 'do_not_forward' expects a list, got dict
+[processing] 'expand_json' expects bool, got dict
+[processing] 'convert_booleans' expects bool, got dict
+[udp] 'udp_in_port' expects int, got dict
+[udp] 'udp_source_filter_enabled' expects bool, got dict
+[udp] 'udp_allowed_sources' expects a list, got dict

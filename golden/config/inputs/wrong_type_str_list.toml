@@ -1,0 +1,33 @@
+[general]
+log_level = ["a", "b"]
+base_topic = ["a", "b"]
+cache_size = ["a", "b"]
+
+[broker]
+host = ["a", "b"]
+port = ["a", "b"]
+user = ["a", "b"]
+password = ["a", "b"]
+client_id = ["a", "b"]
+
+[miniserver]
+miniserver_ip = ["a", "b"]
+miniserver_port = ["a", "b"]
+miniserver_user = ["a", "b"]
+miniserver_pass = ["a", "b"]
+sync_with_miniserver = ["a", "b"]
+
+[topics]
+subscriptions = ["a", "b"]
+subscription_filters = ["a", "b"]
+topic_whitelist = ["a", "b"]
+do_not_forward = ["a", "b"]
+
+[processing]
+expand_json = ["a", "b"]
+convert_booleans = ["a", "b"]
+
+[udp]
+udp_in_port = ["a", "b"]
+udp_source_filter_enabled = ["a", "b"]
+udp_allowed_sources = ["a", "b"]

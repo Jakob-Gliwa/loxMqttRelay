@@ -1,0 +1,22 @@
+[general] 'log_level' expects str, got float
+[general] 'base_topic' expects str, got float
+[general] 'cache_size' expects int, got float
+[broker] 'host' expects str, got float
+[broker] 'port' expects int, got float
+[broker] 'user' expects str | None, got float
+[broker] 'password' expects str | None, got float
+[broker] 'client_id' expects str, got float
+[miniserver] 'miniserver_ip' expects str, got float
+[miniserver] 'miniserver_port' expects int, got float
+[miniserver] 'miniserver_user' expects str, got float
+[miniserver] 'miniserver_pass' expects str, got float
+[miniserver] 'sync_with_miniserver' expects bool, got float
+[topics] 'subscriptions' expects a list, got float
+[topics] 'subscription_filters' expects a list, got float
+[topics] 'topic_whitelist' expects a list, got float
+[topics] 'do_not_forward' expects a list, got float
+[processing] 'expand_json' expects bool, got float
+[processing] 'convert_booleans' expects bool, got float
+[udp] 'udp_in_port' expects int, got float
+[udp] 'udp_source_filter_enabled' expects bool, got float
+[udp] 'udp_allowed_sources' expects a list, got float

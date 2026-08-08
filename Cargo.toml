@@ -10,10 +10,11 @@ edition = "2024"
 name = "loxmqttrelay"
 # "cdylib" is necessary to produce a shared library for Python to import from.
 #
-# Downstream Rust code (including code in `bin/`, `examples/`, and `tests/`) will not be able
-# to `use string_sum;` unless the "rlib" or "lib" crate type is also included, e.g.:
-# crate-type = ["cdylib", "rlib"]
-crate-type = ["cdylib"]
+# "rlib" is here for the port to a standalone binary: `src/main.rs` and anything
+# under `tests/` can only `use loxmqttrelay::…` if the crate is also built as a
+# Rust library. Both crate types come out of the same sources, so the wheel keeps
+# working while the binary grows next to it; "cdylib" goes away once Python does.
+crate-type = ["cdylib", "rlib"]
 
 [features]
 # On by default for the wheel: `extension-module` leaves libpython unlinked,

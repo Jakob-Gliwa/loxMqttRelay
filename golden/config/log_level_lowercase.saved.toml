@@ -1,0 +1,33 @@
+[general]
+log_level = "debug"
+base_topic = "myrelay/"
+cache_size = 100000
+
+[broker]
+host = "localhost"
+port = 1883
+user = ""
+password = ""
+client_id = "loxmqttrelay"
+
+[miniserver]
+miniserver_ip = "127.0.0.1"
+miniserver_port = 80
+miniserver_user = ""
+miniserver_pass = ""
+sync_with_miniserver = true
+
+[topics]
+subscriptions = []
+subscription_filters = []
+topic_whitelist = []
+do_not_forward = []
+
+[processing]
+expand_json = true
+convert_booleans = true
+
+[udp]
+udp_in_port = 11884
+udp_source_filter_enabled = true
+udp_allowed_sources = []

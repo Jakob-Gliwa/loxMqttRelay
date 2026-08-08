@@ -1,0 +1,5 @@
+[nonsense]
+whatever = 1
+
+[general]
+log_level = "INFO"

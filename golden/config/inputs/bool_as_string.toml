@@ -1,0 +1,6 @@
+[processing]
+expand_json = "false"
+convert_booleans = "true"
+
+[miniserver]
+sync_with_miniserver = "false"

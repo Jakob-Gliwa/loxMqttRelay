@@ -1,0 +1,3 @@
+[processing] 'expand_json' expects bool, got str
+[processing] 'convert_booleans' expects bool, got str
+[miniserver] 'sync_with_miniserver' expects bool, got str
