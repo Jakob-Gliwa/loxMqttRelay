@@ -77,6 +77,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # -------------------------------------
 FROM scratch
 
+# LOAD-BEARING. `--config` defaults to the *relative* `config/config.toml`, so
+# the working directory decides where that lands: /app here, which is where the
+# documented `-v ./config:/app/config` mount puts it. Without this the relay
+# looks in /config, finds nothing, and starts on the defaults - a container that
+# comes up, ignores the operator's configuration and dials 127.0.0.1. The smoke
+# test in ci.yml exists because that failure is invisible from the outside.
+WORKDIR /app
+
 # The only thing the binaries need from a filesystem. Both TLS stacks verify
 # against these when the Miniserver is on 443 or the broker speaks TLS; without
 # them every such connection fails with a certificate error.

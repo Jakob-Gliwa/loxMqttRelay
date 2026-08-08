@@ -136,6 +136,55 @@ jobs:
           cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
           cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
 
+      # Start the image the way the README tells people to, and check it read
+      # the configuration that was mounted. A relay that comes up on its
+      # defaults looks healthy from the outside - it logs a banner, binds its
+      # port and reports no error - while ignoring the operator's broker and
+      # dialling 127.0.0.1. Nothing before this step can see that: the binary is
+      # fine, the image builds, and only running it reveals the working
+      # directory is wrong. It has been wrong once.
+      #
+      # `--load` is a cache hit against the build above, so this costs seconds.
+      - name: Smoke-test the image
+        run: |
+          set -euo pipefail
+          docker buildx build --platform "${{ matrix.platform }}" --load \
+            -t loxmqttrelay:smoke \
+            --cache-from type=gha,scope=${{ env.PLATFORM_PAIR }} .
+
+          mkdir -p smoke/config
+          cat > smoke/config/config.toml <<'TOML'
+          [general]
+          base_topic = "smoke/"
+          [broker]
+          host = "127.0.0.1"
+          port = 1
+          [miniserver]
+          miniserver_ip = "127.0.0.1"
+          miniserver_port = 9
+          sync_with_miniserver = false
+          [topics]
+          subscriptions = ["one/#", "two/#", "three/#"]
+          [udp]
+          udp_in_port = 21884
+          TOML
+
+          # It exits non-zero: nothing is listening on those ports. The log is
+          # what is being tested.
+          out="$(docker run --rm -v "$PWD/smoke/config:/app/config" loxmqttrelay:smoke 2>&1 || true)"
+          echo "$out"
+
+          if grep -q 'Config file not found' <<<"$out"; then
+            echo "::error::the image did not read the mounted configuration" >&2
+            exit 1
+          fi
+          # Three subscriptions can only have come from the mounted file; the
+          # defaults have none.
+          if ! grep -q 'subscriptions=3' <<<"$out"; then
+            echo "::error::the mounted configuration was not the one that was used" >&2
+            exit 1
+          fi
+
       - name: Export digest
         if: github.event_name != 'pull_request'
         run: |
