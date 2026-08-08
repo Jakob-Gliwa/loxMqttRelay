@@ -94,14 +94,18 @@ Pin a version tag if an update should be a decision rather than a restart -
     miniserver_pass = "your-password"
     ```
 
-  4. Run:
+  4. Build and run:
     ```bash
-    uv venv .venv 
-    source .venv/
-    bin/activate
-    uv pip install .
-    python loxmqttrelay
+    cargo build --release --bin loxmqttrelay-relay
+    ./target/release/loxmqttrelay-relay --config config/config.toml
     ```
+
+    The relay is a single static binary with no runtime dependencies. A Rust
+    toolchain is all that is needed to build it; there is nothing to install
+    afterwards.
+
+    `--config` defaults to `config/config.toml`, and `--log-level` overrides the
+    level in the file. `LOG_LEVEL` in the environment sits between the two.
 ```
 ## Architecture
 
@@ -155,7 +159,7 @@ something is deliberately changed.
 - Automatic boolean value conversion
 - Live configuration updates via MQTT
 - Automatic synchronization of whitelisted topics using the Miniserver configuration
-- Robust XML parsing with lxml recovery mode for malformed Loxone v16 configurations
+- Robust XML scanning that salvages what it can from malformed Loxone configurations
 - Topic monitoring and processing feedback
 - Configuration via `config.toml`
 
@@ -689,10 +693,9 @@ Configure your Miniserver to publish any message to `{base_topic}/miniservereven
 
 ## Testing Setup
 
-The tests are split the same way the code is. Everything a message touches is
-tested in Rust, against the processing core with a recording egress in place of
-the Miniserver; the Python tests cover what genuinely crosses the language
-boundary.
+The relay is Rust and so are its tests. A Python implementation is still in the
+tree during the port, and what is left of the Python tests exists to hold the
+Rust one against it - see "Parity" below.
 
 ### The Rust tests
 
@@ -723,15 +726,35 @@ Point it at an interpreter that ships a shared library - the project's own
 virtualenv will do. The shipped wheel is unaffected: `setup.py` turns
 `extension-module` back on for every build that is packaged.
 
-### The Python tests
+### Parity
+
+The Python implementation is still in the tree, and while it is, it is what the
+Rust one is measured against.
 
 ```bash
 uv run pytest
 ```
 
-Config parsing, the whitelist sync, the startup and shutdown sequence, and the
-control topics - the one part of the message path that still calls back into
-Python.
+Two things run here. `tests/test_rust_python_parity.py` puts both
+implementations of the whitelist sync in front of the same real Miniserver
+configuration and compares the decompressed bytes and the extracted input names,
+as ordered lists. It skips unless `config/sps0.LoxCC` is present, which it is not
+in a clone - the file is gitignored because it is somebody's actual house. Drop
+any `sps_*.zip` or `*.LoxCC` into `fixtures/` and it is picked up too; an older
+firmware's zip is the only way to get a real archive in front of the zip reader.
+
+The rest is the config module and the control topics, still exercised through
+the wheel.
+
+`golden/config/` is the other half, and the more thorough one:
+`scripts/gen_golden.py` ran the *Python* config module over 40 documents and 41
+MQTT updates and recorded every validation message in file order, the warnings
+for unknown sections and fields, what `save_config` wrote, and the exact bytes
+of a `config/get` response. `src/config/tests.rs` asserts the Rust module
+reproduces all of it. Where it deliberately does not, the case is named in
+`tests::DIVERGENT` with the reason.
+
+The generator goes when the Python does. The corpus stays.
 
 ## Releasing
 
