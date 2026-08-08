@@ -47,6 +47,15 @@ arc-swap = "1.9"
 # majors are the ones mqtt-glide already resolves, so the graph keeps one of each.
 bytes = "1.12"
 bytestring = "1.5"
+# The configuration file. `preserve_order` is not cosmetic: the relay reports
+# every unusable value in the order it appears in the file, and an unordered map
+# would scramble that into something an operator cannot follow back to a line.
+# It resolves to `indexmap`, which the graph already carries.
+toml = { version = "1.1.4", features = ["preserve_order"] }
+# getuid/getgid for the "cannot write the config" hint, and uname for the startup
+# banner. Both need a syscall std does not expose; rustix is the way to make them
+# without putting the crate's first `unsafe` block in a diagnostic message.
+rustix = { version = "1.1.4", features = ["process", "system"] }
 
 [build-dependencies]
 pyo3-build-config = "0.28.3"

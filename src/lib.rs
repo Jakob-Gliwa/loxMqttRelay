@@ -20,6 +20,7 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+mod config;
 mod control;
 mod egress;
 mod miniserver;

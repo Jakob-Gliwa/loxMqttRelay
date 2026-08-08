@@ -410,10 +410,11 @@ def main() -> int:
             "case": case,
             "start": start,
             "before": before,
-            # orjson.loads would reject a Python None, and the payload is spelled
-            # here as Python rather than as JSON text, so round-trip it the way
-            # the control topic does.
-            "payload": json.loads(json.dumps(payload)),
+            # As TEXT, not as a nested object. update_fields reports its problems
+            # in payload order, and the record itself is written with
+            # sort_keys=True - which applies recursively and would quietly sort
+            # the very order under test.
+            "payload": json.dumps(payload),
             "mode": mode,
         }
         try:

@@ -1,9 +1,26 @@
-//! Two habits the whole crate shares: how a poisoned lock is answered, and how
-//! foreign text is put into a log line.
+//! Habits the whole crate shares: how a poisoned lock is answered, how foreign
+//! text is put into a log line, and where Python's string semantics differ from
+//! Rust's in a way that is observable.
 
 use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::sync::{Mutex, MutexGuard};
+
+/// Python's `str.isspace()`, which is what `str.split()` and `str.strip()` use.
+///
+/// `char::is_whitespace` is the Unicode White_Space property and leaves out the
+/// four ASCII separators U+001C..U+001F that Python counts as space. The
+/// difference is observable in two places that both used to be Python: which
+/// bytes a UDP datagram is split on, and whether a configured `base_topic` or
+/// `host` counts as blank.
+pub(crate) fn is_py_space(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}')
+}
+
+/// `str.strip()` with no argument.
+pub(crate) fn py_strip(s: &str) -> &str {
+    s.trim_matches(is_py_space)
+}
 
 /// How much of a foreign string may reach a log line.
 ///

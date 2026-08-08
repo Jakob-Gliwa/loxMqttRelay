@@ -26,7 +26,7 @@ use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::mqtt::{MqttClient, MqttShared};
-use crate::util::{lock_recover, loggable};
+use crate::util::{is_py_space, lock_recover, loggable, py_strip};
 
 /// Upper bound for the "warn once per sender" bookkeeping, so a flood of
 /// spoofed source addresses cannot grow the set (or the log) without limit.
@@ -79,18 +79,6 @@ fn decode_utf8_ignore(data: &[u8]) -> Cow<'_, str> {
             Cow::Owned(out)
         }
     }
-}
-
-/// Python's `str.isspace()`, which is what `str.split()` and `str.strip()` use.
-///
-/// `char::is_whitespace` is the Unicode White_Space property and leaves out the
-/// four ASCII separators U+001C..U+001F that Python counts as space.
-fn is_py_space(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}')
-}
-
-fn py_strip(s: &str) -> &str {
-    s.trim_matches(is_py_space)
 }
 
 /// `str.split()` with no argument: runs of whitespace, no empty tokens.
