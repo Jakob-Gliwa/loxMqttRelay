@@ -474,6 +474,127 @@ fn the_section_names_round_trip() {
     assert_eq!(ConfigSection::parse("nonsense"), None);
 }
 
+/// Every document in the corpus loads, or is refused, as its goldens say.
+///
+/// `validate_document` is what the goldens above exercise; this is the wiring
+/// around it - that a document with problems actually stops the start, and that
+/// one without them produces the configuration the goldens recorded.
+#[test]
+fn load_refuses_exactly_the_documents_with_problems() {
+    for name in documents() {
+        let dir = tempdir(&format!("load-{name}"));
+        let file = dir.join("config.toml");
+        fs::write(&file, read_golden(&format!("inputs/{name}.toml"))).expect("seed");
+
+        let refused = !read_golden(&format!("{name}.problems")).is_empty()
+            || DIVERGENT.contains(&name.as_str());
+        match ConfigStore::load(&file) {
+            Ok(store) => {
+                assert!(!refused, "{name}: should have been refused");
+                assert_eq!(
+                    String::from_utf8(store.safe_json()).unwrap(),
+                    read_golden(&format!("{name}.safe.json")),
+                    "{name}: loaded to a different configuration"
+                );
+            }
+            Err(_) => assert!(refused, "{name}: should have loaded"),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+/// A file that cannot be written is reported, and left exactly as it was.
+///
+/// The point is what does *not* happen: no chmod. Widening the file to get one
+/// write through would leave the broker and Miniserver passwords readable for
+/// every account on the host, permanently, to fix something temporary.
+#[cfg(unix)]
+#[test]
+fn a_config_that_cannot_be_written_keeps_its_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if rustix::process::getuid().is_root() {
+        // Root writes through a read-only file, so there is nothing to observe.
+        return;
+    }
+
+    let dir = tempdir("read-only");
+    let file = dir.join("config.toml");
+    let store = ConfigStore::new(&file, AppConfig::default());
+    store.save();
+    let original = fs::read_to_string(&file).expect("written");
+
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o444)).expect("chmod");
+    let mode_before = fs::metadata(&file).expect("stat").permissions().mode();
+
+    store
+        .update_fields(
+            &[("cache_size".to_owned(), CfgValue::Int(4242))],
+            ListMode::Set,
+        )
+        .expect("the update itself is usable");
+
+    assert_eq!(
+        fs::metadata(&file).expect("stat").permissions().mode(),
+        mode_before,
+        "the file was made writable to get a save through"
+    );
+    assert_eq!(
+        fs::read_to_string(&file).expect("read"),
+        original,
+        "the file changed despite the failed write"
+    );
+    // The relay keeps running with the value it was given; only the file is
+    // stale, which is what the second error message says.
+    assert_eq!(store.snapshot().general.cache_size, 4242);
+
+    let _ = fs::set_permissions(&file, fs::Permissions::from_mode(0o644));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Saving is idempotent: what was written reads back and writes out the same.
+///
+/// Not an identity, and deliberately not asserted as one. A `user` that is unset
+/// is `None` in the model, `""` in the file, and therefore `Some("")` once
+/// reloaded - TOML has no null, and spelling an absent broker user as the empty
+/// string is how the file has always looked. Python normalized it in exactly the
+/// same place, so the first save is where the value settles and every save after
+/// it is a no-op. That second property is the one worth holding, because it is
+/// what stops a relay from rewriting its own config file on every restart.
+#[test]
+fn saving_a_reloaded_file_changes_nothing() {
+    for name in documents() {
+        // A `.saved.toml` golden only means Python accepted the document. The
+        // two divergent ones carry a pattern this build refuses, so writing them
+        // out and reading them back is not a round trip - it is the refusal
+        // working. (Python did not run on them either; it got as far as
+        // `Core::new` and failed there, which is the same outcome reported
+        // worse.)
+        if !golden_dir().join(format!("{name}.saved.toml")).exists()
+            || DIVERGENT.contains(&name.as_str())
+        {
+            continue;
+        }
+        let text = read_golden(&format!("inputs/{name}.toml"));
+        let (config, _) = AppConfig::from_document(&parse_toml(&text).expect("valid TOML"));
+
+        let dir = tempdir(&format!("roundtrip-{name}"));
+        let once = dir.join("once.toml");
+        ConfigStore::new(&once, config).save();
+
+        let reloaded = ConfigStore::load(&once).expect("what we wrote must load");
+        let twice = dir.join("twice.toml");
+        ConfigStore::new(&twice, reloaded.snapshot()).save();
+
+        assert_eq!(
+            fs::read_to_string(&twice).expect("second save"),
+            fs::read_to_string(&once).expect("first save"),
+            "{name}: a reload-and-save changed the file"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
 /// A scratch directory of our own, so the tests do not have to run one at a time.
 fn tempdir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("loxmqttrelay-config-{tag}"));
