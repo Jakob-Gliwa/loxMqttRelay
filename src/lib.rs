@@ -28,6 +28,7 @@ mod mqtt;
 mod process;
 mod udp;
 mod util;
+mod whitelist;
 
 use control::PyControlSink;
 use miniserver::{LoxEgress, MiniserverClient};
@@ -280,6 +281,54 @@ impl MiniserverDataProcessor {
     }
 }
 
+/// TEMPORARY: the whitelist sync's two pure halves, reachable from Python.
+///
+/// These exist so `tests/test_rust_python_parity.py` can hold the Rust port up
+/// against `loxmqttrelay.miniserver_sync` on a *real* Miniserver configuration -
+/// the only input that has ever exercised what the firmware actually writes.
+/// The synthetic tests in `whitelist::` cover the shapes; this covers the thing
+/// itself, and there is no substitute for it.
+///
+/// Both go when `miniserver_sync.py` does.
+#[pyfunction]
+fn _parity_decompress_loxcc(payload: &[u8]) -> PyResult<Vec<u8>> {
+    whitelist::decompress_loxcc(payload)
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+#[pyfunction]
+fn _parity_extract_inputs(config_xml: &[u8]) -> PyResult<Vec<String>> {
+    whitelist::extract_inputs(config_xml).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// TEMPORARY: the download, run to completion, against a real Miniserver.
+///
+/// Two GETs and nothing else - `/dev/fslist/prog/` and `/dev/fsget/prog/<file>`.
+/// Both are reads; this cannot change anything on the device.
+///
+/// The stub server in `whitelist::http` proves the wiring, but not that a real
+/// Miniserver accepts the request as this client shapes it (HTTP/1.1, a `Host`
+/// header, no `User-Agent`), nor what its `/prog` listing actually looks like.
+/// Those are the two things only the device can answer.
+#[pyfunction]
+fn _parity_load_miniserver_config(
+    py: Python<'_>,
+    miniserver_ip: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+) -> PyResult<Vec<u8>> {
+    let endpoint = whitelist::Endpoint::new(miniserver_ip, port)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    // Blocking, and without the GIL: this is a test entry point called from the
+    // main thread, not from the message path.
+    py.detach(|| {
+        pyo3_async_runtimes::tokio::get_runtime()
+            .block_on(whitelist::load_miniserver_config(&endpoint, user, password))
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })
+}
+
 /// Route Rust's `log` output through env_logger, at the level Python configured.
 ///
 /// Without this the whole Rust half is silent - including the only warning the
@@ -332,5 +381,9 @@ fn _loxmqttrelay(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<MqttClient>()?;
     m.add_class::<UdpServer>()?;
     m.add_function(wrap_pyfunction!(init_rust_logger, m)?)?;
+    // Temporary, for the parity harness; see above.
+    m.add_function(wrap_pyfunction!(_parity_decompress_loxcc, m)?)?;
+    m.add_function(wrap_pyfunction!(_parity_extract_inputs, m)?)?;
+    m.add_function(wrap_pyfunction!(_parity_load_miniserver_config, m)?)?;
     Ok(())
 }

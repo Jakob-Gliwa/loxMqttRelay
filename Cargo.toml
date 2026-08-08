@@ -56,6 +56,29 @@ toml = { version = "1.1.4", features = ["preserve_order"] }
 # banner. Both need a syscall std does not expose; rustix is the way to make them
 # without putting the crate's first `unsafe` block in a diagnostic message.
 rustix = { version = "1.1.4", features = ["process", "system"] }
+# The Miniserver's configuration download (src/whitelist). A LoxCC container is
+# LZ4 - block mode in practice, frame mode allowed for - wrapped in a CRC32, and
+# sometimes inside a zip. lz4_flex does both modes in pure Rust and, unlike the C
+# `lz4` crate, is compiled with the same `-C target-cpu` the rest of the binary
+# gets. miniz_oxide is raw inflate for the zip case; the `zip` crate would pull
+# aes, bzip2, zstd, lzma and zopfli in by default for one fixed entry we can read
+# out of the central directory ourselves.
+lz4_flex = "0.14.0"
+crc32fast = "1.5.0"
+miniz_oxide = "0.9.1"
+# The configuration XML. Only one fixed query is ever run against it, so this is
+# a streaming scan rather than a DOM - which is both faster on a 2.5 MB document
+# and more tolerant of malformed input, since it can stop and keep what it has.
+# That tolerance is the requirement: lxml read these files in recover mode.
+quick-xml = "0.41.0"
+# The filesystem API (/dev/fslist, /dev/fsget). Named rather than added: all
+# three already resolve through loxwebsocket -> fastwebsockets, so the graph is
+# unchanged. reqwest would have brought hyper-rustls alongside the tokio-rustls
+# already here, and the one-crypto-provider pin above is worth more than the
+# convenience - these two requests are plaintext HTTP and need no TLS at all.
+hyper = { version = "1.11.0", features = ["client", "http1"] }
+hyper-util = { version = "0.1.20", features = ["tokio"] }
+http-body-util = "0.1.4"
 
 [build-dependencies]
 pyo3-build-config = "0.28.3"
