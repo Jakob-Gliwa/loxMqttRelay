@@ -311,13 +311,13 @@ impl MiniserverDataProcessor {
 ///
 /// Driven off [`config::schema::FIELDS`], so a field added to the model is
 /// picked up here without being mentioned again.
-fn app_config_from_py(py: Python<'_>, global_config: &Bound<'_, PyAny>) -> PyResult<AppConfig> {
+fn app_config_from_py(_py: Python<'_>, global_config: &Bound<'_, PyAny>) -> PyResult<AppConfig> {
     let mut config = AppConfig::default();
     for spec in config::schema::FIELDS {
         let value = global_config
             .getattr(spec.section.as_str())?
             .getattr(spec.name)?;
-        config.set_field(spec, py_to_cfg_value(py, &value)?);
+        config.set_field(spec, py_to_cfg_value(&value)?);
     }
     Ok(config)
 }
@@ -327,7 +327,7 @@ fn app_config_from_py(py: Python<'_>, global_config: &Bound<'_, PyAny>) -> PyRes
 /// Deliberately narrow: the values are known to have passed Python's own
 /// validation, so anything that is not one of these shapes is a bug rather than
 /// bad input.
-fn py_to_cfg_value(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<CfgValue> {
+fn py_to_cfg_value(value: &Bound<'_, PyAny>) -> PyResult<CfgValue> {
     if value.is_none() {
         return Ok(CfgValue::Null);
     }
@@ -345,7 +345,7 @@ fn py_to_cfg_value(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<CfgValu
     // refuses a set, so anything iterable is walked instead.
     let mut items = Vec::new();
     for item in value.try_iter()? {
-        items.push(py_to_cfg_value(py, &item?)?);
+        items.push(py_to_cfg_value(&item?)?);
     }
     Ok(CfgValue::List(items))
 }

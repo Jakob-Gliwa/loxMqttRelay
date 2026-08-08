@@ -19,9 +19,27 @@ crate-type = ["cdylib", "rlib"]
 [[bin]]
 # The relay itself. Named `-relay` because on x86 a small launcher takes the
 # plain `loxmqttrelay` name and execs whichever of the two builds this CPU can
-# run; see src/launcher.rs.
+# run; see src/launcher.rs. The image installs it under two names, one built for
+# `x86-64-v3` and one for the baseline.
 name = "loxmqttrelay-relay"
 path = "src/main.rs"
+
+[[bin]]
+# The AVX2 check, compiled for the baseline so it can run anywhere and look
+# before the optimized build would have faulted. Unix only: it exists to `exec`.
+name = "loxmqttrelay"
+path = "src/launcher.rs"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+# Replaces the `strip --strip-unneeded` step the Dockerfile used to run.
+strip = "symbols"
+# panic stays "unwind": udp.rs inspects `JoinError::is_panic` to tell a cancelled
+# receive loop from one that died, and "abort" would turn the second into a dead
+# process instead of a reported one.
+panic = "unwind"
 
 [features]
 # On by default for the wheel: `extension-module` leaves libpython unlinked,

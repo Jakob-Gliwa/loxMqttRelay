@@ -53,17 +53,19 @@ pub fn log_runtime_environment(config: &AppConfig, config_path: &std::path::Path
 }
 
 fn system() -> String {
-    match rustix::system::uname() {
-        info => format!(
-            "{} {}",
-            info.sysname().to_string_lossy(),
-            info.release().to_string_lossy()
-        ),
-    }
+    let info = rustix::system::uname();
+    format!(
+        "{} {}",
+        info.sysname().to_string_lossy(),
+        info.release().to_string_lossy()
+    )
 }
 
 fn arch() -> String {
-    rustix::system::uname().machine().to_string_lossy().into_owned()
+    rustix::system::uname()
+        .machine()
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Which instruction sets this CPU actually has.

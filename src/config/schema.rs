@@ -91,10 +91,6 @@ impl FieldKind {
             FieldKind::StrList | FieldKind::StrSet => "a list",
         }
     }
-
-    pub(crate) fn is_collection(self) -> bool {
-        matches!(self, FieldKind::StrList | FieldKind::StrSet)
-    }
 }
 
 /// Something that has to be true of a value whose type already fits.

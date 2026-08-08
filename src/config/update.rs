@@ -35,14 +35,6 @@ pub(crate) enum ListMode {
 }
 
 impl ListMode {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            ListMode::Set => "set",
-            ListMode::Add => "add",
-            ListMode::Remove => "remove",
-        }
-    }
-
     /// The mode a control topic names.
     ///
     /// The same three words `ControlTopic::update_mode` hands to Python, read

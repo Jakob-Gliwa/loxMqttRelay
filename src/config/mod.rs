@@ -443,10 +443,6 @@ impl ConfigStore {
         self.read().safe_json()
     }
 
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
-    }
-
     fn read(&self) -> std::sync::RwLockReadGuard<'_, AppConfig> {
         self.config.read().unwrap_or_else(|e| e.into_inner())
     }

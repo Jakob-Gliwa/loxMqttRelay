@@ -40,15 +40,21 @@ jobs:
 
       # setup-uv installs uv, manages the Python toolchain (per requires-python)
       # and persists uv's real cache (~/.cache/uv) across runs out of the box.
+      #
+      # Still here because the Python half still exists: it is what the parity
+      # harness compares against. It goes when src/loxmqttrelay/ does.
       - name: Install uv (with cache)
         uses: astral-sh/setup-uv@v8.2.0
         with:
           enable-cache: true
 
-      # Modern stable toolchain via rustup — understands Cargo.lock v4 and is
-      # needed to build the project's Rust extension.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache the cargo registry and target directory
+        uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -58,13 +64,28 @@ jobs:
       - name: Sync dependencies (incl. test extras)
         run: uv sync --locked --extra test
 
-      # The UDP path and the MQTT client are Rust; their unit tests live in the
-      # crate. Built without `extension-module`, so the harness links libpython
-      # itself - PYO3_PYTHON points it at the interpreter uv just provisioned.
+      # Formatting is checked but not enforced yet: the tree predates a rustfmt
+      # that reflows several files, and reformatting them wholesale would bury
+      # the port's diff. Turn `continue-on-error` off once that is done.
+      - name: Check formatting
+        run: cargo fmt --check
+        continue-on-error: true
+
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Built without `extension-module` while the wheel still exists, so the
+      # harness links libpython itself - PYO3_PYTHON points it at the
+      # interpreter uv just provisioned.
       - name: Run Rust tests
         run: cargo nextest run
         env:
           PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
+
+      # The binary is what ships; building it here is what stops it from
+      # rotting while the wheel is still the thing being tested.
+      - name: Build the relay binary
+        run: cargo build --release --locked --bin loxmqttrelay-relay --bin loxmqttrelay
 
       - name: Run tests with coverage
         run: uv run pytest --cov-report=xml

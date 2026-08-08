@@ -1,96 +1,94 @@
 # syntax=docker/dockerfile:1
 # -------------------------------------
-# 1) Build-Stage
+# 1) Build stage
 # -------------------------------------
-FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS builder
+FROM rust:1-slim-bookworm AS builder
 
-# - UV_PYTHON_DOWNLOADS=0: use the image's system Python at
-#   /usr/local/bin/python3.14. That path is identical in the final
-#   python:3.14-slim image, so the copied venv stays valid.
-# - UV_COMPILE_BYTECODE=1: precompile .pyc for faster cold starts.
-# - UV_LINK_MODE=copy: materialize real files in the venv (do NOT hardlink into
-#   the cache mount, which is not part of the image layer).
-ENV UV_PYTHON_DOWNLOADS=0 \
-    UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
-    VIRTUAL_ENV=/app/.venv \
-    CARGO_TARGET_DIR=/build/cargo-target \
-    PATH="/root/.cargo/bin:${PATH}"
-
-# Build toolchain: build-essential (gcc/g++ for the Rust ext + pygixml C++),
-# python headers and curl (for rustup).
+# musl, so the result is a static binary with no loader and no libc to ship. That
+# is what makes the final stage `scratch` possible; against glibc it would need a
+# base image whose libc matches the builder's.
+#
+# musl-tools provides musl-gcc, which `ring` needs for its handful of C files.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3-dev curl build-essential \
+        musl-tools ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Modern stable Rust toolchain via rustup (understands Cargo.lock v4).
-# Downloaded to a file rather than piped into sh: /bin/sh here is dash, which
-# has no pipefail, so a curl that fails feeds sh an empty script and the layer
-# succeeds without a compiler. The failure would then surface far downstream as
-# setuptools-rust's "can't find Rust compiler".
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh \
-    && sh /tmp/rustup-init.sh -y --default-toolchain stable --profile minimal \
-    && rm /tmp/rustup-init.sh \
-    && cargo --version
+ARG TARGETARCH
+WORKDIR /build
 
-WORKDIR /app
-RUN uv venv
-
-# --- Layer A: third-party dependencies only (cache-friendly) ---
-# Re-runs only when pyproject.toml changes, so the expensive dependency install
-# (incl. the pygixml source build) is reused across source edits.
-#
-# pygixml has no arm64 wheel and its x86_64 wheel is compiled with AVX2 (no
-# runtime CPU dispatch); the arm64 source build otherwise bakes in -march=native
-# tuned to the build host. Both SIGILL (exit 132) on weaker CPUs — non-AVX2 x86
-# and Raspberry Pi. Build pygixml PORTABLY so one binary runs on every CPU of the
-# image's architecture:
-#   * --no-binary pygixml  -> force a source build (skip the prebuilt AVX2 wheel)
-#   * CI=1                  -> pygixml's Optimize.cmake then omits -march=native
-COPY pyproject.toml ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    CI=1 uv pip install -r pyproject.toml --no-binary pygixml
-
-# --- Layer B: build & install our own project (Rust extension) ---
-# Non-editable, so the package (incl. the compiled extension) lands directly in
-# the venv's site-packages — the final image needs no source tree.
-# setup.py is REQUIRED: the Rust extensions are declared there (not in
-# pyproject.toml). Without it the build silently produces a pure-Python wheel
-# with no .so, and importing loxmqttrelay.{optimized,compatible} fails at runtime.
-# build.rs is equally required - cargo refuses to build without the file the
-# manifest implies.
-COPY setup.py Cargo.toml build.rs ./
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=cache,target=/build/cargo-target \
-    uv pip install --no-deps .
 
-# Strip debug symbols from native extensions to shrink the venv.
-RUN find /app/.venv -name '*.so' -exec strip --strip-unneeded {} + || true
-
-# Fail the build early if the expected native extensions for this architecture
-# are missing or unloadable (e.g. an accidental pure-Python wheel). Uses the
-# venv interpreter so it inspects what actually got installed.
-COPY scripts/verify_extensions.py ./scripts/verify_extensions.py
-RUN /app/.venv/bin/python scripts/verify_extensions.py
+# Two relay builds on x86_64, one on everything else, plus the launcher that
+# picks between them.
+#
+# Both relay builds are compiled at opt-level 3. The wheel used to build the
+# "compatible" one at opt-level 2, which meant any measured gap between the two
+# conflated the instruction set with the optimization level - so a comparison
+# made against these two is a comparison of the thing it names.
+#
+# `-C target-feature=+crt-static` is the default for musl targets but is stated
+# here so a future target change cannot silently produce a dynamic binary that
+# `scratch` then cannot run.
+#
+# On a non-amd64 build the generic binary is copied to the optimized name as
+# well, so the launcher can look for both names unconditionally.
+#
+# The `ldd` loop at the end is not paranoia: a dynamically linked binary builds
+# and runs fine here and then fails in `scratch` with nothing but "no such file
+# or directory", which points at the path rather than at the linkage.
+#
+# NOTE: no `#` comments inside the RUN below. Docker joins the continued lines
+# into one before handing them to the shell, and a `#` there comments out
+# everything that follows it - including the rest of the script.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build/target \
+    set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) TARGET=x86_64-unknown-linux-musl ;; \
+      arm64) TARGET=aarch64-unknown-linux-musl ;; \
+      *) echo "unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    rustup target add "${TARGET}"; \
+    mkdir -p /out; \
+    \
+    RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=generic" \
+      cargo build --release --locked --target "${TARGET}" \
+        --bin loxmqttrelay-relay --bin loxmqttrelay; \
+    cp "target/${TARGET}/release/loxmqttrelay-relay" /out/loxmqttrelay-relay-generic; \
+    cp "target/${TARGET}/release/loxmqttrelay" /out/loxmqttrelay; \
+    \
+    if [ "${TARGETARCH}" = "amd64" ]; then \
+      RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=x86-64-v3" \
+        cargo build --release --locked --target "${TARGET}" --bin loxmqttrelay-relay; \
+      cp "target/${TARGET}/release/loxmqttrelay-relay" /out/loxmqttrelay-relay-v3; \
+    else \
+      cp /out/loxmqttrelay-relay-generic /out/loxmqttrelay-relay-v3; \
+    fi; \
+    for binary in /out/*; do \
+      if ldd "${binary}" 2>&1 | grep -q "=>"; then \
+        echo "${binary} is dynamically linked and will not run in scratch" >&2; \
+        exit 1; \
+      fi; \
+    done; \
+    /out/loxmqttrelay-relay-generic --version
 
 # -------------------------------------
-# 2) Final-Stage (no uv, no build tools)
+# 2) Final stage
 # -------------------------------------
-FROM python:3.14-slim-bookworm
-WORKDIR /app
+FROM scratch
 
-ENV LOG_LEVEL=INFO \
-    PATH="/app/.venv/bin:${PATH}"
+# The only thing the binaries need from a filesystem. Both TLS stacks verify
+# against these when the Miniserver is on 443 or the broker speaks TLS; without
+# them every such connection fails with a certificate error.
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
-# The project is installed non-editably into the venv's site-packages, so the
-# runtime image only needs the venv — no source tree, pyproject or Cargo.toml.
-COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /out/ /usr/local/bin/
 
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+# Read directly by the relay now. docker-entrypoint.sh existed to translate this
+# into --log-level and has nothing left to do.
+ENV LOG_LEVEL=INFO
 
 EXPOSE 11884/udp
 
@@ -98,4 +96,6 @@ EXPOSE 11884/udp
 # SIGTERM handler and shuts the MQTT session down before exiting.
 STOPSIGNAL SIGTERM
 
-ENTRYPOINT ["docker-entrypoint.sh"]
+# The launcher, which picks the build this CPU can run and execs it. Set
+# LOXMQTTRELAY_BUILD=generic to override.
+ENTRYPOINT ["/usr/local/bin/loxmqttrelay"]
