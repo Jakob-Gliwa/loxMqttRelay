@@ -1,20 +1,21 @@
 //! Acting on the relay's own control topics.
 //!
-//! The message path recognises control topics in Rust ([`Core::control_kind`])
-//! and hands them here. Everything that still needs Python — `global_config`,
-//! `orjson`, and the two callbacks on the relay object — lives behind
-//! [`ControlSink`], so the data path never has to know a Python object exists.
+//! The message path recognises control topics in [`Core::control_kind`] and
+//! hands them here; everything else goes straight to the Miniserver. Behind a
+//! trait because [`crate::mqtt::ingress_worker`] has no business knowing what
+//! acting on one involves, and because the tests want to watch.
 //!
-//! There is one implementor today, [`PyControlSink`]. The seam is here so the
-//! native one can take its place without touching [`crate::mqtt::ingress_worker`].
+//! `config/get` answers on the response topic, `config/set`, `add` and `remove`
+//! apply an update and then ask for a restart, `config/update` and
+//! `config/restart` only ask for the restart, and the Miniserver's startup event
+//! asks for a whitelist resync. The two "ask for" are signals rather than calls:
+//! see [`crate::signals`].
 //!
 //! [`Core::control_kind`]: crate::process::Core::control_kind
 
 use std::sync::Arc;
 
 use log::{error, info};
-use pyo3::intern;
-use pyo3::prelude::*;
 
 use crate::config::value::CfgValue;
 use crate::config::{ConfigStore, ListMode};
@@ -113,124 +114,259 @@ impl ControlSink for NativeControlSink {
     }
 }
 
-/// The control topics as they behave while `main.py` is still in charge.
-///
-/// Holds exactly what has to be reached across the language boundary. Note it
-/// does *not* hold the [`Core`](crate::process::Core): the only thing it wanted
-/// from it was the response topic, which is copied in once at construction.
-pub(crate) struct PyControlSink {
-    global_config: Py<PyAny>,
-    relay_main_obj: Py<PyAny>,
-    /// Shared with the Python-facing `MqttClient`, so a config response
-    /// publishes straight from Rust instead of calling back into Python.
-    mqtt_shared: Arc<MqttShared>,
-    orjson_obj: Py<PyAny>,
-    config_response: String,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+    use std::path::PathBuf;
 
-impl PyControlSink {
-    pub(crate) fn new(
-        global_config: Py<PyAny>,
-        relay_main_obj: Py<PyAny>,
-        mqtt_shared: Arc<MqttShared>,
-        orjson_obj: Py<PyAny>,
-        config_response: String,
-    ) -> Self {
-        PyControlSink {
-            global_config,
-            relay_main_obj,
-            mqtt_shared,
-            orjson_obj,
-            config_response,
+    const RESPONSE: &str = "myrelay/config/response";
+
+    struct Harness {
+        sink: NativeControlSink,
+        config: Arc<ConfigStore>,
+        mqtt: Arc<MqttShared>,
+        signals: Signals,
+        stop: tokio::sync::watch::Receiver<Option<crate::signals::StopReason>>,
+        dir: PathBuf,
+    }
+
+    impl Harness {
+        fn new(config: AppConfig) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "loxmqttrelay-control-{}",
+                std::process::id() as u64 * 1000 + rand_suffix()
+            ));
+            let _ = std::fs::create_dir_all(&dir);
+            let config = Arc::new(ConfigStore::new(dir.join("config.toml"), config));
+            let mqtt = Arc::new(MqttShared::new());
+            let (signals, stop) = Signals::new();
+            Harness {
+                sink: NativeControlSink::new(
+                    Arc::clone(&config),
+                    Arc::clone(&mqtt),
+                    RESPONSE.to_owned(),
+                    signals.clone(),
+                ),
+                config,
+                mqtt,
+                signals,
+                stop,
+                dir,
+            }
+        }
+
+        fn dispatch(&self, kind: ControlTopic, payload: &[u8]) {
+            self.sink.dispatch(kind, payload).expect("never reports");
+        }
+
+        /// What a `config/get` tried to publish.
+        ///
+        /// There is no broker here, so the publish is recorded as a drop - which
+        /// keeps the topic and the payload, and is therefore exactly the
+        /// observation this needs without a broker or a mock in sight.
+        fn published(&self) -> Vec<(String, Vec<u8>)> {
+            self.mqtt
+                .take_undelivered()
+                .into_iter()
+                .map(|(topic, payload, _)| (topic, payload))
+                .collect()
+        }
+
+        fn restart_requested(&self) -> bool {
+            self.stop.borrow().as_ref().is_some_and(|stop| stop.restart)
+        }
+
+        fn stop_requested(&self) -> bool {
+            self.stop.borrow().is_some()
+        }
+
+        /// Whether a resync was asked for, without blocking if it was not.
+        fn resync_requested(&self) -> bool {
+            futures_lite_now_or_never(self.signals.resync_requested())
         }
     }
 
-    /// The dispatch itself, with the GIL already held.
-    ///
-    /// Kept separate from the trait method so `MiniserverDataProcessor::handle_control`
-    /// can propagate a `PyErr` to its Python caller instead of a string.
-    pub(crate) fn dispatch_py(
-        &self,
-        py: Python<'_>,
-        kind: ControlTopic,
-        message: &[u8],
-    ) -> PyResult<()> {
-        match kind {
-            ControlTopic::MiniserverStartup => {
-                let sync_on = self
-                    .global_config
-                    .bind(py)
-                    .getattr(intern!(py, "miniserver"))?
-                    .getattr(intern!(py, "sync_with_miniserver"))?
-                    .extract::<bool>()?;
-                if sync_on {
-                    info!("Miniserver startup detected, resyncing whitelist");
-                    self.relay_main_obj
-                        .bind(py)
-                        .call_method0(intern!(py, "schedule_miniserver_sync"))?;
-                }
-            }
-            ControlTopic::ConfigGet => {
-                // global_config.get_safe_config -> orjson.dumps -> publish.
-                let safe_cfg = self
-                    .global_config
-                    .bind(py)
-                    .call_method0(intern!(py, "get_safe_config"))?;
-                let serialized = self
-                    .orjson_obj
-                    .bind(py)
-                    .call_method1(intern!(py, "dumps"), (safe_cfg,))?;
-                self.mqtt_shared.publish_detached(
-                    self.config_response.clone(),
-                    serialized.extract::<Vec<u8>>()?,
-                );
-            }
-            ControlTopic::ConfigSet | ControlTopic::ConfigAdd | ControlTopic::ConfigRemove => {
-                let mode = kind.update_mode().expect("set/add/remove carry a mode");
-                let text = process::decode_payload("config", message);
-                match self
-                    .orjson_obj
-                    .bind(py)
-                    .call_method1(intern!(py, "loads"), (&*text,))
-                {
-                    Ok(py_obj) => {
-                        let updated = self
-                            .global_config
-                            .bind(py)
-                            .call_method1(intern!(py, "update_fields"), (py_obj, mode));
-                        if let Err(e) = updated {
-                            error!("Error updating configuration: {e:?}");
-                        } else {
-                            info!("Configuration updated via MQTT. Restarting program.");
-                            let _ = self
-                                .relay_main_obj
-                                .bind(py)
-                                .call_method0(intern!(py, "restart_relay"));
-                        }
-                    }
-                    Err(e) => error!(
-                        "Invalid JSON format in MQTT message '{}': {e:?}",
-                        loggable(&text)
-                    ),
-                }
-            }
-            ControlTopic::ConfigReload => {
-                info!("Reloading configuration. Restarting program.");
-                let _ = self
-                    .relay_main_obj
-                    .bind(py)
-                    .call_method0(intern!(py, "restart_relay"));
-            }
+    impl Drop for Harness {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
         }
-        Ok(())
     }
-}
 
-impl ControlSink for PyControlSink {
-    fn dispatch(&self, kind: ControlTopic, payload: &[u8]) -> Result<(), String> {
-        Python::attach(|py| {
-            self.dispatch_py(py, kind, payload)
-                .map_err(|e| e.to_string())
-        })
+    /// Poll a future once. Enough for a `Notify` that either has a permit or
+    /// does not, and cheaper than pulling in a futures crate for it.
+    fn futures_lite_now_or_never(future: impl Future<Output = ()>) -> bool {
+        use std::pin::pin;
+        use std::task::{Context, Poll, Waker};
+        matches!(
+            pin!(future).poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(())
+        )
     }
+
+    fn rand_suffix() -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64)
+            .unwrap_or(0)
+    }
+
+    // -- config/get ---------------------------------------------------------
+
+    /// The response goes to the response topic, redacted, and is the same bytes
+    /// `AppConfig::safe_json` produces - which the goldens pin against orjson.
+    #[test]
+    fn config_get_publishes_the_safe_config_to_the_response_topic() {
+        let mut config = AppConfig::default();
+        config.broker.user = Some("someone".to_owned());
+        config.broker.password = Some("hunter2".to_owned());
+        let harness = Harness::new(config);
+
+        harness.dispatch(ControlTopic::ConfigGet, b"");
+
+        let published = harness.published();
+        assert_eq!(published.len(), 1);
+        let (topic, payload) = &published[0];
+        assert_eq!(topic, RESPONSE);
+        assert_eq!(payload, &harness.config.safe_json());
+
+        let text = String::from_utf8(payload.clone()).expect("utf-8");
+        assert!(!text.contains("hunter2"), "the password was published: {text}");
+        assert!(!text.contains("someone"), "the user was published: {text}");
+        assert!(text.contains("\"host\":\"localhost\""), "{text}");
+    }
+
+    #[test]
+    fn config_get_changes_nothing() {
+        let harness = Harness::new(AppConfig::default());
+        harness.dispatch(ControlTopic::ConfigGet, b"");
+        assert_eq!(harness.config.snapshot(), AppConfig::default());
+        assert!(!harness.stop_requested());
+    }
+
+    // -- config/set, add, remove --------------------------------------------
+
+    #[test]
+    fn a_usable_update_is_applied_and_asks_for_a_restart() {
+        for (kind, payload, expected) in [
+            (
+                ControlTopic::ConfigSet,
+                br#"{"subscriptions": ["only/#"]}"#.as_slice(),
+                vec!["only/#"],
+            ),
+            (
+                ControlTopic::ConfigAdd,
+                br#"{"subscriptions": ["extra/#"]}"#.as_slice(),
+                vec!["extra/#"],
+            ),
+        ] {
+            let harness = Harness::new(AppConfig::default());
+            harness.dispatch(kind, payload);
+            assert_eq!(
+                harness.config.snapshot().topics.subscriptions,
+                expected,
+                "{kind:?}"
+            );
+            assert!(harness.restart_requested(), "{kind:?} did not ask to restart");
+        }
+    }
+
+    /// `remove` takes entries away rather than replacing them.
+    #[test]
+    fn a_remove_takes_the_named_entries_out() {
+        let mut config = AppConfig::default();
+        config.topics.subscriptions = vec!["a/#".to_owned(), "b/#".to_owned()];
+        let harness = Harness::new(config);
+
+        harness.dispatch(ControlTopic::ConfigRemove, br#"{"subscriptions": ["a/#"]}"#);
+
+        assert_eq!(harness.config.snapshot().topics.subscriptions, ["b/#"]);
+        assert!(harness.restart_requested());
+    }
+
+    /// A refused update must not restart: the relay would come back to the same
+    /// configuration and the operator would have learned nothing.
+    #[test]
+    fn a_refused_update_changes_nothing_and_does_not_restart() {
+        for payload in [
+            // Protected: another host would be authenticated against with these
+            // credentials after the restart.
+            br#"{"host": "evil.example"}"#.as_slice(),
+            br#"{"no_such_field": 1}"#.as_slice(),
+            br#"{"udp_in_port": 0}"#.as_slice(),
+            br#"{"cache_size": "not a number"}"#.as_slice(),
+        ] {
+            let harness = Harness::new(AppConfig::default());
+            harness.dispatch(ControlTopic::ConfigSet, payload);
+            assert_eq!(
+                harness.config.snapshot(),
+                AppConfig::default(),
+                "{:?} changed the configuration",
+                String::from_utf8_lossy(payload)
+            );
+            assert!(
+                !harness.stop_requested(),
+                "{:?} asked to restart",
+                String::from_utf8_lossy(payload)
+            );
+        }
+    }
+
+    /// A payload that is not JSON never reaches the update at all.
+    #[test]
+    fn a_payload_that_is_not_json_does_not_restart() {
+        for payload in [
+            b"{oops".as_slice(),
+            b"".as_slice(),
+            // Valid JSON, but not an object, so it names no fields.
+            b"[1, 2]".as_slice(),
+            b"\"a string\"".as_slice(),
+        ] {
+            let harness = Harness::new(AppConfig::default());
+            harness.dispatch(ControlTopic::ConfigSet, payload);
+            assert_eq!(harness.config.snapshot(), AppConfig::default());
+            assert!(
+                !harness.stop_requested(),
+                "{:?} asked to restart",
+                String::from_utf8_lossy(payload)
+            );
+        }
+    }
+
+    // -- config/update and config/restart -----------------------------------
+
+    /// Both only restart. Neither carries a payload, and neither may mutate.
+    #[test]
+    fn a_reload_restarts_without_touching_the_configuration() {
+        let harness = Harness::new(AppConfig::default());
+        harness.dispatch(ControlTopic::ConfigReload, br#"{"cache_size": 5}"#);
+        assert_eq!(harness.config.snapshot(), AppConfig::default());
+        assert!(harness.restart_requested());
+    }
+
+    // -- the Miniserver startup event ---------------------------------------
+
+    #[test]
+    fn a_miniserver_startup_asks_for_a_resync_when_sync_is_on() {
+        let harness = Harness::new(AppConfig::default());
+        assert!(harness.config.snapshot().miniserver.sync_with_miniserver);
+
+        harness.dispatch(ControlTopic::MiniserverStartup, b"");
+
+        assert!(harness.resync_requested());
+        assert!(!harness.stop_requested(), "a startup event is not a restart");
+    }
+
+    #[test]
+    fn a_miniserver_startup_is_ignored_when_sync_is_off() {
+        let mut config = AppConfig::default();
+        config.miniserver.sync_with_miniserver = false;
+        let harness = Harness::new(config);
+
+        harness.dispatch(ControlTopic::MiniserverStartup, b"");
+
+        assert!(!harness.resync_requested());
+    }
+
 }

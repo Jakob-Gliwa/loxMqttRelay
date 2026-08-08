@@ -1,28 +1,7 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-build/
-dist/
-*.egg-info/
-.installed.cfg
-MANIFEST
+# Rust
+target/
 
-# Virtual Environment
-.env
-.venv
-venv/
-ENV/
-
-# Testing
-.coverage
-.coverage.*
-coverage.xml
-.pytest_cache/
-htmlcov/
-
-# IDE
+# Editors
 .idea/
 .vscode/
 *.swp
@@ -31,19 +10,24 @@ htmlcov/
 # macOS
 .DS_Store
 
-# Project specific
-# uv.lock and Cargo.lock are tracked on purpose: a published release has to be
-# rebuildable from its tag, which floating dependency resolution would not be.
-ref/
-Temp/
-
 # Logs
 *.log
 logs/
+
+# The operator's own configuration, and the Miniserver dump it names. Both
+# describe somebody's actual house - rooms, devices, serials - so neither is
+# checked in. `config/default_config.toml` is the sample to copy.
 config/config.toml
-target/
-benchmark.py
-newbench.py
-benchmarks/
-lib copy.rs
 config/sps0.LoxCC
+
+# Somewhere to drop further real Miniserver payloads. The whitelist tests pick
+# them up if they are here and skip if they are not; see
+# `whitelist::tests::the_real_configuration_yields_its_inputs`.
+fixtures/
+
+# Scratch
+ref/
+Temp/
+
+# Cargo.lock is tracked on purpose: a published release has to be rebuildable
+# from its tag, which floating dependency resolution would not be.

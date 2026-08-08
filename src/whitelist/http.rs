@@ -184,7 +184,7 @@ fn numeric_key(digits: &[u8]) -> (usize, &[u8]) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::whitelist) mod tests {
     use super::*;
     use std::net::SocketAddr;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -281,57 +281,80 @@ Music.json
 
     // -- the request path ---------------------------------------------------
 
-    enum Reply {
+    pub(in crate::whitelist) enum Reply {
         Body(Vec<u8>),
+        #[allow(dead_code)]
         Status(u16),
         /// Accept the connection and never answer.
         Silent,
     }
 
-    /// A one-shot HTTP/1.1 server.
+    /// A hand-written HTTP/1.1 server that answers a fixed sequence.
     ///
-    /// Hand-written rather than mocked at the `get()` boundary, because what is
+    /// One reply per connection, and the client opens one connection per
+    /// request, so a two-element sequence is a listing followed by a download.
+    /// Written out rather than mocked at the `get()` boundary because what is
     /// under test here *is* the wiring - the pure functions above are covered on
-    /// their own. Records the request line and headers it saw.
-    async fn stub(reply: Reply) -> (Endpoint, tokio::task::JoinHandle<String>) {
+    /// their own.
+    ///
+    /// The join handle yields the request lines it saw, so a test can assert on
+    /// the paths and headers that were actually sent.
+    pub(in crate::whitelist) async fn stub_sequence(
+        replies: Vec<Reply>,
+    ) -> (Endpoint, tokio::task::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .expect("bind");
         let port = listener.local_addr().expect("addr").port();
         let handle = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept");
             let mut seen = Vec::new();
-            let mut buf = [0u8; 1024];
-            // Read until the end of the headers; there is no request body.
-            while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
-                match socket.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => seen.extend_from_slice(&buf[..n]),
+            for reply in replies {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                // Read to the end of the headers; there is no request body.
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match socket.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                seen.push(String::from_utf8_lossy(&request).into_owned());
+
+                match reply {
+                    Reply::Silent => {
+                        // Hold the connection open so the caller's budget is
+                        // what ends the request.
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                    }
+                    Reply::Status(status) => {
+                        let head =
+                            format!("HTTP/1.1 {status} Nope\r\nContent-Length: 0\r\n\r\n");
+                        let _ = socket.write_all(head.as_bytes()).await;
+                    }
+                    Reply::Body(body) => {
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = socket.write_all(head.as_bytes()).await;
+                        let _ = socket.write_all(&body).await;
+                    }
                 }
             }
-            match reply {
-                Reply::Silent => {
-                    // Hold the connection open so the caller's budget is what
-                    // ends the request.
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                }
-                Reply::Status(status) => {
-                    let head = format!("HTTP/1.1 {status} Nope\r\nContent-Length: 0\r\n\r\n");
-                    let _ = socket.write_all(head.as_bytes()).await;
-                }
-                Reply::Body(body) => {
-                    let head =
-                        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
-                    let _ = socket.write_all(head.as_bytes()).await;
-                    let _ = socket.write_all(&body).await;
-                }
-            }
-            String::from_utf8_lossy(&seen).into_owned()
+            seen
         });
         (
             Endpoint::new("127.0.0.1", port).expect("an address"),
             handle,
         )
+    }
+
+    /// The single-reply case, which most tests want.
+    async fn stub(reply: Reply) -> (Endpoint, tokio::task::JoinHandle<Vec<String>>) {
+        stub_sequence(vec![reply]).await
     }
 
     #[tokio::test]
@@ -352,8 +375,12 @@ Music.json
             .await
             .expect("a body");
         let seen = server.await.expect("the stub");
-        assert!(seen.contains("GET /dev/fsget/prog/x "), "{seen}");
-        assert!(seen.contains("authorization: Basic YWRtaW46c2VjcmV0"), "{seen}");
+        let request = &seen[0];
+        assert!(request.contains("GET /dev/fsget/prog/x "), "{request}");
+        assert!(
+            request.contains("authorization: Basic YWRtaW46c2VjcmV0"),
+            "{request}"
+        );
     }
 
     #[tokio::test]

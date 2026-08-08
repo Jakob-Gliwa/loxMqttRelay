@@ -1,13 +1,14 @@
-//! Everything an inbound MQTT message goes through, with no Python in sight.
+//! Everything an inbound MQTT message goes through.
 //!
 //! [`Core`] owns the filters, the whitelist, the learned layouts and the route
 //! out. It is generic over [`Egress`] so the production path and the tests
 //! share one implementation of the part that matters.
 //!
-//! The GIL appears nowhere below. That is the point: the data path runs
-//! entirely on tokio, and only the control topics - which genuinely have to
-//! reach `global_config` and `orjson` - are handed back to Python by
-//! [`crate::mqtt::ingress_worker`].
+//! Nothing here allocates a configuration or reaches for a lock it did not
+//! need: the per-message path reads the filters and the whitelist through an
+//! `ArcSwap`, and the two caches below are read by the reference helpers rather
+//! than by the message itself. The control topics never arrive here at all -
+//! [`crate::mqtt::ingress_worker`] tells them apart first.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -50,8 +51,8 @@ pub(crate) struct Outgoing<'a> {
 /// one behind is rejected before anything is delivered.
 pub(crate) type Batch<'a> = Vec<Option<Outgoing<'a>>>;
 
-/// The relay's own topics, resolved once so the per-message path needs no
-/// getattr back into Python.
+/// The relay's own topics, derived once from `general.base_topic` so the
+/// per-message path only ever compares strings.
 #[derive(Clone, Debug)]
 pub(crate) struct MqttTopics {
     pub(crate) miniserver_startup: String,
@@ -128,8 +129,8 @@ impl ControlTopic {
 
 /// A filter list that could not be used as written.
 ///
-/// Carries the finished message: the only caller turns it into a Python
-/// exception, and the wording is what an operator has to act on.
+/// Carries the finished message: the wording is what an operator has to act on,
+/// and it reaches them as the reason the relay refused to start.
 #[derive(Debug)]
 pub(crate) struct FilterError(pub(crate) String);
 
@@ -195,8 +196,7 @@ pub(crate) fn compile_filters(
     }))
 }
 
-/// Everything [`Core`] needs at construction, read out of the Python config
-/// once by the caller.
+/// Everything [`Core`] needs at construction.
 pub(crate) struct CoreConfig {
     pub(crate) topics: MqttTopics,
     pub(crate) subscription_filters: Vec<String>,
@@ -256,7 +256,11 @@ pub(crate) struct Core<E: Egress> {
     topic_whitelist: ArcSwap<HashSet<String>>,
     // Immutable for the life of the process: a config change re-execs.
     whitelist_required: bool,
+    /// Sized from `general.cache_size`, and read only by the reference helpers
+    /// below - see the note there.
+    #[allow(dead_code, reason = "read by the reference helpers, not by the message path")]
     convert_bool_cache: Mutex<LruCache<String, String>>,
+    #[allow(dead_code, reason = "read by the reference helpers, not by the message path")]
     normalize_topic_cache: Mutex<LruCache<String, String>>,
     // Learned JSON layout per topic. Plans bake in the filter verdicts, so every
     // mutation of a filter or the whitelist has to drop them.
@@ -314,10 +318,14 @@ impl<E: Egress> Core<E> {
         })
     }
 
-    pub(crate) fn topics(&self) -> &MqttTopics {
-        &self.topics
-    }
-
+    /// What the core was built with, and the levers a test pulls on it.
+    ///
+    /// Nothing on the message path calls these. They are here because the
+    /// alternative is tests that reach into private fields, and because the
+    /// configuration is immutable for the process lifetime - a config change
+    /// re-execs - so `update_*` has exactly one production caller between them:
+    /// the whitelist sync, through `update_topic_whitelist`.
+    #[allow(dead_code, reason = "the readable surface of state the message path reaches inline")]
     pub(crate) fn convert_booleans(&self) -> bool {
         self.convert_booleans
     }
@@ -350,6 +358,7 @@ impl<E: Egress> Core<E> {
 
     // -- configuration ------------------------------------------------------
 
+    #[allow(dead_code, reason = "a config change re-execs, so only the whitelist changes at runtime")]
     pub(crate) fn update_subscription_filters(
         &self,
         filters: Vec<String>,
@@ -361,6 +370,7 @@ impl<E: Egress> Core<E> {
         Ok(())
     }
 
+    #[allow(dead_code, reason = "a config change re-execs, so only the whitelist changes at runtime")]
     pub(crate) fn update_do_not_forward(&self, filters: Vec<String>) -> Result<(), FilterError> {
         debug!("Updating do_not_forward filters: {filters:?}");
         let compiled = compile_filters("do_not_forward", &filters)?;
@@ -376,6 +386,7 @@ impl<E: Egress> Core<E> {
         self.invalidate_shapes();
     }
 
+    #[allow(dead_code, reason = "the reference implementation the pinning tests diff against")]
     pub(crate) fn subscription_filters(&self) -> Vec<String> {
         self.subscription_filters
             .load()
@@ -384,6 +395,7 @@ impl<E: Egress> Core<E> {
             .unwrap_or_default()
     }
 
+    #[allow(dead_code, reason = "the reference implementation the pinning tests diff against")]
     pub(crate) fn do_not_forward_patterns(&self) -> Vec<String> {
         self.do_not_forward
             .load()
@@ -392,6 +404,7 @@ impl<E: Egress> Core<E> {
             .unwrap_or_default()
     }
 
+    #[allow(dead_code, reason = "the reference implementation the pinning tests diff against")]
     pub(crate) fn topic_whitelist(&self) -> HashSet<String> {
         self.topic_whitelist.load().as_ref().clone()
     }
@@ -408,6 +421,7 @@ impl<E: Egress> Core<E> {
     ///
     /// Cached plans are left in place: they stay valid (a filter change clears
     /// them anyway), so switching back does not force a relearn.
+#[allow(dead_code, reason = "the kill switch the differential suite flips to compare both routes")]
     pub(crate) fn set_shape_cache_enabled(&self, enabled: bool) {
         debug!(
             "Shape cache {}",
@@ -416,6 +430,7 @@ impl<E: Egress> Core<E> {
         self.shape_cache_enabled.store(enabled, Ordering::Relaxed);
     }
 
+    #[allow(dead_code, reason = "the reference implementation the pinning tests diff against")]
     pub(crate) fn shape_stats(&self) -> (usize, u64) {
         let store = lock_recover(&self.shape_cache);
         (store.plan_count(), store.learns)
@@ -435,6 +450,17 @@ impl<E: Egress> Core<E> {
     }
 
     // -- the cached single-topic helpers ------------------------------------
+    //
+    // NOTE: neither flattening route goes through these any more - both use the
+    // uncached functions in `flatten`, which reach the same answers without a
+    // lock. What is left is their role as the second, independent
+    // implementation that the pinning tests diff the shared ones against, plus
+    // `is_in_whitelist`, which is the readable form of a check the message path
+    // does inline against an already-normalized name.
+    //
+    // That leaves `general.cache_size` sizing two caches nothing on the hot path
+    // reads. Removing them would make the setting a no-op and removing the
+    // setting is a config change, so both are left alone here and flagged.
 
     /// The Miniserver input name for a topic.
     ///
@@ -443,6 +469,7 @@ impl<E: Egress> Core<E> {
     /// they normalize is a freshly built `topic/key`, so they use
     /// [`flatten::normalize_topic_str`] and this stays the reference a
     /// normalization test pins them against.
+    #[allow(dead_code, reason = "the reference implementation the pinning tests diff against")]
     pub(crate) fn normalize_topic(&self, topic: &str) -> String {
         let mut cache = lock_recover(&self.normalize_topic_cache);
         if let Some(cached) = cache.get(topic) {
@@ -453,6 +480,7 @@ impl<E: Egress> Core<E> {
         normalized
     }
 
+    #[allow(dead_code, reason = "the reference implementation the pinning tests diff against")]
     pub(crate) fn is_in_whitelist(&self, topic: &str) -> bool {
         let normalized = self.normalize_topic(topic);
         self.topic_whitelist.load().contains(&normalized)
@@ -478,6 +506,7 @@ impl<E: Egress> Core<E> {
     /// test diffs the shared one against over the whole keyword table, which is
     /// what keeps the mapping pinned once the two routes no longer disagree by
     /// construction.
+    #[allow(dead_code, reason = "the reference implementation the pinning tests diff against")]
     pub(crate) fn convert_boolean(&self, val: &str) -> String {
         let mut cache = lock_recover(&self.convert_bool_cache);
         if let Some(cached) = cache.get(val) {
@@ -1083,4 +1112,78 @@ mod tests {
             );
         }
     }
+    // -- the accessors the relay and the operator read ----------------------
+
+    /// The getters hand back exactly what was configured, pattern for pattern.
+    ///
+    /// They once rebuilt the list by splitting one joined expression at every
+    /// '|', which mangled any pattern containing a pipe - escaped, in a
+    /// character class, or as a real alternation.
+    #[test]
+    fn the_filter_getters_return_what_was_configured() {
+        for filters in [
+            vec![r"^foo\|bar$".to_string()],
+            vec![r"bar\\|baz".to_string()],
+            vec![r"[|]".to_string()],
+            vec![r"^a$".to_string(), r"^b$".to_string()],
+        ] {
+            let core = core(config());
+            core.update_subscription_filters(filters.clone())
+                .expect("usable patterns");
+            assert_eq!(core.subscription_filters(), filters);
+
+            core.update_do_not_forward(filters.clone())
+                .expect("usable patterns");
+            assert_eq!(core.do_not_forward_patterns(), filters);
+        }
+    }
+
+    #[test]
+    fn the_whitelist_getter_returns_what_was_set() {
+        let core = core(config());
+        core.update_topic_whitelist(vec![
+            "some_allowed_topic".to_string(),
+            "another_allowed_topic".to_string(),
+        ]);
+        assert_eq!(
+            core.topic_whitelist(),
+            ["some_allowed_topic".to_string(), "another_allowed_topic".to_string()].into()
+        );
+    }
+
+    /// The whitelist holds Miniserver input names, not MQTT topics, so the
+    /// question is asked about the normalized name.
+    #[test]
+    fn is_in_whitelist_asks_about_the_normalized_name() {
+        let core = core(config());
+        core.update_topic_whitelist(vec!["a_b_c".to_string()]);
+        assert!(core.is_in_whitelist("a/b/c"));
+        assert!(!core.is_in_whitelist("a/b/d"));
+    }
+
+    /// `shape_stats` is the pair that was there first; `shape_metrics` is the
+    /// same two numbers plus the rest. They must not drift apart.
+    #[tokio::test]
+    async fn the_shape_stats_and_metrics_agree() {
+        let core = core(config());
+        core.run("dev/x", r#"{"a":1}"#).await;
+        core.run("dev/x", r#"{"a":2}"#).await;
+
+        let (plans, learns) = core.shape_stats();
+        let metrics = core.shape_metrics();
+        assert_eq!(metrics.plans, plans);
+        assert_eq!(metrics.learns, learns);
+        assert!(metrics.hits > 0, "the second message should have replayed");
+    }
+
+    /// `convert_booleans` reports what the core was built with, so the banner
+    /// and a bug report agree about it.
+    #[test]
+    fn convert_booleans_reports_what_was_configured() {
+        assert!(core(config()).convert_booleans());
+        let mut off = config();
+        off.convert_booleans = false;
+        assert!(!core(off).convert_booleans());
+    }
+
 }

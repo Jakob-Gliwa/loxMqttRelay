@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use tokio::sync::watch;
 
 use crate::config::{ConfigSection, ConfigStore, ListMode};
@@ -163,6 +163,21 @@ impl Relay {
         // leave a relay with no inbound path.
         crate::udp::start_with(self.udp.start_params()).await?;
         self.udp_running.store(true, Ordering::Release);
+
+        // What the relay ended up with, as opposed to what the file asked for.
+        // `connected` follows the MQTT *session* rather than the handle, so this
+        // is the difference between "connect returned" and "there is a session"
+        // - which is the distinction that went missing once already.
+        info!(
+            "Connected: broker={}, miniserver={}",
+            self.mqtt.shared().connected(),
+            self.miniserver.shared().connected()
+        );
+        debug!(
+            "Compiled filters: subscription_filters={:?} do_not_forward={:?}",
+            self.core.subscription_filters(),
+            self.core.do_not_forward_patterns()
+        );
         Ok(())
     }
 
@@ -180,7 +195,33 @@ impl Relay {
         }
         crate::mqtt::disconnect_with(self.mqtt.shared(), self.mqtt.status_topic()).await;
         self.miniserver.shared().shutdown().await;
+        self.report_losses();
+        self.report_shape_cache();
         info!("Shutdown complete");
+    }
+
+    /// Say what was lost during this run, if anything was.
+    ///
+    /// Each loss was already logged as it happened, at WARNING, with everything
+    /// in it. This is the count, at the one moment it can be complete - and it
+    /// is what makes the two bounded rings worth keeping: they are a diagnostic,
+    /// and a diagnostic nothing ever reads is just a memory leak with good
+    /// intentions. Python offered `take_undelivered()` on both clients for the
+    /// same purpose; nothing calls a method on a binary, so it is reported here.
+    fn report_losses(&self) {
+        let publishes = self.mqtt.shared().take_undelivered();
+        let writes = self.miniserver.shared().take_undelivered();
+        if publishes.is_empty() && writes.is_empty() {
+            return;
+        }
+        warn!(
+            "Messages were lost during this run: {} MQTT publish(es) and {} Miniserver write(s) \
+             could not be delivered. The last {} and {} of each are above, at WARNING.",
+            publishes.len(),
+            writes.len(),
+            publishes.len(),
+            writes.len()
+        );
     }
 
     /// Fetch the whitelist from the Miniserver, if that is switched on.
@@ -198,7 +239,6 @@ impl Relay {
         if !snapshot.miniserver.sync_with_miniserver {
             return;
         }
-        let initial = snapshot.topics.topic_whitelist.clone();
 
         let endpoint = Endpoint::new(
             &snapshot.miniserver.miniserver_ip,
@@ -215,7 +255,17 @@ impl Relay {
             }
             Err(e) => Err(e),
         };
+        self.apply_whitelist(fetched);
+    }
 
+    /// What to do with whatever the sync came back with.
+    ///
+    /// Separate from the fetch so the three outcomes can be exercised without a
+    /// Miniserver, a stub server or a network at all - which is what
+    /// `tests::a_*_sync_*` do. The split is honest either way: getting the list
+    /// and deciding what it means are different jobs.
+    fn apply_whitelist(&self, fetched: Result<Vec<String>, whitelist::SyncError>) {
+        let initial = self.config.snapshot().topics.topic_whitelist;
         match fetched {
             Ok(inputs) if inputs.is_empty() => {
                 // An empty extract would install a fail-closed gate and stop
@@ -249,6 +299,28 @@ impl Relay {
                     .update_topic_whitelist(initial.into_iter().collect());
             }
         }
+    }
+
+    /// What the learned-layout cache did over this run.
+    ///
+    /// A relay forwarding steady JSON builds one plan per topic and then replays
+    /// them; a build count that keeps climbing means the payloads carry
+    /// something the scanner refuses, and the relay has been paying for the DOM
+    /// route the whole time. That is worth knowing and there is nowhere else to
+    /// read it from - Python exposed `get_shape_metrics()` for exactly this, and
+    /// a binary has no methods to call.
+    fn report_shape_cache(&self) {
+        let m = self.core.shape_metrics();
+        if m.hits == 0 && m.learns == 0 {
+            return;
+        }
+        info!(
+            "Shape cache: {} plan(s) held, {} built, {} message(s) replayed, {} fell back to the \
+             DOM route ({} of those held back), {} document(s) no plan could be built for, {} \
+             topic(s) currently held back",
+            m.plans, m.learns, m.hits, m.dom_fallbacks, m.negative_skips, m.learn_failures,
+            m.unplannable
+        );
     }
 
     /// Route SIGINT and SIGTERM into the shutdown path.
@@ -289,6 +361,8 @@ impl Relay {
 mod tests {
     use super::*;
     use crate::config::AppConfig;
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
 
     fn store() -> Arc<ConfigStore> {
         Arc::new(ConfigStore::new("unused.toml", AppConfig::default()))
@@ -357,6 +431,217 @@ mod tests {
         signals.request_stop("SIGTERM", false);
         let decision = stop_rx.borrow().clone().expect("a decision");
         assert!(decision.restart, "the restart decision was overwritten");
+        assert_eq!(decision.reason, "configuration changed");
+    }
+
+    // -- the whitelist sync -------------------------------------------------
+    //
+    // All three outcomes, driven through `apply_whitelist` so none of them
+    // needs a Miniserver, a stub server or a network.
+
+    fn relay_with(config: AppConfig) -> (Arc<Relay>, PathBuf) {
+        let dir = scratch("relay");
+        let store = Arc::new(ConfigStore::new(dir.join("config.toml"), config));
+        let (signals, _stop) = Signals::new();
+        let relay = Arc::new(Relay::build(store, signals).expect("a relay"));
+        (relay, dir)
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("loxmqttrelay-{tag}-{unique}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch directory");
+        dir
+    }
+
+    fn synced() -> AppConfig {
+        let mut config = AppConfig::default();
+        config.miniserver.sync_with_miniserver = true;
+        config.topics.topic_whitelist =
+            ["initial_topic1".to_owned(), "initial_topic2".to_owned()].into();
+        config
+    }
+
+    /// A successful sync replaces the whitelist, in the config and in the core.
+    #[test]
+    fn a_successful_sync_replaces_the_whitelist() {
+        let (relay, dir) = relay_with(synced());
+
+        relay.apply_whitelist(Ok(vec![
+            "synced_topic1".to_owned(),
+            "synced_topic2".to_owned(),
+        ]));
+
+        let expected: BTreeSet<String> =
+            ["synced_topic1".to_owned(), "synced_topic2".to_owned()].into();
+        assert_eq!(relay.config.snapshot().topics.topic_whitelist, expected);
+        assert_eq!(
+            relay.core.topic_whitelist(),
+            expected.iter().cloned().collect()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An empty extract must not wipe a working whitelist: with sync on, an
+    /// empty list is a fail-closed gate that stops every forward.
+    #[test]
+    fn an_empty_sync_keeps_the_configured_whitelist() {
+        let (relay, dir) = relay_with(synced());
+
+        relay.apply_whitelist(Ok(Vec::new()));
+
+        let expected: BTreeSet<String> =
+            ["initial_topic1".to_owned(), "initial_topic2".to_owned()].into();
+        assert_eq!(relay.config.snapshot().topics.topic_whitelist, expected);
+        assert_eq!(
+            relay.core.topic_whitelist(),
+            expected.iter().cloned().collect()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// And neither must a failure to reach the Miniserver at all.
+    #[test]
+    fn a_failed_sync_keeps_the_configured_whitelist() {
+        let (relay, dir) = relay_with(synced());
+
+        relay.apply_whitelist(Err(crate::whitelist::SyncError::NoHost));
+
+        let expected: BTreeSet<String> =
+            ["initial_topic1".to_owned(), "initial_topic2".to_owned()].into();
+        assert_eq!(relay.config.snapshot().topics.topic_whitelist, expected);
+        assert_eq!(
+            relay.core.topic_whitelist(),
+            expected.iter().cloned().collect()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Neither failure writes the file. Nothing changed, so there is nothing to
+    /// write - and the error branch used to write anyway, on the one path where
+    /// the relay had just been told it could not reach the Miniserver.
+    #[test]
+    fn a_failed_sync_does_not_write_the_config_file() {
+        let (relay, dir) = relay_with(synced());
+        let file = dir.join("config.toml");
+        assert!(!file.exists(), "nothing has saved yet");
+
+        relay.apply_whitelist(Ok(Vec::new()));
+        assert!(!file.exists(), "an empty sync wrote the file");
+
+        relay.apply_whitelist(Err(crate::whitelist::SyncError::NoHost));
+        assert!(!file.exists(), "a failed sync wrote the file");
+
+        // A successful one does, which is what makes the above meaningful.
+        relay.apply_whitelist(Ok(vec!["something".to_owned()]));
+        assert!(file.exists(), "a successful sync did not write the file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With sync off nothing is fetched and nothing changes.
+    #[tokio::test]
+    async fn sync_switched_off_leaves_the_whitelist_alone() {
+        let mut config = synced();
+        config.miniserver.sync_with_miniserver = false;
+        // An address that would fail immediately if it were ever dialled.
+        config.miniserver.miniserver_ip = String::new();
+        let (relay, dir) = relay_with(config);
+
+        relay.handle_miniserver_sync().await;
+
+        let expected: BTreeSet<String> =
+            ["initial_topic1".to_owned(), "initial_topic2".to_owned()].into();
+        assert_eq!(relay.config.snapshot().topics.topic_whitelist, expected);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The filters configured at startup survive a sync that replaces the
+    /// whitelist wholesale - including one that would match a synced entry.
+    #[test]
+    fn the_configured_filters_survive_a_sync() {
+        let mut config = synced();
+        config.topics.topic_whitelist = BTreeSet::new();
+        config.topics.do_not_forward = vec![r"^private\/.*".to_owned()];
+        config.topics.subscription_filters = vec!["^skip/".to_owned()];
+        let (relay, dir) = relay_with(config);
+
+        assert_eq!(relay.core.do_not_forward_patterns(), [r"^private\/.*"]);
+
+        relay.apply_whitelist(Ok(vec![
+            "private_secret".to_owned(),
+            "public_sensor".to_owned(),
+        ]));
+
+        assert_eq!(
+            relay.core.topic_whitelist(),
+            ["private_secret".to_owned(), "public_sensor".to_owned()].into()
+        );
+        assert_eq!(relay.core.do_not_forward_patterns(), [r"^private\/.*"]);
+        assert_eq!(relay.core.subscription_filters(), ["^skip/"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The whitelist configured in the file reaches the core at construction,
+    /// before any sync has run.
+    #[test]
+    fn the_configured_whitelist_reaches_the_core() {
+        let (relay, dir) = relay_with(synced());
+        assert_eq!(
+            relay.core.topic_whitelist(),
+            ["initial_topic1".to_owned(), "initial_topic2".to_owned()].into()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- shutdown -----------------------------------------------------------
+
+    /// Shutting down closes the inputs and does it once, however often it is
+    /// asked. The second call is what a signal arriving during a config-change
+    /// shutdown looks like.
+    #[tokio::test]
+    async fn shutdown_closes_the_inputs_once() {
+        let (relay, dir) = relay_with(AppConfig::default());
+        relay.udp_running.store(true, Ordering::Release);
+
+        relay.shutdown().await;
+        assert!(!relay.udp_running.load(Ordering::Acquire));
+        assert!(relay.shutdown_done.load(Ordering::Acquire));
+
+        // Idempotent: the second call finds the guard set and returns.
+        relay.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A shutdown with nothing connected still completes. Every step is
+    /// tolerant of the one before it having failed, which is what a broker that
+    /// is already gone looks like.
+    #[tokio::test]
+    async fn shutdown_survives_connections_that_were_never_up() {
+        let (relay, dir) = relay_with(AppConfig::default());
+        relay.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The restart decision reaches the runner from another task, and nothing
+    /// re-execs there - `main` does that, after the runtime has been shut down.
+    #[tokio::test]
+    async fn a_restart_request_from_another_task_reaches_the_runner() {
+        let (signals, mut stop) = Signals::new();
+        let elsewhere = signals.clone();
+        tokio::task::spawn_blocking(move || {
+            elsewhere.request_stop("configuration changed", true);
+        })
+        .await
+        .expect("the task");
+
+        stop.changed().await.expect("a decision");
+        let decision = stop.borrow().clone().expect("a decision");
+        assert!(decision.restart);
         assert_eq!(decision.reason, "configuration changed");
     }
 }

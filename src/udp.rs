@@ -18,14 +18,11 @@ use std::time::Duration;
 use bytes::Bytes;
 use bytestring::ByteString;
 use log::{Level, debug, error, info, log_enabled, warn};
-use pyo3::exceptions::PyRuntimeError;
-use pyo3::prelude::*;
-use pyo3_async_runtimes::tokio::{future_into_py, get_runtime};
 use tokio::net::UdpSocket;
 use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 
-use crate::mqtt::{MqttClient, MqttShared};
+use crate::mqtt::MqttShared;
 use crate::config::AppConfig;
 use crate::error::RelayError;
 use crate::util::{is_py_space, lock_recover, loggable, py_strip};
@@ -729,7 +726,7 @@ fn handle_datagram(shared: &Arc<MqttShared>, data: &[u8], addr: SocketAddr) {
     // everything in it: who sent the datagram, what was in it and why it is
     // gone. Nothing retries it - QoS 0, no outbox - so that line is all that is
     // left of the command the Miniserver sent.
-    get_runtime().spawn(async move {
+    tokio::spawn(async move {
         // The reason is not read here: record_drop has already logged it.
         let _ = shared
             .publish(topic, payload, retain, properties, Some(addr))
@@ -795,8 +792,7 @@ impl Running {
 ///
 /// Construct it alongside the MQTT client, then [`UdpServer::start`] once the
 /// broker connection is up and [`UdpServer::stop`] on shutdown.
-#[pyclass]
-pub struct UdpServer {
+pub(crate) struct UdpServer {
     shared: Arc<MqttShared>,
     port: u16,
     miniserver_ip: String,
@@ -943,54 +939,6 @@ impl UdpServer {
             filter_enabled: config.udp.udp_source_filter_enabled,
             running: Arc::new(Mutex::new(None)),
         }
-    }
-}
-
-#[pymethods]
-impl UdpServer {
-    #[new]
-    #[pyo3(text_signature = "(self, global_config, mqtt_client)")]
-    fn new(
-        py: Python<'_>,
-        global_config: &Bound<'_, PyAny>,
-        mqtt_client: PyRef<'_, MqttClient>,
-    ) -> PyResult<Self> {
-        Ok(UdpServer::build(
-            &crate::app_config_from_py(py, global_config)?,
-            mqtt_client.shared(),
-        ))
-    }
-
-    /// Bind the socket and start accepting datagrams.
-    ///
-    /// Neither a failed bind nor a failed filter setup is logged and shrugged
-    /// off. Without UDP the relay has no inbound path from the Miniserver, so
-    /// starting anyway would be a relay that looks healthy and forwards
-    /// nothing; and a relay that answers a panic in the filter by accepting
-    /// every sender is worse than one that refuses to start.
-    #[pyo3(text_signature = "(self)")]
-    fn start<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let params = self.start_params();
-        future_into_py(py, async move {
-            start_with(params)
-                .await
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))
-        })
-    }
-
-    /// Close the socket and wait for the receive loop to finish.
-    ///
-    /// Leaves the server startable again: what ends the loop is taken out of
-    /// the slot here, so the next [`start`] gets its own.
-    ///
-    /// [`start`]: UdpServer::start
-    #[pyo3(text_signature = "(self)")]
-    fn stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let running = self.signal_stop();
-        future_into_py(py, async move {
-            stop_with(running).await;
-            Ok(())
-        })
     }
 }
 
@@ -1652,8 +1600,10 @@ mod tests {
     /// (#23), when publish reported success while disconnected. One line, not
     /// two: the sender is handed to the publish so the loss is reported once,
     /// with everything in it.
-    #[test]
-    fn a_datagram_that_never_reaches_the_broker_is_reported() {
+    /// Multi-threaded on purpose: the publish is spawned, and a current-thread
+    /// runtime would never poll it while this test sits waiting for its trace.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_datagram_that_never_reaches_the_broker_is_reported() {
         log::set_logger(&Recorder).expect("only one test may install the logger");
         log::set_max_level(log::LevelFilter::Debug);
 
@@ -1674,7 +1624,7 @@ mod tests {
             match found {
                 Some(line) => break line,
                 None if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(10))
+                    tokio::time::sleep(Duration::from_millis(10)).await
                 }
                 None => panic!("no drop was reported: {:?}", RECORDED.lock().unwrap()),
             }
@@ -1710,5 +1660,96 @@ mod tests {
             None,
         );
         assert!(filter.allows(ip("192.168.1.10")));
+    }
+
+    // -- the listener's lifecycle -------------------------------------------
+    //
+    // `stop` leaves a wakeup permit behind for the loop it is ending. While that
+    // permit belonged to the server rather than to the run, the next `start`
+    // bound the socket, consumed the stale permit on its first poll and closed
+    // it again - all while reporting success. The socket is the witness: the
+    // port stays taken for exactly as long as the receive loop runs.
+
+    fn free_port() -> u16 {
+        std::net::UdpSocket::bind(("127.0.0.1", 0))
+            .expect("a port")
+            .local_addr()
+            .expect("an address")
+            .port()
+    }
+
+    fn port_is_taken(port: u16) -> bool {
+        std::net::UdpSocket::bind(("0.0.0.0", port)).is_err()
+    }
+
+    fn listener(port: u16) -> UdpServer {
+        let mut config = crate::config::AppConfig::default();
+        config.udp.udp_in_port = i64::from(port);
+        // No filtering and a numeric address: nothing here should depend on a
+        // name resolving.
+        config.udp.udp_source_filter_enabled = false;
+        config.miniserver.miniserver_ip = "127.0.0.1".to_owned();
+        UdpServer::build(&config, Arc::new(MqttShared::new()))
+    }
+
+    #[tokio::test]
+    async fn stop_releases_the_port() {
+        let port = free_port();
+        let server = listener(port);
+
+        start_with(server.start_params()).await.expect("bound");
+        assert!(port_is_taken(port));
+
+        stop_with(server.signal_stop()).await;
+        assert!(!port_is_taken(port));
+    }
+
+    #[tokio::test]
+    async fn the_listener_can_be_started_again_after_a_stop() {
+        let port = free_port();
+        let server = listener(port);
+
+        start_with(server.start_params()).await.expect("bound");
+        stop_with(server.signal_stop()).await;
+
+        start_with(server.start_params()).await.expect("bound again");
+        // The failure this guards against is the loop ending on its own right
+        // after the bind, so give it the chance to before looking.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(port_is_taken(port), "the second run ended on a stale permit");
+
+        stop_with(server.signal_stop()).await;
+    }
+
+    #[tokio::test]
+    async fn starting_twice_is_refused_and_leaves_the_first_alone() {
+        let port = free_port();
+        let server = listener(port);
+
+        start_with(server.start_params()).await.expect("bound");
+
+        let refused = start_with(server.start_params()).await.unwrap_err();
+        assert!(
+            refused.to_string().contains("already listening"),
+            "{refused}"
+        );
+
+        // The refusal left the running listener alone.
+        assert!(port_is_taken(port));
+        stop_with(server.signal_stop()).await;
+        assert!(!port_is_taken(port));
+    }
+
+    /// A port already taken by something else is reported, not shrugged off:
+    /// without UDP the relay has no inbound path from the Miniserver.
+    #[tokio::test]
+    async fn a_port_that_is_taken_aborts_the_start() {
+        let port = free_port();
+        let _squatter = std::net::UdpSocket::bind(("0.0.0.0", port)).expect("the port");
+
+        let error = start_with(listener(port).start_params())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot bind"), "{error}");
     }
 }

@@ -1,14 +1,14 @@
 //! MQTT 5 ingress and egress on top of mqtt-glide.
 //!
-//! Inbound messages take no detour through Python at all: the connection read
-//! task hands them to a bounded channel, and [`ingress_worker`] feeds them
-//! straight into [`Core`], which flattens, filters and forwards them to the
-//! Miniserver without ever taking the GIL. Only the relay's own control
-//! topics (`config/get`, `config/set` and the restart triggers) are handed
-//! back to Python, and the split is decided in Rust before any attach happens.
+//! An inbound message takes the shortest route there is: the connection read
+//! task hands it to a bounded channel, and [`ingress_worker`] feeds it straight
+//! into [`Core`], which flattens, filters and forwards it to the Miniserver.
+//! Only the relay's own control topics (`config/get`, `config/set` and the
+//! restart triggers) leave that path, and which they are is decided before
+//! anything else looks at the message.
 //!
-//! The UDP path in [`crate::udp`] publishes through [`MqttShared`] and needs no
-//! GIL either.
+//! The UDP path in [`crate::udp`] publishes through [`MqttShared`] and joins the
+//! same route one step later.
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -25,13 +25,8 @@ use mqtt_glide::{
     AppError, ClientBuilder, ClientId, LifecycleHook, MqttClient as GlideClient, PublishMessage,
     QoS, SessionPhase, StandardReconnectPolicy, StaticCredentials, SubscribeAckReason, Subscription,
 };
-use pyo3::exceptions::{PyRuntimeError, PyTypeError};
-use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyString};
-use pyo3_async_runtimes::tokio::{future_into_py, get_runtime};
 use tokio::sync::{Notify, mpsc};
 
-use crate::MiniserverDataProcessor;
 use crate::config::AppConfig;
 use crate::error::RelayError;
 use crate::control::ControlSink;
@@ -93,10 +88,9 @@ struct Undelivered {
     reason: DropReason,
 }
 
-/// Connection state shared between the Python-facing [`MqttClient`] and
-/// [`MiniserverDataProcessor`], which answers `config/get` without a detour
-/// through Python.
-pub struct MqttShared {
+/// The live connection, shared by everything that publishes through it: the
+/// message path, the UDP listener and the `config/get` response.
+pub(crate) struct MqttShared {
     client: ArcSwapOption<GlideClient>,
     /// Whether there is a live MQTT session, maintained by [`ConnectSignal`].
     ///
@@ -135,6 +129,27 @@ impl MqttShared {
     /// The client handle regardless of session state, for shutting it down.
     fn handle(&self) -> Option<Arc<GlideClient>> {
         self.client.load_full()
+    }
+
+    /// Whether an MQTT session is up right now.
+    ///
+    /// Follows the session, not the existence of a handle: the handle outlives
+    /// every reconnect, so on its own it would only say that connecting had
+    /// worked at some point.
+    pub(crate) fn connected(&self) -> bool {
+        self.live_client().is_some()
+    }
+
+    /// Take the publishes that were lost, as `(topic, payload, reason)`.
+    ///
+    /// Draining rather than reading, because these are diagnostics: whoever
+    /// looks at them is reporting them, and a second reader seeing them again
+    /// would report them twice.
+    pub(crate) fn take_undelivered(&self) -> Vec<(String, Vec<u8>, &'static str)> {
+        lock_recover(&self.undelivered)
+            .drain(..)
+            .map(|entry| (entry.topic, entry.payload, entry.reason.as_str()))
+            .collect()
     }
 
     /// Logs and remembers a publish that was lost.
@@ -310,7 +325,7 @@ impl MqttShared {
             return;
         };
         let shared = Arc::clone(self);
-        get_runtime().spawn(async move {
+        tokio::spawn(async move {
             let result = Self::publish_on(
                 &client,
                 topic.clone(),
@@ -554,11 +569,11 @@ async fn ingress_worker(
 }
 
 
-/// MQTT 5 client handle exposed to Python.
+/// The relay's MQTT 5 client.
 ///
-/// Construct it before [`MiniserverDataProcessor`], which shares its connection
-/// state, then call [`MqttClient::connect`] once the processor exists.
-#[pyclass]
+/// Holds what a connection is made from; the connection itself lives in
+/// [`MqttShared`], which the UDP listener and the control topics also publish
+/// through.
 pub struct MqttClient {
     shared: Arc<MqttShared>,
     reconnect: StandardReconnectPolicy,
@@ -721,124 +736,6 @@ impl MqttClient {
     }
 }
 
-#[pymethods]
-impl MqttClient {
-    #[new]
-    #[pyo3(text_signature = "(self, global_config)")]
-    fn new(py: Python<'_>, global_config: &Bound<'_, PyAny>) -> PyResult<Self> {
-        Ok(MqttClient::build(&crate::app_config_from_py(py, global_config)?))
-    }
-
-    /// Whether an MQTT session is up right now.
-    ///
-    /// False while glide is reconnecting, which is also when a publish is
-    /// reported as dropped rather than queued.
-    #[getter]
-    fn connected(&self) -> bool {
-        self.shared.live_client().is_some()
-    }
-
-    /// Connects, subscribes to `topics` and starts routing inbound messages
-    /// into `processor`.
-    #[pyo3(text_signature = "(self, topics, processor)")]
-    fn connect<'py>(
-        &self,
-        py: Python<'py>,
-        topics: Vec<String>,
-        processor: Py<MiniserverDataProcessor>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        // Both pulled out here so the worker holds them directly and never
-        // borrows the pyclass again - which is what keeps the GIL off the data
-        // path, and off the decision of whether a message is data at all.
-        let (core, control) = {
-            let bound = processor.bind(py).borrow();
-            (bound.core(), bound.sink())
-        };
-        let params = self.connect_params(topics, core, control);
-        future_into_py(py, async move {
-            connect_with(params)
-                .await
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))
-        })
-    }
-
-    /// Publishes at QoS 0 and reports the outcome.
-    ///
-    /// Returns `None` when the message was handed to the broker connection, or
-    /// the reason it was dropped. Delivery problems are reported this way
-    /// rather than raised: the UDP path publishes from a detached task, where
-    /// an exception would only surface as an unretrieved task error.
-    #[pyo3(signature = (topic, message, retain=false, user_properties=None))]
-    #[pyo3(text_signature = "(self, topic, message, retain=False, user_properties=None)")]
-    fn publish<'py>(
-        &self,
-        py: Python<'py>,
-        topic: String,
-        message: &Bound<'py, PyAny>,
-        retain: bool,
-        user_properties: Option<Vec<(String, String)>>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        // Edition 2024 drops if-let temps before `else`; match keeps the borrow
-        // scopes clear while we copy out owned bytes from either cast. The one
-        // copy out of Python's buffer is unavoidable - it belongs to the
-        // interpreter and the publish outlives the call - but it is the only one
-        // on this path now.
-        let payload = match message.cast::<PyString>() {
-            Ok(text) => Bytes::from(text.to_cow()?.into_owned().into_bytes()),
-            Err(_) => match message.cast::<PyBytes>() {
-                Ok(raw) => Bytes::copy_from_slice(raw.as_bytes()),
-                Err(_) => {
-                    return Err(PyTypeError::new_err("message must be str or bytes"));
-                }
-            },
-        };
-
-        let shared = Arc::clone(&self.shared);
-        let properties = user_properties.unwrap_or_default();
-        let topic = ByteString::from(topic);
-
-        future_into_py(py, async move {
-            Ok(shared
-                .publish(topic, payload, retain, properties, None)
-                .await
-                .map(DropReason::as_str))
-        })
-    }
-
-    /// Says goodbye on the status topic, then closes the session.
-    ///
-    /// The farewell is given a deadline of its own. A socket can be dead
-    /// without glide knowing yet - the keep-alive runs for a minute - and the
-    /// publish would then sit out the acknowledgement timeout. `docker stop`
-    /// allows ten seconds for the whole shutdown, and a status message nobody
-    /// is left to receive must not eat into them.
-    #[pyo3(text_signature = "(self)")]
-    fn disconnect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let shared = Arc::clone(&self.shared);
-        let status_topic = self.status_topic.clone();
-        future_into_py(py, async move {
-            disconnect_with(shared, status_topic).await;
-            Ok(())
-        })
-    }
-
-    /// Drains the last dropped publishes as `(topic, payload, reason)`.
-    #[pyo3(text_signature = "(self)")]
-    fn take_undelivered(&self, py: Python<'_>) -> PyResult<Vec<(String, Py<PyBytes>, &'static str)>> {
-        let mut ring = lock_recover(&self.shared.undelivered);
-        Ok(ring
-            .drain(..)
-            .map(|entry| {
-                (
-                    entry.topic,
-                    PyBytes::new(py, &entry.payload).unbind(),
-                    entry.reason.as_str(),
-                )
-            })
-            .collect())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -922,5 +819,122 @@ mod tests {
 
         assert_eq!(state, STATUS_DEGRADED);
         assert_eq!(reconnect.consecutive_auth_failures(), 1);
+    }
+
+    // -- what a lost publish leaves behind ----------------------------------
+    //
+    // Relayed messages go out at QoS 0 with no outbox, so a message that cannot
+    // be handed to the broker is gone. These pin down that the loss is at least
+    // visible: the publish says why, and the last few stay readable.
+
+    fn unconnected() -> MqttClient {
+        let mut config = crate::config::AppConfig::default();
+        config.broker.host = "127.0.0.1".to_owned();
+        config.broker.port = 1883;
+        config.general.base_topic = "myrelay/".to_owned();
+        MqttClient::build(&config)
+    }
+
+    /// `connected` follows the session, not the existence of a handle.
+    ///
+    /// It once reported the handle, which stays in place across every reconnect
+    /// and therefore only ever said that connecting had worked at some point.
+    #[test]
+    fn connected_is_false_without_a_session() {
+        assert!(!unconnected().shared().connected());
+    }
+
+    #[tokio::test]
+    async fn a_publish_without_a_connection_reports_the_reason() {
+        let client = unconnected();
+        let shared = client.shared();
+
+        let dropped = shared
+            .publish(
+                ByteString::from_static("some/topic"),
+                Bytes::from_static(b"value"),
+                false,
+                Vec::new(),
+                None,
+            )
+            .await;
+        assert_eq!(dropped.map(DropReason::as_str), Some("broker not connected"));
+        assert_eq!(
+            shared.take_undelivered(),
+            vec![(
+                "some/topic".to_owned(),
+                b"value".to_vec(),
+                "broker not connected"
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_undelivered_ring_is_drained_once() {
+        let client = unconnected();
+        let shared = client.shared();
+        shared
+            .publish(
+                ByteString::from_static("some/topic"),
+                Bytes::from_static(b"value"),
+                false,
+                Vec::new(),
+                None,
+            )
+            .await;
+
+        assert_eq!(shared.take_undelivered().len(), 1);
+        assert!(shared.take_undelivered().is_empty());
+    }
+
+    /// The ring is bounded, so a long outage rolls the oldest samples out and
+    /// what is left is the most recent - which is what a report needs.
+    #[tokio::test]
+    async fn the_undelivered_ring_keeps_the_newest() {
+        let client = unconnected();
+        let shared = client.shared();
+        for i in 0..40 {
+            shared
+                .publish(
+                    ByteString::from(format!("some/topic/{i}")),
+                    Bytes::from_static(b"value"),
+                    false,
+                    Vec::new(),
+                    None,
+                )
+                .await;
+        }
+
+        let kept = shared.take_undelivered();
+        assert_eq!(kept.len(), UNDELIVERED_RING);
+        assert_eq!(kept[0].0, "some/topic/8");
+        assert_eq!(kept[kept.len() - 1].0, "some/topic/39");
+    }
+
+    /// The status topic hangs off the configured base topic.
+    #[test]
+    fn the_status_topic_follows_the_base_topic() {
+        let mut config = crate::config::AppConfig::default();
+        config.general.base_topic = "somewhere/else/".to_owned();
+        assert_eq!(
+            MqttClient::build(&config).status_topic(),
+            "somewhere/else/status"
+        );
+    }
+
+    /// An empty broker user means no credentials at all, not empty ones.
+    #[test]
+    fn an_empty_user_is_no_credentials() {
+        let mut config = crate::config::AppConfig::default();
+        config.broker.user = Some(String::new());
+        config.broker.password = Some("ignored".to_owned());
+        assert!(MqttClient::build(&config).credentials.is_none());
+
+        config.broker.user = Some("someone".to_owned());
+        let with = MqttClient::build(&config);
+        assert_eq!(
+            with.credentials,
+            Some(("someone".to_owned(), "ignored".to_owned()))
+        );
     }
 }

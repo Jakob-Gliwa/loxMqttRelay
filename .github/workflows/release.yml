@@ -33,35 +33,31 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v6
 
-      - name: Install uv (with cache)
-        uses: astral-sh/setup-uv@v8.2.0
-        with:
-          enable-cache: true
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache the cargo registry and target directory
+        uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Sync dependencies (incl. test extras)
-        run: uv sync --locked --extra test
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
 
-      # The UDP path and the MQTT client are Rust; their unit tests live in the
-      # crate. Built without `extension-module`, so the harness links libpython
-      # itself - PYO3_PYTHON points it at the interpreter uv just provisioned.
-      - name: Run Rust tests
+      - name: Run tests
         run: cargo nextest run
-        env:
-          PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
 
-      - name: Run tests with coverage
-        run: uv run pytest --cov-report=xml
-
-  # --- VERSION GATE (git tag must match pyproject, __version__ and Cargo.toml) ---
+  # --- VERSION GATE (the git tag must match Cargo.toml) ---
   # The image tags come from the release's git tag via type=semver below. If
-  # someone tags v0.4.0 but forgets to bump the code, the image would advertise
+  # someone tags v0.4.0 but forgets to bump the crate, the image would advertise
   # 0.4.0 while the relay reports 0.3.0. Fail the release loudly instead.
+  #
+  # This used to compare three files - pyproject.toml, __init__.py and
+  # Cargo.toml - and needed a script to do it. Cargo.toml is now the only place
+  # the version is stated, so it is two lines of shell.
   version-check:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -69,17 +65,18 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v6
 
-      - name: Install uv (with cache)
-        uses: astral-sh/setup-uv@v8.2.0
-        with:
-          enable-cache: true
-
-      # --no-project: the script reads the files and imports nothing, so it needs
-      # neither the dependencies nor a compiled extension.
-      - name: Assert release tag == pyproject == __version__ == Cargo.toml
+      - name: Assert the release tag matches Cargo.toml
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: uv run --no-project python scripts/check_version_parity.py "$RELEASE_TAG"
+        run: |
+          set -euo pipefail
+          crate="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          tag="${RELEASE_TAG#v}"
+          if [ "$crate" != "$tag" ]; then
+            echo "Release tag $RELEASE_TAG does not match Cargo.toml version $crate" >&2
+            exit 1
+          fi
+          echo "Release $RELEASE_TAG matches Cargo.toml version $crate"
 
   # --- BUILD STAGE (one native runner per platform, no QEMU) ---
   build:
@@ -223,7 +220,7 @@ jobs:
   # is left visible. This narrows the public window but cannot close it - only
   # creating the release at the end of a tag-driven run would.
   retract-on-failure:
-    needs: [test, version-check, build, merge]
+    needs: [test, build, merge]
     # Run only when something upstream actually failed or was cancelled.
     if: >-
       always()

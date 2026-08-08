@@ -4,7 +4,7 @@
 //! reasons. In production it is the Loxone websocket client
 //! ([`crate::miniserver::LoxEgress`]); in the tests it is [`RecordingEgress`],
 //! which is what lets the whole flattening and filtering path be exercised
-//! without a Miniserver and without Python.
+//! without a Miniserver on the other end.
 
 use std::fmt;
 use std::future::Future;

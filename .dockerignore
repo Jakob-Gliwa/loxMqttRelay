@@ -1,37 +1,25 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.pytest_cache/
-.coverage
-htmlcov/
+# The build stage copies Cargo.toml, Cargo.lock, build.rs and src/ explicitly,
+# so this list is a second line of defence rather than the mechanism. It matters
+# most for `target/`, which is large and whose host artifacts are useless to a
+# musl cross-build.
+target/
 
-# Test files
-tests/
-pytest.ini
-coverage.xml
-
-# Development files
 .git/
 .gitignore
-.gitlab-ci.yml
-.env
-.env.*
-.python-version
+.github/
+.claude/
 
-# Virtual environments
-.venv/
-venv/
-ENV/
+# The operator's own configuration and the Miniserver dump it names. Neither
+# belongs in an image; the config is mounted at runtime.
+config/
+fixtures/
 
-# Project specific
-Temp/
-LoxoneSupport/
-logs/
+# Recordings of the Python implementation, used by the tests. Not needed to
+# build the binary.
+golden/
+
+# Editor and tooling leftovers.
+.vscode/
+.idea/
 *.log
-
-# Build artifacts
-dist/
-build/
-*.egg-info/
+logs/

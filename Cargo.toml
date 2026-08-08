@@ -4,17 +4,7 @@ version = "0.4.0"
 edition = "2024"
 
 [lib]
-# The name of the native library. This is the name which will be used in Python to import the
-# library (i.e. `import string_sum`). If you change this, you must also change the name of the
-# `#[pymodule]` in `src/lib.rs`.
 name = "loxmqttrelay"
-# "cdylib" is necessary to produce a shared library for Python to import from.
-#
-# "rlib" is here for the port to a standalone binary: `src/main.rs` and anything
-# under `tests/` can only `use loxmqttrelay::…` if the crate is also built as a
-# Rust library. Both crate types come out of the same sources, so the wheel keeps
-# working while the binary grows next to it; "cdylib" goes away once Python does.
-crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 # The relay itself. Named `-relay` because on x86 a small launcher takes the
@@ -41,17 +31,7 @@ strip = "symbols"
 # process instead of a reported one.
 panic = "unwind"
 
-[features]
-# On by default for the wheel: `extension-module` leaves libpython unlinked,
-# which is right for a shared object Python loads but breaks `cargo test`, whose
-# harness is an executable and has to resolve those symbols itself. setup.py
-# turns it back on for the builds that ship.
-default = []
-extension-module = ["pyo3/extension-module"]
-
 [dependencies]
-pyo3 = { version = "0.28.3", features = ["auto-initialize"] }
-pyo3-async-runtimes = { version = "0.28", features = ["attributes", "tokio-runtime"] }
 regex = "1.12.3"
 lru = "0.18.0"          # LRU cache
 serde = { version = "1.0.228", features = ["derive"] }
@@ -105,6 +85,3 @@ hyper = { version = "1.11.0", features = ["client", "http1"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 http-body-util = "0.1.4"
 clap = { version = "4.6.6", features = ["derive", "env"] }
-
-[build-dependencies]
-pyo3-build-config = "0.28.3"

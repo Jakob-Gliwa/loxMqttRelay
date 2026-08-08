@@ -125,31 +125,30 @@ graph LR
 
 #### Where the work happens
 
-The relay is a Python program with a Rust extension, and the division is by
-temperature rather than by feature: everything a message touches is Rust,
-everything else is Python.
+The relay is one Rust binary. It splits internally by temperature rather than
+by feature: a hot path that a message travels, and a cold path that runs at
+startup or when something changes.
 
 ```mermaid
 graph LR
-    subgraph rust [Rust - per message]
+    subgraph hot [Hot - per message]
         A[MQTT ingress] --> B[flatten and filter]
         B --> C[Miniserver websocket]
         D[UDP listener] --> E[MQTT publish]
     end
-    subgraph python [Python - startup and config]
+    subgraph cold [Cold - startup and config]
         F[config.toml] --> G[whitelist sync]
         G --> H[restart on config change]
     end
 ```
 
-A forwarded value never enters Python: the MQTT client, the JSON flattening,
-the filters and the encrypted websocket write all run on one tokio runtime, and
-the interpreter lock is not taken anywhere along that path. Python is reached
-for the relay's own control topics (`config/get`, `config/set`, the restart
-triggers), for reading `config.toml`, and for the
-[whitelist sync](#automatic-configuration-sync), which downloads and parses the
-Miniserver's configuration - all of them cold paths that run at startup or when
-something is deliberately changed.
+A forwarded value stays on the hot path from end to end: the MQTT client, the
+JSON flattening, the filters and the encrypted websocket write all run on one
+tokio runtime, and nothing along it allocates a configuration or takes a lock it
+did not need. The cold path handles the relay's own control topics
+(`config/get`, `config/set`, the restart triggers), reading `config.toml`, and
+the [whitelist sync](#automatic-configuration-sync), which downloads and parses
+the Miniserver's configuration.
 
 ## Features
 
@@ -216,13 +215,19 @@ Since anything that can publish to MQTT can control connected devices, restrict 
 
 Start the MQTT Relay:
 ```bash
-python main.py
+loxmqttrelay-relay
 ```
 
-You can also set the logging level:
+The configuration file defaults to `config/config.toml`; `--config` points it
+elsewhere. The logging level comes from `--log-level`, then the `LOG_LEVEL`
+environment variable, then `general.log_level` in the file:
 ```bash
-python main.py --log-level INFO
+loxmqttrelay-relay --config /etc/loxmqttrelay.toml --log-level INFO
 ```
+
+In the image the entry point is `loxmqttrelay`, a small launcher that picks the
+build this CPU can run and execs it. Set `LOXMQTTRELAY_BUILD=generic` to force
+the baseline build - which is also how you compare the two.
 
 ## Docker Deployment
 
@@ -334,7 +339,7 @@ The logging level can be set in three ways, with the following priority (highest
 
 1. Command-line argument:
    ```bash
-   python main.py --log-level DEBUG
+   loxmqttrelay-relay --log-level DEBUG
    ```
 
 2. Environment variable (when using Docker):
@@ -380,7 +385,7 @@ reconnects and restarts never collide with a stale session on the broker.
 #### MQTT Protocol Version
 
 The relay speaks MQTT 5 exclusively. Support for MQTT 3.1.x was removed together
-with the Python MQTT client; the client is now implemented in Rust on top of
+with the old Python MQTT client; the client is implemented in Rust on top of
 [mqtt-glide](https://crates.io/crates/mqtt-glide). MQTT 5 user properties are
 therefore always available (see [MQTT5 User Properties](#mqtt5-user-properties)).
 
@@ -569,7 +574,7 @@ Attention: Do not change `udp_in_port` if you run MQTT Relay from within Docker 
 `udp_source_filter_enabled` restricts incoming UDP to the Miniserver address plus any sender in `udp_allowed_sources`. See [Accepted senders](#accepted-senders) for details.
 
 The socket, the message parser and the sender filter all live in Rust, and a
-datagram is turned into an MQTT publish without ever entering Python.
+datagram is parsed and turned into an MQTT publish entirely on the hot path.
 
 ## Dynamic Configuration Updates
 
@@ -693,18 +698,16 @@ Configure your Miniserver to publish any message to `{base_topic}/miniservereven
 
 ## Testing Setup
 
-The relay is Rust and so are its tests. A Python implementation is still in the
-tree during the port, and what is left of the Python tests exists to hold the
-Rust one against it - see "Parity" below.
-
-### The Rust tests
+The relay is Rust and so are its tests - 234 of them, all in-module.
 
 ```bash
-PYO3_PYTHON="$PWD/.venv/bin/python" cargo nextest run
+cargo nextest run
 ```
 
 They cover the UDP datagram parser with its greedy topic rule, the sender
-filter, the MQTT and Miniserver clients' drop accounting, and the flattener.
+filter, the MQTT and Miniserver clients' drop accounting, the configuration
+file, the whitelist sync, the control topics and the startup and shutdown
+sequence.
 
 The flattener is tested differentially: it has a fast route that learns a
 topic's JSON layout once and afterwards only reads values with a byte scanner,
@@ -720,41 +723,23 @@ synthetics - lives in `src/process/corpus/`. It is checked in rather than
 generated: it was always fully determined by its seed, so freezing it costs
 nothing.
 
-`PYO3_PYTHON` matters because the crate builds without pyo3's
-`extension-module` feature here, so the test harness links libpython itself.
-Point it at an interpreter that ships a shared library - the project's own
-virtualenv will do. The shipped wheel is unaffected: `setup.py` turns
-`extension-module` back on for every build that is packaged.
+### What the tests are held against
 
-### Parity
+This was a Python program until recently, and the port was done against a
+recording of it rather than against a reading of it.
 
-The Python implementation is still in the tree, and while it is, it is what the
-Rust one is measured against.
+`golden/config/` is that recording: the Python configuration module was run over
+40 documents and 41 MQTT updates, and every validation message in file order,
+every warning, the file it wrote and the exact bytes of a `config/get` response
+were captured. `src/config/tests.rs` asserts the Rust module reproduces all of
+it, and names the two places it deliberately does not. See the README in that
+directory for why it cannot be regenerated.
 
-```bash
-uv run pytest
-```
-
-Two things run here. `tests/test_rust_python_parity.py` puts both
-implementations of the whitelist sync in front of the same real Miniserver
-configuration and compares the decompressed bytes and the extracted input names,
-as ordered lists. It skips unless `config/sps0.LoxCC` is present, which it is not
-in a clone - the file is gitignored because it is somebody's actual house. Drop
-any `sps_*.zip` or `*.LoxCC` into `fixtures/` and it is picked up too; an older
-firmware's zip is the only way to get a real archive in front of the zip reader.
-
-The rest is the config module and the control topics, still exercised through
-the wheel.
-
-`golden/config/` is the other half, and the more thorough one:
-`scripts/gen_golden.py` ran the *Python* config module over 40 documents and 41
-MQTT updates and recorded every validation message in file order, the warnings
-for unknown sections and fields, what `save_config` wrote, and the exact bytes
-of a `config/get` response. `src/config/tests.rs` asserts the Rust module
-reproduces all of it. Where it deliberately does not, the case is named in
-`tests::DIVERGENT` with the reason.
-
-The generator goes when the Python does. The corpus stays.
+Two tests read a real Miniserver configuration off the machine they run on and
+skip when it is not there - `config/sps0.LoxCC` is gitignored, because it names
+somebody's rooms and devices. Drop any `sps_*.zip` or `*.LoxCC` into `fixtures/`
+and they are picked up too; an older firmware's zip is the only way to get a
+real archive in front of the zip reader.
 
 ## Releasing
 
@@ -768,27 +753,23 @@ Two workflows, and only one of them can publish a version:
 
 To cut a release:
 
-1. Bump the version in `pyproject.toml`, `src/loxmqttrelay/__init__.py` and
-   `Cargo.toml`. All three have to agree - the wheel, the version a running relay
-   reports and the native crate:
+1. Bump the version in `Cargo.toml`. It is the only place the version is stated:
+   the binary reports it from `CARGO_PKG_VERSION`, and the release workflow
+   checks the git tag against it.
+
+2. Refresh the lockfile so it records the new version, and commit it with the
+   bump. It is tracked so a release can be rebuilt from its tag:
 
 ```bash
-uv run --no-project python scripts/check_version_parity.py
-```
-
-2. Refresh the lockfiles so they record the new version, and commit them along
-   with the bump. Both are tracked so a release can be rebuilt from its tag:
-
-```bash
-uv lock && cargo metadata --format-version 1 >/dev/null
+cargo metadata --format-version 1 >/dev/null
 ```
 
 3. Publish a GitHub Release with the tag `v<version>`, e.g. `v0.3.1`. The image
    tags are derived from it: `0.3.1`, `0.3` and `latest`. Mark it as a prerelease
    to get only `0.4.0-rc1` and leave `latest` where it is.
 
-The release is gated on the same tests as `main`, plus the version parity check
-against the git tag - so a tag without the matching bump fails instead of
+The release is gated on the same tests as `main`, plus a check that the git tag
+matches `Cargo.toml` - so a tag without the matching bump fails instead of
 shipping an image that misreports itself. Since GitHub publishes the release
 before any of that runs, a failing gate turns the release back into a draft.
 

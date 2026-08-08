@@ -37,8 +37,10 @@ pub(crate) enum ListMode {
 impl ListMode {
     /// The mode a control topic names.
     ///
-    /// The same three words `ControlTopic::update_mode` hands to Python, read
-    /// back on the native side so the two cannot spell them differently.
+    /// `ControlTopic::update_mode` says which of `set`, `add` and `remove` the
+    /// topic was; this reads it back. Two spellings of the same three words, on
+    /// purpose: the topic side names them for a log line, and this side has to
+    /// fail loudly if they ever disagree.
     pub(crate) fn parse(name: &str) -> Option<Self> {
         Some(match name {
             "set" => ListMode::Set,

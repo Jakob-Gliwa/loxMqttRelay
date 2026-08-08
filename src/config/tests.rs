@@ -595,6 +595,98 @@ fn saving_a_reloaded_file_changes_nothing() {
     }
 }
 
+/// A section update merges the same way a remote one does.
+///
+/// `update_fields` is covered exhaustively by the corpus; this is the other
+/// entry point, and the modes have to mean the same thing on both.
+#[test]
+fn a_section_update_merges_in_every_mode() {
+    let dir = tempdir("section-modes");
+    let file = dir.join("config.toml");
+    let store = ConfigStore::new(&file, AppConfig::default());
+
+    store.update_section(
+        ConfigSection::Topics,
+        &[("subscriptions".to_owned(), CfgValue::from_strings(["a/#", "b/#"]))],
+        ListMode::Set,
+    );
+    assert_eq!(store.snapshot().topics.subscriptions, ["a/#", "b/#"]);
+
+    // `add` appends and dedupes, keeping first-seen order.
+    store.update_section(
+        ConfigSection::Topics,
+        &[("subscriptions".to_owned(), CfgValue::from_strings(["b/#", "c/#"]))],
+        ListMode::Add,
+    );
+    assert_eq!(store.snapshot().topics.subscriptions, ["a/#", "b/#", "c/#"]);
+
+    store.update_section(
+        ConfigSection::Topics,
+        &[("subscriptions".to_owned(), CfgValue::from_strings(["b/#"]))],
+        ListMode::Remove,
+    );
+    assert_eq!(store.snapshot().topics.subscriptions, ["a/#", "c/#"]);
+
+    // A set stays sorted whatever order it is merged in.
+    store.update_section(
+        ConfigSection::Topics,
+        &[("topic_whitelist".to_owned(), CfgValue::from_strings(["zulu", "alpha"]))],
+        ListMode::Add,
+    );
+    assert_eq!(
+        store.snapshot().topics.topic_whitelist,
+        BTreeSet::from(["alpha".to_owned(), "zulu".to_owned()])
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The store is shared across tasks and threads, so it has to be usable from
+/// several at once without losing an update.
+///
+/// Python had a singleton behind a lock and a test that hammered it. Here the
+/// store is passed around as an `Arc` instead, and this is the equivalent
+/// question: does concurrent use stay consistent.
+#[test]
+fn the_store_survives_concurrent_use() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let dir = tempdir("concurrent");
+    let store = Arc::new(ConfigStore::new(dir.join("config.toml"), AppConfig::default()));
+
+    let writers: Vec<_> = (0..8)
+        .map(|i| {
+            let store = Arc::clone(&store);
+            thread::spawn(move || {
+                for round in 0..8 {
+                    store
+                        .update_fields(
+                            &[(
+                                "subscriptions".to_owned(),
+                                CfgValue::from_strings([format!("t/{i}/{round}")]),
+                            )],
+                            ListMode::Add,
+                        )
+                        .expect("a usable update");
+                    // A reader alongside, because `snapshot` takes the same lock.
+                    let _ = store.snapshot();
+                    let _ = store.safe_json();
+                }
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.join().expect("no writer panicked");
+    }
+
+    // Every one of the 64 additions is present exactly once.
+    let subscriptions = store.snapshot().topics.subscriptions;
+    assert_eq!(subscriptions.len(), 64, "an update was lost");
+    let unique: BTreeSet<&String> = subscriptions.iter().collect();
+    assert_eq!(unique.len(), 64, "an entry was duplicated");
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// A scratch directory of our own, so the tests do not have to run one at a time.
 fn tempdir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("loxmqttrelay-config-{tag}"));

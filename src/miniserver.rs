@@ -1,24 +1,22 @@
 //! The Miniserver websocket: the relay's egress.
 //!
 //! Built like [`crate::mqtt`]: a `Shared` holding the connection that outlives
-//! every reconnect, a `#[pyclass]` handle Python constructs and drives, and a
-//! diagnostic ring for the values that were lost. The processing core reaches
-//! the connection through [`LoxEgress`] and never sees this module.
+//! every reconnect, a handle the relay constructs and drives, and a diagnostic
+//! ring for the values that were lost. The processing core reaches the
+//! connection through [`LoxEgress`] and never sees this module.
 //!
-//! Nothing on the sending path takes the GIL. The one place Python has to be
-//! reached - resyncing the whitelist after a reconnect, which used to be
-//! `loxwebsocket.add_event_callback` - goes through a channel to a task of its
-//! own, so the crate's reader task stays free of it by construction.
+//! Lifecycle events leave the crate's reader task immediately, through a
+//! channel to [`lifecycle_worker`]. That indirection was originally there to
+//! keep the GIL off the reader; it stays because a resync after a reconnect
+//! downloads the whole Miniserver configuration, and doing that from inside the
+//! websocket's own callback would stall the connection it belongs to.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use loxwebsocket::{ClientEvent, ConnState, ConnectConfig, Error as LoxError, LoxClient, LoxHandler, TlsMode};
-use pyo3::exceptions::PyRuntimeError;
-use pyo3::prelude::*;
-use pyo3_async_runtimes::tokio::future_into_py;
 use tokio::sync::mpsc;
 
 use crate::config::AppConfig;
@@ -48,8 +46,8 @@ struct Undelivered {
     reason: String,
 }
 
-/// Connection state shared between the Python-facing [`MiniserverClient`] and
-/// the [`LoxEgress`] the processing core sends through.
+/// The websocket session, shared between [`MiniserverClient`] and the
+/// [`LoxEgress`] the processing core sends through.
 pub(crate) struct MsShared {
     client: ArcSwapOption<LoxClient<RelayHandler>>,
     undelivered: std::sync::Mutex<VecDeque<Undelivered>>,
@@ -61,6 +59,11 @@ impl MsShared {
             client: ArcSwapOption::empty(),
             undelivered: std::sync::Mutex::new(VecDeque::with_capacity(UNDELIVERED_RING)),
         }
+    }
+
+    /// Whether a websocket session is up right now.
+    pub(crate) fn connected(&self) -> bool {
+        self.state() == ConnState::Connected
     }
 
     fn state(&self) -> ConnState {
@@ -90,6 +93,17 @@ impl MsShared {
             value: value.to_owned(),
             reason: reason.to_string(),
         });
+    }
+
+    /// Take the writes that were lost, as `(input, value, reason)`.
+    ///
+    /// Draining rather than reading: these are diagnostics, and whoever looks
+    /// at them is reporting them.
+    pub(crate) fn take_undelivered(&self) -> Vec<(String, String, String)> {
+        lock_recover(&self.undelivered)
+            .drain(..)
+            .map(|entry| (entry.normalized, entry.value, entry.reason))
+            .collect()
     }
 
     /// Put one value on the wire, or report why it was lost.
@@ -170,9 +184,9 @@ impl Egress for LoxEgress {
 
 /// Lifecycle events, handed off rather than acted on.
 ///
-/// The crate calls this on its reader task, where an await is impossible and
-/// taking the GIL would stall the socket. So it only forwards, and
-/// [`lifecycle_worker`] does the work.
+/// The crate calls this on its reader task, where an await is impossible. So it
+/// only forwards, and [`lifecycle_worker`] does the work - which matters
+/// because that work is a whole configuration download.
 pub(crate) struct RelayHandler {
     events: mpsc::Sender<ClientEvent>,
 }
@@ -241,8 +255,7 @@ fn endpoint(ip: &str, port: u16) -> (String, TlsMode) {
 /// Construct it before [`crate::MiniserverDataProcessor`], which shares its
 /// connection state, then call [`MiniserverClient::connect`] once the event
 /// loop is running.
-#[pyclass]
-pub struct MiniserverClient {
+pub(crate) struct MiniserverClient {
     shared: Arc<MsShared>,
     url: String,
     tls: TlsMode,
@@ -253,25 +266,6 @@ pub struct MiniserverClient {
 impl MiniserverClient {
     pub(crate) fn shared(&self) -> Arc<MsShared> {
         Arc::clone(&self.shared)
-    }
-}
-
-/// Asks `main.py` for a resync. Goes when `main.py` does.
-struct PyResyncTrigger {
-    relay: Py<PyAny>,
-}
-
-impl crate::signals::ResyncTrigger for PyResyncTrigger {
-    fn request_resync(&self) {
-        Python::attach(|py| {
-            if let Err(e) = self
-                .relay
-                .bind(py)
-                .call_method0(pyo3::intern!(py, "schedule_miniserver_sync"))
-            {
-                error!("Could not schedule the whitelist resync: {e}");
-            }
-        });
     }
 }
 
@@ -335,71 +329,6 @@ impl MiniserverClient {
     }
 }
 
-#[pymethods]
-impl MiniserverClient {
-    #[new]
-    #[pyo3(text_signature = "(self, global_config)")]
-    fn new(py: Python<'_>, global_config: &Bound<'_, PyAny>) -> PyResult<Self> {
-        Ok(MiniserverClient::build(&crate::app_config_from_py(
-            py,
-            global_config,
-        )?))
-    }
-
-    /// Whether a websocket session is up right now.
-    #[getter]
-    fn connected(&self) -> bool {
-        self.shared.state() == ConnState::Connected
-    }
-
-    /// The connection state, as the crate names it.
-    #[getter]
-    fn state(&self) -> &'static str {
-        match self.shared.state() {
-            ConnState::Closed => "CLOSED",
-            ConnState::Connecting => "CONNECTING",
-            ConnState::Connected => "CONNECTED",
-            ConnState::Reconnecting => "RECONNECTING",
-        }
-    }
-
-    /// Connect, authenticate, and start reporting reconnects to `relay`.
-    ///
-    /// `relay` is called back on `schedule_miniserver_sync` after every
-    /// reconnect.
-    #[pyo3(text_signature = "(self, relay)")]
-    fn connect<'py>(&self, py: Python<'py>, relay: Py<PyAny>) -> PyResult<Bound<'py, PyAny>> {
-        let shared = Arc::clone(&self.shared);
-        let cfg = self.connect_config();
-        let url = self.url.clone();
-        let resync: Arc<dyn crate::signals::ResyncTrigger> = Arc::new(PyResyncTrigger { relay });
-        future_into_py(py, async move {
-            connect_with(shared, cfg, url, resync)
-                .await
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))
-        })
-    }
-
-    /// Close the session, releasing its token on the Miniserver.
-    #[pyo3(text_signature = "(self)")]
-    fn stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let shared = Arc::clone(&self.shared);
-        future_into_py(py, async move {
-            shared.shutdown().await;
-            Ok(())
-        })
-    }
-
-    /// Drains the last dropped writes as `(input, value, reason)`.
-    #[pyo3(text_signature = "(self)")]
-    fn take_undelivered(&self) -> Vec<(String, String, String)> {
-        let mut ring = lock_recover(&self.shared.undelivered);
-        ring.drain(..)
-            .map(|entry| (entry.normalized, entry.value, entry.reason))
-            .collect()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,10 +362,11 @@ mod tests {
             Err(EgressError::NotConnected)
         );
 
-        let mut ring = lock_recover(&shared.undelivered);
-        assert_eq!(ring.len(), 1);
-        let entry = ring.pop_front().unwrap();
-        assert_eq!((entry.normalized.as_str(), entry.value.as_str()), ("dev_x", "1"));
+        let lost = shared.take_undelivered();
+        assert_eq!(lost.len(), 1);
+        assert_eq!((lost[0].0.as_str(), lost[0].1.as_str()), ("dev_x", "1"));
+        // Drained, so a second reader does not report the same loss again.
+        assert!(shared.take_undelivered().is_empty());
     }
 
     /// The ring is a diagnostic, not a buffer: it must not grow without bound
@@ -448,7 +378,11 @@ mod tests {
         for i in 0..UNDELIVERED_RING * 3 {
             let _ = egress.send("dev_x", &i.to_string()).await;
         }
-        assert_eq!(lock_recover(&shared.undelivered).len(), UNDELIVERED_RING);
+        // Bounded, and what is left is the most recent - which is what a report
+        // needs.
+        let lost = shared.take_undelivered();
+        assert_eq!(lost.len(), UNDELIVERED_RING);
+        assert_eq!(lost[lost.len() - 1].1, (UNDELIVERED_RING * 3 - 1).to_string());
     }
 
     /// The whitelist resync is not free - it downloads the whole Miniserver

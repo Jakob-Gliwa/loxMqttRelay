@@ -38,16 +38,6 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v6
 
-      # setup-uv installs uv, manages the Python toolchain (per requires-python)
-      # and persists uv's real cache (~/.cache/uv) across runs out of the box.
-      #
-      # Still here because the Python half still exists: it is what the parity
-      # harness compares against. It goes when src/loxmqttrelay/ does.
-      - name: Install uv (with cache)
-        uses: astral-sh/setup-uv@v8.2.0
-        with:
-          enable-cache: true
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -59,11 +49,6 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      # --locked: resolve exactly what uv.lock records, and fail if the lock and
-      # pyproject.toml have drifted apart, rather than quietly relocking.
-      - name: Sync dependencies (incl. test extras)
-        run: uv sync --locked --extra test
-
       # Formatting is checked but not enforced yet: the tree predates a rustfmt
       # that reflows several files, and reformatting them wholesale would bury
       # the port's diff. Turn `continue-on-error` off once that is done.
@@ -74,54 +59,19 @@ jobs:
       - name: Lint
         run: cargo clippy --all-targets -- -D warnings
 
-      # Built without `extension-module` while the wheel still exists, so the
-      # harness links libpython itself - PYO3_PYTHON points it at the
-      # interpreter uv just provisioned.
       - name: Run Rust tests
         run: cargo nextest run
-        env:
-          PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
 
       # The binary is what ships; building it here is what stops it from
       # rotting while the wheel is still the thing being tested.
       - name: Build the relay binary
         run: cargo build --release --locked --bin loxmqttrelay-relay --bin loxmqttrelay
 
-      - name: Run tests with coverage
-        run: uv run pytest --cov-report=xml
 
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v7
-        with:
-          name: coverage.xml
-          path: coverage.xml
-
-  # --- VERSION PARITY (cheap, and it guards the next release) ---
-  # Not strictly needed for an experimental image, but catching the drift here
-  # means a release is never blocked by a bump that was forgotten weeks ago.
-  version-check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v6
-
-      - name: Install uv (with cache)
-        uses: astral-sh/setup-uv@v8.2.0
-        with:
-          enable-cache: true
-
-      # --no-project: the script reads the files and imports nothing, so it needs
-      # neither the dependencies nor a compiled extension.
-      - name: Assert pyproject == __version__ == Cargo.toml
-        run: uv run --no-project python scripts/check_version_parity.py
 
   # --- BUILD STAGE (one native runner per platform, no QEMU) ---
   build:
-    # Gate the image on both validation jobs: version-check has no dependency
-    # edge of its own, so without this an experimental image could be pushed
-    # while it is red.
-    needs: [test, version-check]
+    needs: [test]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:

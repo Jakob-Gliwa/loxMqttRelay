@@ -145,9 +145,10 @@ pub(crate) async fn sync_whitelist(
 
 /// The configuration XML, downloaded and unwrapped.
 ///
-/// Split out from [`sync_whitelist`] so the download and the scan can be checked
-/// against the Python implementation separately - which is what
-/// `tests/test_rust_python_parity.py` does with a real configuration.
+/// Split out from [`sync_whitelist`] so the download and the scan can be
+/// exercised apart from each other - the tests below drive this half against a
+/// stub server, and `tests::the_real_configuration_yields_its_inputs` drives the
+/// other against a real Miniserver's output.
 pub(crate) async fn load_miniserver_config(
     endpoint: &Endpoint,
     user: &str,
@@ -171,13 +172,12 @@ pub(crate) async fn load_miniserver_config(
     loxcc::decompress(&raw)
 }
 
-/// The two halves on their own.
-///
-/// Reachable individually so `tests/test_rust_python_parity.py` can compare each
-/// against the Python implementation on a real configuration - the container
-/// bytes first, then the titles. Both re-exports go when Python does.
-pub(crate) use self::loxcc::decompress as decompress_loxcc;
-pub(crate) use self::xml::extract_inputs;
+/// The two halves on their own, for the test that reads a real configuration
+/// off this machine.
+#[cfg(test)]
+use self::loxcc::decompress as decompress_loxcc;
+#[cfg(test)]
+use self::xml::extract_inputs;
 
 #[cfg(test)]
 mod tests {
@@ -234,4 +234,148 @@ mod tests {
             .starts_with("Unexpected configuration payload: 42 bytes starting with")
         );
     }
+    // -- the whole cold path, end to end ------------------------------------
+    //
+    // List, pick, download, unwrap, scan - against a stub that answers the two
+    // requests in order. The pieces are covered on their own in the sibling
+    // modules; what these add is that they are wired together correctly.
+
+    use super::http::tests::{Reply, stub_sequence};
+
+    const LISTING: &str = "\
+Emergency.LoxCC
+sps_0252_20260430003125.zip
+sps_0272_20260727223721.LoxCC
+Music.json
+";
+
+    const XML: &[u8] =
+        br#"<ControlList><C Type="VirtualInCaption"><C Title="Input1"/><C Title="Input2"/></C></ControlList>"#;
+
+    /// A LoxCC container around `xml`, as `/dev/fsget` serves it.
+    fn container(xml: &[u8]) -> Vec<u8> {
+        let compressed = lz4_flex::block::compress(xml);
+        let mut out = Vec::new();
+        out.extend_from_slice(&0xaabb_cceeu32.to_le_bytes());
+        out.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(xml.len() as u32).to_le_bytes());
+        out.extend_from_slice(&crc32fast::hash(xml).to_le_bytes());
+        out.extend_from_slice(&compressed);
+        out
+    }
+
+    /// The newest file is picked, downloaded and unwrapped - and the request
+    /// that fetched it names that file.
+    #[tokio::test]
+    async fn the_newest_configuration_is_downloaded_and_unwrapped() {
+        let (endpoint, server) = stub_sequence(vec![
+            Reply::Body(LISTING.as_bytes().to_vec()),
+            Reply::Body(container(XML)),
+        ])
+        .await;
+
+        let config_xml = load_miniserver_config(&endpoint, "admin", "secret")
+            .await
+            .expect("a configuration");
+        assert_eq!(config_xml, XML);
+
+        let requests = server.await.expect("the stub");
+        assert!(requests[0].starts_with("GET /dev/fslist/prog/ "), "{}", requests[0]);
+        assert!(
+            requests[1].starts_with("GET /dev/fsget/prog/sps_0272_20260727223721.LoxCC "),
+            "{}",
+            requests[1]
+        );
+    }
+
+    /// And the whole way through to the input names.
+    #[tokio::test]
+    async fn a_sync_yields_the_virtual_input_names() {
+        let (endpoint, server) = stub_sequence(vec![
+            Reply::Body(LISTING.as_bytes().to_vec()),
+            Reply::Body(container(XML)),
+        ])
+        .await;
+
+        let inputs = sync_whitelist(&endpoint, "admin", "secret")
+            .await
+            .expect("a whitelist");
+        assert_eq!(inputs, ["Input1", "Input2"]);
+        let _ = server.await;
+    }
+
+    /// A listing with no configuration in it stops there - the second request
+    /// is never made.
+    #[tokio::test]
+    async fn a_listing_without_a_configuration_stops_the_sync() {
+        let (endpoint, server) = stub_sequence(vec![Reply::Body(
+            b"Emergency.LoxCC\nMusic.json\n".to_vec(),
+        )])
+        .await;
+
+        let error = load_miniserver_config(&endpoint, "admin", "secret")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SyncError::NoConfigFiles), "{error}");
+
+        let requests = server.await.expect("the stub");
+        assert_eq!(requests.len(), 1, "the download should not have happened");
+    }
+
+    /// An error status on the listing is reported and stops the sync.
+    #[tokio::test]
+    async fn an_unauthorized_listing_stops_the_sync() {
+        let (endpoint, server) = stub_sequence(vec![Reply::Status(401)]).await;
+
+        let error = load_miniserver_config(&endpoint, "admin", "wrong")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SyncError::Status { status: 401, .. }), "{error}");
+        let _ = server.await;
+    }
+
+    /// The Miniserver answers some requests with a JSON error body and status
+    /// 200, so "not a configuration" has to be told apart from "corrupt".
+    #[tokio::test]
+    async fn an_error_body_served_with_200_is_reported_as_such() {
+        let (endpoint, server) = stub_sequence(vec![
+            Reply::Body(LISTING.as_bytes().to_vec()),
+            Reply::Body(br#"{"LL":{"control":"dev/fsget","Code":"403"}}"#.to_vec()),
+        ])
+        .await;
+
+        let error = load_miniserver_config(&endpoint, "admin", "secret")
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().starts_with("Unexpected configuration payload"),
+            "{error}"
+        );
+        let _ = server.await;
+    }
+
+    /// The operator's own configuration, if it is on this machine.
+    ///
+    /// Deliberately not in the repository - it names their rooms and devices -
+    /// so this is a local smoke test rather than CI coverage. It is also the
+    /// only input that has ever exercised what the firmware actually writes: a
+    /// 2.5 MB document with a BOM and CRLF line endings.
+    #[test]
+    fn the_real_configuration_yields_its_inputs() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/sps0.LoxCC");
+        let Ok(raw) = std::fs::read(&path) else {
+            return;
+        };
+        let config_xml = decompress_loxcc(&raw).expect("a container");
+        assert!(
+            config_xml.starts_with(b"\xef\xbb\xbf<?xml version="),
+            "the fixture should start with a BOM"
+        );
+        let inputs = extract_inputs(&config_xml).expect("input names");
+        assert!(
+            !inputs.is_empty(),
+            "a real configuration should name some inputs"
+        );
+    }
+
 }
