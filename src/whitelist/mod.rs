@@ -102,22 +102,26 @@ impl Endpoint {
         })
     }
 
-    /// The port actually dialled.
+    /// The port actually dialled: the one that was configured.
     ///
-    /// BUG, ported deliberately: 443 is treated as a default and therefore
-    /// dialled on **80**. `_build_base_url` wrote `http://{ip}` without a port
-    /// for both 80 and 443, and `crate::miniserver::endpoint` maps 443 to https
-    /// for the websocket - so the two halves have disagreed since the websocket
-    /// move, and only the websocket side is right. Left as it was here so the
-    /// port is a port; the fix is its own commit.
+    /// `_build_base_url` treated 443 as a default alongside 80 and wrote
+    /// `http://{ip}` with no port for both, so a Miniserver configured on 443
+    /// had its filesystem API dialled on **80** - while
+    /// `crate::miniserver::endpoint` correctly maps 443 to https for the
+    /// websocket. The two halves had disagreed since the websocket move, and
+    /// only the websocket side was right.
     fn dialled_port(&self) -> u16 {
-        if matches!(self.port, 80 | 443) { 80 } else { self.port }
+        self.port
     }
 
     /// What goes in the `Host` header, and what a log line calls this server.
+    ///
+    /// Only 80 is elided, because only 80 is the default for the `http` scheme
+    /// these requests use. Spelling 443 out is what makes the port above reach
+    /// the port below.
     fn authority(&self) -> String {
         match self.port {
-            80 | 443 => self.host.clone(),
+            80 => self.host.clone(),
             port => format!("{}:{port}", self.host),
         }
     }
@@ -193,20 +197,20 @@ mod tests {
         assert!(matches!(Endpoint::new(":8080", 80), Err(SyncError::NoHost)));
     }
 
-    /// The default ports are left out of the URL, and 443 is dialled on 80.
+    /// Only 80 is elided, and every configured port is the one dialled.
     ///
-    /// The second half is a bug being reproduced rather than a decision - see
-    /// [`Endpoint::dialled_port`].
+    /// The 443 row is the regression test: `_build_base_url` elided it too, so a
+    /// Miniserver configured on 443 had its filesystem API dialled on 80.
     #[test]
-    fn the_default_ports_are_left_out_of_the_url() {
-        for (port, url, dialled) in [
-            (80u16, "http://ms.local", 80u16),
-            (443, "http://ms.local", 80),
-            (8080, "http://ms.local:8080", 8080),
+    fn only_the_http_default_port_is_left_out_of_the_url() {
+        for (port, url) in [
+            (80u16, "http://ms.local"),
+            (443, "http://ms.local:443"),
+            (8080, "http://ms.local:8080"),
         ] {
             let endpoint = Endpoint::new("ms.local", port).expect("an address");
             assert_eq!(endpoint.base_url(), url, "port {port}");
-            assert_eq!(endpoint.dialled_port(), dialled, "port {port}");
+            assert_eq!(endpoint.dialled_port(), port, "port {port}");
         }
     }
 

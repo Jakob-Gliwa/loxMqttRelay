@@ -185,10 +185,14 @@ impl Relay {
 
     /// Fetch the whitelist from the Miniserver, if that is switched on.
     ///
-    /// Two things here look inconsistent and are deliberate, because they are
-    /// what the Python did and what an operator's config file has been through:
-    /// an empty result keeps the configured whitelist *without* writing it back,
-    /// while a failure keeps it *and* writes it. See the note on each branch.
+    /// Either failure - nothing came back, or nothing could be fetched - keeps
+    /// the configured whitelist and writes nothing. Python's two branches
+    /// disagreed here: the empty one only pushed the list into the processor,
+    /// while the error one also called `update_config`, saving a whitelist that
+    /// had not changed. That write was observable (the file's mtime, and the
+    /// `None` to `""` normalization a first save performs) and it was doing it
+    /// on the one path where the relay had just been told it could not reach the
+    /// Miniserver.
     pub(crate) async fn handle_miniserver_sync(&self) {
         let snapshot = self.config.snapshot();
         if !snapshot.miniserver.sync_with_miniserver {
@@ -222,8 +226,6 @@ impl Relay {
                      ({} entries)",
                     initial.len()
                 );
-                // NOTE: no save here, matching main.py:174-177, which only
-                // pushes the list into the processor.
                 self.core
                     .update_topic_whitelist(initial.into_iter().collect());
             }
@@ -243,16 +245,6 @@ impl Relay {
             Err(e) => {
                 error!("Failed to sync with miniserver: {e}");
                 info!("Keeping whitelist from config");
-                // NOTE: this branch DOES save, writing the unchanged whitelist
-                // back out - which is observable in the file's mtime and in the
-                // None-to-"" normalization a first save performs. Preserved
-                // because it is what the Python did; making the two branches
-                // agree is a behaviour change and belongs in its own commit.
-                self.config.update_section(
-                    ConfigSection::Topics,
-                    &[("topic_whitelist".to_owned(), CfgValue::from_set(&initial))],
-                    ListMode::Set,
-                );
                 self.core
                     .update_topic_whitelist(initial.into_iter().collect());
             }
