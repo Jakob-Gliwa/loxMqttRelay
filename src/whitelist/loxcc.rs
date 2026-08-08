@@ -446,4 +446,44 @@ mod tests {
         assert!(decompress(b"").is_err());
         assert!(decompress(b"PK").is_err());
     }
+    /// No truncation of a valid payload may panic.
+    ///
+    /// This reads what a Miniserver sent, so every length in it is attacker- or
+    /// accident-controlled: a header that claims more than follows, a central
+    /// directory pointing past the end, an archive cut mid-entry. The reader
+    /// indexes into slices in a dozen places and each one has to be a reported
+    /// error rather than an abort - the relay stays up on bad input or it is not
+    /// a relay.
+    #[test]
+    fn no_truncation_of_a_valid_payload_panics() {
+        for full in [
+            container(XML),
+            container_framed(XML),
+            archive(ZIP_ENTRY, &container(XML), false, 0),
+            archive(ZIP_ENTRY, &container(XML), true, 0),
+        ] {
+            for cut in 0..full.len() {
+                // The result is uninteresting; not panicking is the assertion.
+                let _ = decompress(&full[..cut]);
+            }
+            // And every single-byte corruption of the header region, where the
+            // lengths and offsets live.
+            for at in 0..full.len().min(64) {
+                let mut damaged = full.clone();
+                damaged[at] ^= 0xff;
+                let _ = decompress(&damaged);
+            }
+        }
+    }
+
+    /// A central directory that points outside the archive is reported.
+    #[test]
+    fn a_directory_offset_past_the_end_is_reported() {
+        let mut zip = archive(ZIP_ENTRY, &container(XML), false, 0);
+        let eocd = zip.len() - 22;
+        // The offset field of the end-of-directory record.
+        zip[eocd + 16..eocd + 20].copy_from_slice(&0xffff_fffeu32.to_le_bytes());
+        assert!(decompress(&zip).is_err());
+    }
+
 }
