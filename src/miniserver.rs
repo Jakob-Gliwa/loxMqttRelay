@@ -21,6 +21,8 @@ use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::{future_into_py, get_runtime};
 use tokio::sync::mpsc;
 
+use crate::config::AppConfig;
+use crate::error::RelayError;
 use crate::egress::{Egress, EgressError};
 use crate::util::{lock_recover, loggable};
 
@@ -196,7 +198,10 @@ fn warrants_resync(event: &ClientEvent) -> bool {
 }
 
 /// Turns a reconnect into a whitelist resync.
-async fn lifecycle_worker(mut events: mpsc::Receiver<ClientEvent>, relay: Py<PyAny>) {
+async fn lifecycle_worker(
+    mut events: mpsc::Receiver<ClientEvent>,
+    resync: Arc<dyn crate::signals::ResyncTrigger>,
+) {
     while let Some(event) = events.recv().await {
         match event {
             ClientEvent::Connected => debug!("Miniserver websocket connected"),
@@ -210,14 +215,7 @@ async fn lifecycle_worker(mut events: mpsc::Receiver<ClientEvent>, relay: Py<PyA
         if !warrants_resync(&event) {
             continue;
         }
-        Python::attach(|py| {
-            if let Err(e) = relay
-                .bind(py)
-                .call_method0(pyo3::intern!(py, "schedule_miniserver_sync"))
-            {
-                error!("Could not schedule the whitelist resync: {e}");
-            }
-        });
+        resync.request_resync();
     }
     debug!("Miniserver lifecycle worker stopped");
 }
@@ -258,30 +256,94 @@ impl MiniserverClient {
     }
 }
 
+/// Asks `main.py` for a resync. Goes when `main.py` does.
+struct PyResyncTrigger {
+    relay: Py<PyAny>,
+}
+
+impl crate::signals::ResyncTrigger for PyResyncTrigger {
+    fn request_resync(&self) {
+        Python::attach(|py| {
+            if let Err(e) = self
+                .relay
+                .bind(py)
+                .call_method0(pyo3::intern!(py, "schedule_miniserver_sync"))
+            {
+                error!("Could not schedule the whitelist resync: {e}");
+            }
+        });
+    }
+}
+
+/// Open the websocket and start the lifecycle worker.
+pub(crate) async fn connect_with(
+    shared: Arc<MsShared>,
+    cfg: ConnectConfig,
+    url: String,
+    resync: Arc<dyn crate::signals::ResyncTrigger>,
+) -> Result<(), RelayError> {
+    let (events_tx, events_rx) = mpsc::channel(EVENT_CHANNEL_DEPTH);
+    tokio::spawn(lifecycle_worker(events_rx, resync));
+
+    info!("Connecting to the Miniserver websocket at {url}");
+    let client = LoxClient::connect(cfg, RelayHandler { events: events_tx })
+        .await
+        .map_err(|e| RelayError::Miniserver(e.to_string()))?;
+    shared.client.store(Some(Arc::new(client)));
+    Ok(())
+}
+
+impl MiniserverClient {
+    pub(crate) fn connect_config(&self) -> ConnectConfig {
+        ConnectConfig {
+            tls: self.tls.clone(),
+            // The relay writes, it does not listen: without the event table
+            // there is nothing to receive and no event slot to occupy on the
+            // Miniserver.
+            receive_updates: false,
+            command_channel_depth: COMMAND_CHANNEL_DEPTH,
+            ..ConnectConfig::new(self.url.clone(), self.user.clone(), self.password.clone())
+        }
+    }
+
+    pub(crate) fn url(&self) -> String {
+        self.url.clone()
+    }
+
+    /// The websocket client as the relay builds it, from the loaded configuration.
+    pub(crate) fn build(config: &AppConfig) -> Self {
+        let miniserver = &config.miniserver;
+        // The configured address may carry a port of its own; the port field is
+        // what decides the scheme, so only the host part is used here.
+        let ip = miniserver
+            .miniserver_ip
+            .split(':')
+            .next()
+            .unwrap_or(&miniserver.miniserver_ip);
+        let port = u16::try_from(miniserver.miniserver_port).unwrap_or(80);
+
+        let (url, tls) = endpoint(ip, port);
+        info!("Miniserver websocket configured for {url}");
+
+        MiniserverClient {
+            shared: Arc::new(MsShared::new()),
+            url,
+            tls,
+            user: miniserver.miniserver_user.clone(),
+            password: miniserver.miniserver_pass.clone(),
+        }
+    }
+}
+
 #[pymethods]
 impl MiniserverClient {
     #[new]
     #[pyo3(text_signature = "(self, global_config)")]
-    fn new(global_config: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let miniserver = global_config.getattr("miniserver")?;
-        // The configured address may carry a port of its own; the port field is
-        // what decides the scheme, so only the host part is used here.
-        let ip: String = miniserver.getattr("miniserver_ip")?.extract()?;
-        let ip = ip.split(':').next().unwrap_or(&ip).to_string();
-        let port: u16 = miniserver.getattr("miniserver_port")?.extract()?;
-        let user: String = miniserver.getattr("miniserver_user")?.extract()?;
-        let password: String = miniserver.getattr("miniserver_pass")?.extract()?;
-
-        let (url, tls) = endpoint(&ip, port);
-        info!("Miniserver websocket configured for {url}");
-
-        Ok(MiniserverClient {
-            shared: Arc::new(MsShared::new()),
-            url,
-            tls,
-            user,
-            password,
-        })
+    fn new(py: Python<'_>, global_config: &Bound<'_, PyAny>) -> PyResult<Self> {
+        Ok(MiniserverClient::build(&crate::app_config_from_py(
+            py,
+            global_config,
+        )?))
     }
 
     /// Whether a websocket session is up right now.
@@ -308,30 +370,13 @@ impl MiniserverClient {
     #[pyo3(text_signature = "(self, relay)")]
     fn connect<'py>(&self, py: Python<'py>, relay: Py<PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let shared = Arc::clone(&self.shared);
-        let (events_tx, events_rx) = mpsc::channel(EVENT_CHANNEL_DEPTH);
-
-        let cfg = ConnectConfig {
-            tls: self.tls.clone(),
-            // The relay writes, it does not listen: without the event table
-            // there is nothing to receive and no event slot to occupy on the
-            // Miniserver.
-            receive_updates: false,
-            command_channel_depth: COMMAND_CHANNEL_DEPTH,
-            ..ConnectConfig::new(self.url.clone(), self.user.clone(), self.password.clone())
-        };
+        let cfg = self.connect_config();
         let url = self.url.clone();
-
+        let resync: Arc<dyn crate::signals::ResyncTrigger> = Arc::new(PyResyncTrigger { relay });
         future_into_py(py, async move {
-            get_runtime().spawn(lifecycle_worker(events_rx, relay));
-
-            info!("Connecting to the Miniserver websocket at {url}");
-            let client = LoxClient::connect(cfg, RelayHandler { events: events_tx })
+            connect_with(shared, cfg, url, resync)
                 .await
-                .map_err(|e| {
-                    PyRuntimeError::new_err(format!("Miniserver websocket connect failed: {e}"))
-                })?;
-            shared.client.store(Some(Arc::new(client)));
-            Ok(())
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))
         })
     }
 

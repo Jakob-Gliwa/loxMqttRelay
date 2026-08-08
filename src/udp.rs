@@ -26,6 +26,8 @@ use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::mqtt::{MqttClient, MqttShared};
+use crate::config::AppConfig;
+use crate::error::RelayError;
 use crate::util::{is_py_space, lock_recover, loggable, py_strip};
 
 /// Upper bound for the "warn once per sender" bookkeeping, so a flood of
@@ -776,7 +778,7 @@ async fn serve(
 /// end the next one on its first poll.
 ///
 /// [`stop`]: UdpServer::stop
-struct Running {
+pub(crate) struct Running {
     shutdown: Arc<Notify>,
     task: JoinHandle<()>,
 }
@@ -804,22 +806,159 @@ pub struct UdpServer {
     running: Arc<Mutex<Option<Running>>>,
 }
 
+/// Everything [`start_with`] needs, copied out of the server.
+///
+/// The future has to be `'static` for the Python awaitable, so it cannot borrow
+/// the server - and writing the bind twice is how the wheel and the binary would
+/// drift apart while both exist.
+pub(crate) struct StartParams {
+    shared: Arc<MqttShared>,
+    slot: Arc<Mutex<Option<Running>>>,
+    port: u16,
+    miniserver_ip: String,
+    allowed_sources: Vec<String>,
+    filter_enabled: bool,
+}
+
+/// Bind the socket, set up the source filter, and start the receive loop.
+pub(crate) async fn start_with(params: StartParams) -> Result<(), RelayError> {
+    let StartParams {
+        shared,
+        slot,
+        port,
+        miniserver_ip,
+        allowed_sources,
+        filter_enabled,
+    } = params;
+
+    // Binding first would report this as "address already in use", which says
+    // nothing about the caller having started the server twice.
+    if lock_recover(&slot).as_ref().is_some_and(Running::is_live) {
+        return Err(RelayError::Udp(format!(
+            "UDP-IN is already listening on port {port}"
+        )));
+    }
+
+    // 0.0.0.0 rather than dual-stack on purpose: an IPv4 peer on a dual-stack
+    // socket shows up as ::ffff:192.168.1.10 and would never match a configured
+    // address.
+    let socket = UdpSocket::bind(("0.0.0.0", port))
+        .await
+        .map_err(|e| RelayError::Udp(format!("cannot bind port {port}: {e}")))?;
+
+    let sources = configured_sources(&miniserver_ip, &allowed_sources);
+
+    // Name resolution blocks, and it happens once, at startup.
+    let filter = tokio::task::spawn_blocking(move || {
+        let gateway = container_gateway();
+        let allowed = configure_source_filter(
+            &miniserver_ip,
+            &allowed_sources,
+            filter_enabled,
+            &resolve_host,
+        );
+        SourceFilter::new(filter_enabled, allowed, gateway)
+    })
+    .await
+    .map_err(|e| RelayError::Udp(format!("could not set up source filtering: {e}")))?;
+
+    let (found, late_addresses) = mpsc::channel(1);
+    if filter.awaits_addresses() {
+        warn!(
+            "UDP-IN drops every datagram until a configured sender resolves; retrying every {} \
+             seconds",
+            SOURCE_RETRY_INTERVAL.as_secs()
+        );
+        tokio::spawn(resolve_sources_in_background(sources, found));
+    }
+
+    let shutdown = Arc::new(Notify::new());
+    let task = tokio::spawn(serve(
+        socket,
+        shared,
+        filter,
+        late_addresses,
+        Arc::clone(&shutdown),
+    ));
+    if let Some(previous) = lock_recover(&slot).replace(Running { shutdown, task }) {
+        // Only reachable if two starts raced past the check above, and then the
+        // bind would have failed. Abort rather than drop: a dropped handle
+        // detaches its task instead of ending it.
+        previous.task.abort();
+    }
+    info!("UDP-IN listening on port {port}");
+    Ok(())
+}
+
+/// Close the socket and wait for the receive loop to finish.
+pub(crate) async fn stop_with(running: Option<Running>) {
+    if let Some(run) = running
+        && let Err(e) = run.task.await
+        && !e.is_cancelled()
+    {
+        warn!("UDP receive loop ended abnormally: {e}");
+    }
+}
+
+impl UdpServer {
+    pub(crate) fn start_params(&self) -> StartParams {
+        StartParams {
+            shared: Arc::clone(&self.shared),
+            slot: Arc::clone(&self.running),
+            port: self.port,
+            miniserver_ip: self.miniserver_ip.clone(),
+            allowed_sources: self.allowed_sources.clone(),
+            filter_enabled: self.filter_enabled,
+        }
+    }
+
+    /// Take the running loop out of the slot and wake it.
+    ///
+    /// Separate from the awaiting half so the wake happens synchronously, before
+    /// anything is awaited - the caller then only has the join left to do.
+    pub(crate) fn signal_stop(&self) -> Option<Running> {
+        let running = lock_recover(&self.running).take();
+        if let Some(run) = &running {
+            // `notify_waiters` wakes a loop that is already parked on
+            // `notified()` but stores nothing; `notify_one` covers the window
+            // where the task is spawned and not yet polled, by leaving a permit
+            // its first poll consumes. That permit can outlive the loop, and
+            // dropping the run here is what keeps it from reaching the next one.
+            run.shutdown.notify_waiters();
+            run.shutdown.notify_one();
+        }
+        running
+    }
+
+    /// The listener as the relay builds it, from the loaded configuration.
+    ///
+    /// Takes the MQTT client's shared state rather than the client, because that
+    /// is all it needs: a datagram is parsed and published entirely in Rust.
+    pub(crate) fn build(config: &AppConfig, shared: Arc<MqttShared>) -> Self {
+        UdpServer {
+            shared,
+            port: u16::try_from(config.udp.udp_in_port).unwrap_or(11884),
+            miniserver_ip: config.miniserver.miniserver_ip.clone(),
+            allowed_sources: config.udp.udp_allowed_sources.clone(),
+            filter_enabled: config.udp.udp_source_filter_enabled,
+            running: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
 #[pymethods]
 impl UdpServer {
     #[new]
     #[pyo3(text_signature = "(self, global_config, mqtt_client)")]
-    fn new(global_config: &Bound<'_, PyAny>, mqtt_client: PyRef<'_, MqttClient>) -> PyResult<Self> {
-        let udp = global_config.getattr("udp")?;
-        let miniserver = global_config.getattr("miniserver")?;
-
-        Ok(Self {
-            shared: mqtt_client.shared(),
-            port: udp.getattr("udp_in_port")?.extract()?,
-            miniserver_ip: miniserver.getattr("miniserver_ip")?.extract()?,
-            allowed_sources: udp.getattr("udp_allowed_sources")?.extract()?,
-            filter_enabled: udp.getattr("udp_source_filter_enabled")?.extract()?,
-            running: Arc::new(Mutex::new(None)),
-        })
+    fn new(
+        py: Python<'_>,
+        global_config: &Bound<'_, PyAny>,
+        mqtt_client: PyRef<'_, MqttClient>,
+    ) -> PyResult<Self> {
+        Ok(UdpServer::build(
+            &crate::app_config_from_py(py, global_config)?,
+            mqtt_client.shared(),
+        ))
     }
 
     /// Bind the socket and start accepting datagrams.
@@ -831,73 +970,11 @@ impl UdpServer {
     /// every sender is worse than one that refuses to start.
     #[pyo3(text_signature = "(self)")]
     fn start<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let shared = Arc::clone(&self.shared);
-        let slot = Arc::clone(&self.running);
-        let port = self.port;
-        let miniserver_ip = self.miniserver_ip.clone();
-        let allowed_sources = self.allowed_sources.clone();
-        let filter_enabled = self.filter_enabled;
-
+        let params = self.start_params();
         future_into_py(py, async move {
-            // Binding first would report this as "address already in use", which
-            // says nothing about the caller having started the server twice.
-            if lock_recover(&slot).as_ref().is_some_and(Running::is_live) {
-                return Err(PyRuntimeError::new_err(format!(
-                    "UDP-IN is already listening on port {port}"
-                )));
-            }
-
-            // 0.0.0.0 rather than dual-stack on purpose: an IPv4 peer on a
-            // dual-stack socket shows up as ::ffff:192.168.1.10 and would never
-            // match a configured address.
-            let socket = UdpSocket::bind(("0.0.0.0", port))
+            start_with(params)
                 .await
-                .map_err(|e| PyRuntimeError::new_err(format!("Cannot bind UDP port {port}: {e}")))?;
-
-            let sources = configured_sources(&miniserver_ip, &allowed_sources);
-
-            // Name resolution blocks, and it happens once, at startup.
-            let filter = tokio::task::spawn_blocking(move || {
-                let gateway = container_gateway();
-                let allowed = configure_source_filter(
-                    &miniserver_ip,
-                    &allowed_sources,
-                    filter_enabled,
-                    &resolve_host,
-                );
-                SourceFilter::new(filter_enabled, allowed, gateway)
-            })
-            .await
-            .map_err(|e| {
-                PyRuntimeError::new_err(format!("Could not set up UDP source filtering: {e}"))
-            })?;
-
-            let (found, late_addresses) = mpsc::channel(1);
-            if filter.awaits_addresses() {
-                warn!(
-                    "UDP-IN drops every datagram until a configured sender resolves; retrying \
-                     every {} seconds",
-                    SOURCE_RETRY_INTERVAL.as_secs()
-                );
-                get_runtime().spawn(resolve_sources_in_background(sources, found));
-            }
-
-            let shutdown = Arc::new(Notify::new());
-            let task = get_runtime().spawn(serve(
-                socket,
-                shared,
-                filter,
-                late_addresses,
-                Arc::clone(&shutdown),
-            ));
-            if let Some(previous) = lock_recover(&slot).replace(Running { shutdown, task }) {
-                // Only reachable if two starts raced past the check above, and
-                // then the bind would have failed. Abort rather than drop: a
-                // dropped handle detaches its task instead of ending it.
-                previous.task.abort();
-            }
-            info!("UDP-IN listening on port {port}");
-            Ok(())
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))
         })
     }
 
@@ -909,24 +986,9 @@ impl UdpServer {
     /// [`start`]: UdpServer::start
     #[pyo3(text_signature = "(self)")]
     fn stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let running = lock_recover(&self.running).take();
-        if let Some(run) = &running {
-            // `notify_waiters` wakes a loop that is already parked on
-            // `notified()` but stores nothing; `notify_one` covers the window
-            // where the task is spawned and not yet polled, by leaving a permit
-            // its first poll consumes. That permit can outlive the loop, and
-            // dropping the run here is what keeps it from reaching the next one.
-            run.shutdown.notify_waiters();
-            run.shutdown.notify_one();
-        }
-
+        let running = self.signal_stop();
         future_into_py(py, async move {
-            if let Some(run) = running
-                && let Err(e) = run.task.await
-                && !e.is_cancelled()
-            {
-                warn!("UDP receive loop ended abnormally: {e}");
-            }
+            stop_with(running).await;
             Ok(())
         })
     }

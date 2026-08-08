@@ -32,6 +32,8 @@ use pyo3_async_runtimes::tokio::{future_into_py, get_runtime};
 use tokio::sync::{Notify, mpsc};
 
 use crate::MiniserverDataProcessor;
+use crate::config::AppConfig;
+use crate::error::RelayError;
 use crate::control::ControlSink;
 use crate::miniserver::LoxEgress;
 use crate::process::Core;
@@ -551,13 +553,6 @@ async fn ingress_worker(
     info!("MQTT ingress worker stopped");
 }
 
-fn config_value<'py>(
-    config: &Bound<'py, PyAny>,
-    section: &str,
-    field: &str,
-) -> PyResult<Bound<'py, PyAny>> {
-    config.getattr(section)?.getattr(field)
-}
 
 /// MQTT 5 client handle exposed to Python.
 ///
@@ -579,31 +574,159 @@ impl MqttClient {
     }
 }
 
+/// Everything [`connect_with`] needs, copied out of the client.
+///
+/// A separate struct because the future has to be `'static` for the Python
+/// awaitable, so it cannot borrow the client - and because the alternative,
+/// writing the connect twice, is how the wheel and the binary would drift apart
+/// while both exist.
+pub(crate) struct ConnectParams {
+    shared: Arc<MqttShared>,
+    reconnect: StandardReconnectPolicy,
+    url: String,
+    status_topic: String,
+    client_id: ClientId,
+    credentials: Option<(String, String)>,
+    topics: Vec<String>,
+    core: Arc<Core<LoxEgress>>,
+    control: Arc<dyn ControlSink>,
+}
+
+/// Connect, subscribe, and start the two long-lived workers.
+pub(crate) async fn connect_with(params: ConnectParams) -> Result<(), RelayError> {
+    let ConnectParams {
+        shared,
+        reconnect,
+        url,
+        status_topic,
+        client_id,
+        credentials,
+        topics,
+        core,
+        control,
+    } = params;
+
+    let (tx, rx) = mpsc::channel::<PublishMessage>(INBOUND_CAPACITY);
+    let notify = Arc::new(Notify::new());
+
+    let receive_maximum = NonZeroU16::new(u16::try_from(INBOUND_CAPACITY).unwrap_or(u16::MAX))
+        .expect("non-zero receive maximum");
+    let command_capacity =
+        NonZeroUsize::new(COMMAND_CAPACITY).expect("non-zero command capacity");
+
+    let mut builder = ClientBuilder::new(&url)
+        .map_err(|e| RelayError::Mqtt(format!("invalid broker url '{url}': {e}")))?
+        .inbound_sink(tx)
+        .reconnect(reconnect.clone())
+        .lifecycle(ConnectSignal {
+            shared: Arc::clone(&shared),
+            notify: Arc::clone(&notify),
+        })
+        .options(move |options| {
+            options
+                .client_id(client_id)
+                .keep_alive(KEEP_ALIVE)
+                .receive_maximum(receive_maximum)
+                .command_channel_capacity(command_capacity)
+                .tcp_nodelay(true)
+        });
+
+    if let Some((user, password)) = credentials {
+        builder = builder.credentials(StaticCredentials::new(user, password));
+    }
+
+    info!("Connecting to MQTT broker at {url}");
+    let client = builder
+        .connect()
+        .await
+        .map_err(|e| RelayError::Mqtt(e.to_string()))?;
+    shared.client.store(Some(Arc::new(client)));
+
+    tokio::spawn(ingress_worker(rx, core, control));
+    tokio::spawn(resubscribe_loop(
+        Arc::clone(&shared),
+        topics,
+        status_topic,
+        notify,
+        reconnect,
+    ));
+
+    Ok(())
+}
+
+/// Say goodbye on the status topic, then close the session.
+///
+/// The farewell is given a deadline of its own. A socket can be dead without
+/// glide knowing yet - the keep-alive runs for a minute - and the publish would
+/// then sit out the acknowledgement timeout. `docker stop` allows ten seconds
+/// for the whole shutdown, and a status message nobody is left to receive must
+/// not eat into them.
+pub(crate) async fn disconnect_with(shared: Arc<MqttShared>, status_topic: String) {
+    if let Some(client) = shared.handle() {
+        let farewell = shared.publish_status(&status_topic, STATUS_DISCONNECTING);
+        if tokio::time::timeout(FAREWELL_TIMEOUT, farewell).await.is_err() {
+            warn!("Timed out announcing the shutdown on the status topic");
+        }
+        if let Err(e) = client.shutdown().await {
+            warn!("Error during MQTT shutdown: {e}");
+        }
+    }
+    shared.session_live.store(false, Ordering::Release);
+    shared.client.store(None);
+}
+
+impl MqttClient {
+    pub(crate) fn connect_params(
+        &self,
+        topics: Vec<String>,
+        core: Arc<Core<LoxEgress>>,
+        control: Arc<dyn ControlSink>,
+    ) -> ConnectParams {
+        ConnectParams {
+            shared: Arc::clone(&self.shared),
+            reconnect: self.reconnect.clone(),
+            url: self.broker_url.clone(),
+            status_topic: self.status_topic.clone(),
+            client_id: ClientId::from_prefix(&self.client_id_prefix),
+            credentials: self.credentials.clone(),
+            topics,
+            core,
+            control,
+        }
+    }
+
+    pub(crate) fn status_topic(&self) -> String {
+        self.status_topic.clone()
+    }
+
+    /// The client as the relay builds it, from the loaded configuration.
+    pub(crate) fn build(config: &AppConfig) -> Self {
+        let broker = &config.broker;
+        // Glide appends a UUID, so the configured id acts as a prefix. That keeps
+        // ids unique across restarts, like the old timestamp suffix did.
+        let credentials = broker
+            .user
+            .clone()
+            .filter(|u| !u.is_empty())
+            .map(|u| (u, broker.password.clone().unwrap_or_default()));
+
+        MqttClient {
+            shared: Arc::new(MqttShared::new()),
+            reconnect: StandardReconnectPolicy::new(RECONNECT_DELAY, MAX_AUTH_BACKOFF),
+            broker_url: format!("mqtt://{}:{}", broker.host, broker.port),
+            client_id_prefix: broker.client_id.clone(),
+            status_topic: format!("{}status", config.general.base_topic),
+            credentials,
+        }
+    }
+}
+
 #[pymethods]
 impl MqttClient {
     #[new]
     #[pyo3(text_signature = "(self, global_config)")]
-    fn new(global_config: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let host: String = config_value(global_config, "broker", "host")?.extract()?;
-        let port: u16 = config_value(global_config, "broker", "port")?.extract()?;
-        let user: Option<String> = config_value(global_config, "broker", "user")?.extract()?;
-        let password: Option<String> =
-            config_value(global_config, "broker", "password")?.extract()?;
-        let client_id: String = config_value(global_config, "broker", "client_id")?.extract()?;
-        let base_topic: String = config_value(global_config, "general", "base_topic")?.extract()?;
-
-        // Glide appends a UUID, so the configured id acts as a prefix. That keeps
-        // ids unique across restarts, like the old timestamp suffix did.
-        let credentials = user.filter(|u| !u.is_empty()).map(|u| (u, password.unwrap_or_default()));
-
-        Ok(Self {
-            shared: Arc::new(MqttShared::new()),
-            reconnect: StandardReconnectPolicy::new(RECONNECT_DELAY, MAX_AUTH_BACKOFF),
-            broker_url: format!("mqtt://{host}:{port}"),
-            client_id_prefix: client_id,
-            status_topic: format!("{base_topic}status"),
-            credentials,
-        })
+    fn new(py: Python<'_>, global_config: &Bound<'_, PyAny>) -> PyResult<Self> {
+        Ok(MqttClient::build(&crate::app_config_from_py(py, global_config)?))
     }
 
     /// Whether an MQTT session is up right now.
@@ -631,63 +754,11 @@ impl MqttClient {
             let bound = processor.bind(py).borrow();
             (bound.core(), bound.sink())
         };
-
-        let shared = Arc::clone(&self.shared);
-        let reconnect = self.reconnect.clone();
-        let url = self.broker_url.clone();
-        let status_topic = self.status_topic.clone();
-        let client_id = ClientId::from_prefix(&self.client_id_prefix);
-        let credentials = self.credentials.clone();
-
+        let params = self.connect_params(topics, core, control);
         future_into_py(py, async move {
-            let (tx, rx) = mpsc::channel::<PublishMessage>(INBOUND_CAPACITY);
-            let notify = Arc::new(Notify::new());
-
-            let receive_maximum = NonZeroU16::new(
-                u16::try_from(INBOUND_CAPACITY).unwrap_or(u16::MAX),
-            )
-            .expect("non-zero receive maximum");
-            let command_capacity =
-                NonZeroUsize::new(COMMAND_CAPACITY).expect("non-zero command capacity");
-
-            let mut builder = ClientBuilder::new(&url)
-                .map_err(|e| PyRuntimeError::new_err(format!("Invalid broker url '{url}': {e}")))?
-                .inbound_sink(tx)
-                .reconnect(reconnect.clone())
-                .lifecycle(ConnectSignal {
-                    shared: Arc::clone(&shared),
-                    notify: Arc::clone(&notify),
-                })
-                .options(move |options| {
-                    options
-                        .client_id(client_id)
-                        .keep_alive(KEEP_ALIVE)
-                        .receive_maximum(receive_maximum)
-                        .command_channel_capacity(command_capacity)
-                        .tcp_nodelay(true)
-                });
-
-            if let Some((user, password)) = credentials {
-                builder = builder.credentials(StaticCredentials::new(user, password));
-            }
-
-            info!("Connecting to MQTT broker at {url}");
-            let client = builder
-                .connect()
+            connect_with(params)
                 .await
-                .map_err(|e| PyRuntimeError::new_err(format!("MQTT connect failed: {e}")))?;
-            shared.client.store(Some(Arc::new(client)));
-
-            get_runtime().spawn(ingress_worker(rx, core, control));
-            get_runtime().spawn(resubscribe_loop(
-                Arc::clone(&shared),
-                topics,
-                status_topic,
-                notify,
-                reconnect,
-            ));
-
-            Ok(())
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))
         })
     }
 
@@ -745,20 +816,8 @@ impl MqttClient {
     fn disconnect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let shared = Arc::clone(&self.shared);
         let status_topic = self.status_topic.clone();
-
         future_into_py(py, async move {
-            if let Some(client) = shared.handle() {
-                let farewell = shared.publish_status(&status_topic, STATUS_DISCONNECTING);
-                let announced = tokio::time::timeout(FAREWELL_TIMEOUT, farewell).await;
-                if announced.is_err() {
-                    warn!("Timed out announcing the shutdown on the status topic");
-                }
-                if let Err(e) = client.shutdown().await {
-                    warn!("Error during MQTT shutdown: {e}");
-                }
-            }
-            shared.session_live.store(false, Ordering::Release);
-            shared.client.store(None);
+            disconnect_with(shared, status_topic).await;
             Ok(())
         })
     }

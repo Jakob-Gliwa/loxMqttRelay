@@ -1,0 +1,90 @@
+//! How the relay asks itself to do something.
+//!
+//! Two things used to cross into Python from a tokio thread:
+//! `schedule_miniserver_sync`, from the websocket lifecycle worker and from the
+//! Miniserver startup topic, and `restart_relay`, from a config update. Both
+//! were dispatched with `asyncio.run_coroutine_threadsafe` or
+//! `call_soon_threadsafe`, because the caller was never on the event loop.
+//!
+//! Natively they are just channels. [`Signals`] is cheap to clone and every
+//! method on it is callable from any task without blocking or failing, which is
+//! what the callers need - a lifecycle hook cannot wait, and a control topic
+//! must not be able to fail because nobody happened to be listening.
+
+use std::sync::Arc;
+
+use log::{debug, info};
+use tokio::sync::{Notify, watch};
+
+/// Something that can ask for a whitelist resync.
+///
+/// A trait so [`crate::miniserver::lifecycle_worker`] does not have to know
+/// whether the relay above it is Rust or Python. There are two implementors
+/// while both exist; the Python one goes with `main.py`.
+pub(crate) trait ResyncTrigger: Send + Sync {
+    fn request_resync(&self);
+}
+
+/// Why the relay is stopping, and whether it should come back.
+#[derive(Clone, Debug)]
+pub(crate) struct StopReason {
+    pub(crate) reason: String,
+    pub(crate) restart: bool,
+}
+
+/// The relay's two internal signals.
+#[derive(Clone)]
+pub(crate) struct Signals {
+    /// Wakes the resync worker.
+    ///
+    /// Coalescing by construction: a request that arrives while one is pending
+    /// is swallowed, which is what the bounded lifecycle channel already did
+    /// with its `try_send`. Two resyncs back to back would download the same
+    /// configuration twice.
+    resync: Arc<Notify>,
+    /// Carries the shutdown decision, exactly once.
+    stop: watch::Sender<Option<StopReason>>,
+}
+
+impl Signals {
+    pub(crate) fn new() -> (Self, watch::Receiver<Option<StopReason>>) {
+        let (stop, stop_rx) = watch::channel(None);
+        (
+            Signals {
+                resync: Arc::new(Notify::new()),
+                stop,
+            },
+            stop_rx,
+        )
+    }
+
+    /// Ask the relay to shut down. Safe to call more than once.
+    ///
+    /// The first call wins, including its restart decision - so a second
+    /// SIGTERM arriving during a config-change shutdown cannot turn a restart
+    /// into a plain stop, or the other way round.
+    pub(crate) fn request_stop(&self, reason: impl Into<String>, restart: bool) {
+        let reason = reason.into();
+        self.stop.send_if_modified(|slot| {
+            if slot.is_some() {
+                info!("Shutdown already under way, ignoring: {reason}");
+                return false;
+            }
+            info!("Shutting down: {reason}");
+            *slot = Some(StopReason { reason, restart });
+            true
+        });
+    }
+
+    /// Wait for the next resync request.
+    pub(crate) async fn resync_requested(&self) {
+        self.resync.notified().await;
+    }
+}
+
+impl ResyncTrigger for Signals {
+    fn request_resync(&self) {
+        debug!("Whitelist resync requested");
+        self.resync.notify_one();
+    }
+}

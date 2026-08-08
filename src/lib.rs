@@ -23,13 +23,17 @@ use pyo3::types::PyDict;
 mod config;
 mod control;
 mod egress;
+mod error;
 mod miniserver;
 mod mqtt;
 mod process;
+mod signals;
 mod udp;
 mod util;
 mod whitelist;
 
+use config::AppConfig;
+use config::value::CfgValue;
 use control::PyControlSink;
 use miniserver::{LoxEgress, MiniserverClient};
 use mqtt::MqttClient;
@@ -279,6 +283,60 @@ impl MiniserverDataProcessor {
     pub(crate) fn sink(&self) -> Arc<dyn control::ControlSink> {
         Arc::clone(&self.sink) as Arc<dyn control::ControlSink>
     }
+}
+
+/// TEMPORARY: read the Python `global_config` object into the Rust model.
+///
+/// While `main.py` is still in charge, the configuration is loaded, validated
+/// and held by Python, and the four components are constructed from it. Rather
+/// than have each of them reach across the boundary for its own handful of
+/// fields - which is what they used to do, with a `getattr` chain apiece - the
+/// whole thing is read once, here, and every component is then built from the
+/// same [`AppConfig`] the native binary builds them from.
+///
+/// So there is one construction path rather than two, which is the point: the
+/// binary cannot drift away from the wheel while both exist. This function is
+/// the only thing that goes when Python does.
+///
+/// Driven off [`config::schema::FIELDS`], so a field added to the model is
+/// picked up here without being mentioned again.
+fn app_config_from_py(py: Python<'_>, global_config: &Bound<'_, PyAny>) -> PyResult<AppConfig> {
+    let mut config = AppConfig::default();
+    for spec in config::schema::FIELDS {
+        let value = global_config
+            .getattr(spec.section.as_str())?
+            .getattr(spec.name)?;
+        config.set_field(spec, py_to_cfg_value(py, &value)?);
+    }
+    Ok(config)
+}
+
+/// One Python configuration value, in the model's terms.
+///
+/// Deliberately narrow: the values are known to have passed Python's own
+/// validation, so anything that is not one of these shapes is a bug rather than
+/// bad input.
+fn py_to_cfg_value(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<CfgValue> {
+    if value.is_none() {
+        return Ok(CfgValue::Null);
+    }
+    // Before the integer check: in Python a bool *is* an int.
+    if let Ok(flag) = value.extract::<bool>() {
+        return Ok(CfgValue::Bool(flag));
+    }
+    if let Ok(number) = value.extract::<i64>() {
+        return Ok(CfgValue::Int(i128::from(number)));
+    }
+    if let Ok(text) = value.extract::<String>() {
+        return Ok(CfgValue::Str(text));
+    }
+    // A list, or the set that topic_whitelist is - pyo3's Vec extraction
+    // refuses a set, so anything iterable is walked instead.
+    let mut items = Vec::new();
+    for item in value.try_iter()? {
+        items.push(py_to_cfg_value(py, &item?)?);
+    }
+    Ok(CfgValue::List(items))
 }
 
 /// TEMPORARY: the whitelist sync's two pure halves, reachable from Python.
