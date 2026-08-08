@@ -236,8 +236,8 @@ async fn lifecycle_worker(
 
 /// The base URL and TLS policy for a configured Miniserver.
 ///
-/// Mirrors what the Python handler derived: HTTPS only on 443, and the port
-/// spelled out unless it is a default. The pin mode matters because a
+/// HTTPS only on 443, and the port spelled out unless it is a default. The pin
+/// mode matters because a
 /// Miniserver reached by IP presents a CloudDNS certificate whose name never
 /// matches the address dialled, so WebPKI validation cannot succeed.
 fn endpoint(ip: &str, port: u16) -> (String, TlsMode) {
@@ -250,11 +250,11 @@ fn endpoint(ip: &str, port: u16) -> (String, TlsMode) {
     (format!("http://{ip}:{port}"), TlsMode::WebPki)
 }
 
-/// Miniserver websocket handle exposed to Python.
+/// The relay's Miniserver websocket.
 ///
-/// Construct it before [`crate::MiniserverDataProcessor`], which shares its
-/// connection state, then call [`MiniserverClient::connect`] once the event
-/// loop is running.
+/// Holds what a connection is made from; the connection itself lives in
+/// [`MsShared`], which [`LoxEgress`] and the relay's shutdown both reach
+/// through.
 pub(crate) struct MiniserverClient {
     shared: Arc<MsShared>,
     url: String,

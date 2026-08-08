@@ -22,10 +22,8 @@ COPY src ./src
 # Two relay builds on x86_64, one on everything else, plus the launcher that
 # picks between them.
 #
-# Both relay builds are compiled at opt-level 3. The wheel used to build the
-# "compatible" one at opt-level 2, which meant any measured gap between the two
-# conflated the instruction set with the optimization level - so a comparison
-# made against these two is a comparison of the thing it names.
+# Both relay builds are compiled at opt-level 3, so a comparison between them
+# measures the instruction set and nothing else.
 #
 # `-C target-feature=+crt-static` is the default for musl targets but is stated
 # here so a future target change cannot silently produce a dynamic binary that
@@ -86,8 +84,7 @@ COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
 COPY --from=builder /out/ /usr/local/bin/
 
-# Read directly by the relay now. docker-entrypoint.sh existed to translate this
-# into --log-level and has nothing left to do.
+# Read by the relay directly; there is no entrypoint script to translate it.
 ENV LOG_LEVEL=INFO
 
 EXPOSE 11884/udp

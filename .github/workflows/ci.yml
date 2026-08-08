@@ -62,9 +62,9 @@ jobs:
       - name: Run Rust tests
         run: cargo nextest run
 
-      # The binary is what ships; building it here is what stops it from
-      # rotting while the wheel is still the thing being tested.
-      - name: Build the relay binary
+      # A release build catches what a debug one does not: the `strip` and
+      # `lto` settings, and both binaries actually linking.
+      - name: Build the relay binaries
         run: cargo build --release --locked --bin loxmqttrelay-relay --bin loxmqttrelay
 
 

@@ -14,8 +14,7 @@ target/
 config/
 fixtures/
 
-# Recordings of the Python implementation, used by the tests. Not needed to
-# build the binary.
+# The configuration test corpus. Read by the tests, not needed to build.
 golden/
 
 # Editor and tooling leftovers.

@@ -22,7 +22,7 @@
 //! deterministic synthetics - is frozen into `corpus/`. It was generated once
 //! from a seeded generator and checked in rather than rebuilt here: it was
 //! always fully determined by its seed, so freezing it costs nothing and saves
-//! reimplementing Python's JSON encoder byte for byte.
+//! reimplementing a JSON encoder byte for byte.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, LazyLock};

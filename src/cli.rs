@@ -1,12 +1,8 @@
 //! The command line.
 //!
-//! One flag came over from argparse - `--log-level` - and one is new:
-//! `--config`, which used to be hard-coded at `config/config.toml`. That is a
-//! strict superset with the same default, and it is what lets the config tests
-//! run against files of their own rather than reaching into a singleton.
-//!
-//! The `'pytest' in sys.modules -> parse_known_args` hack that `utils.get_args`
-//! needed disappears with it.
+//! Two flags. `--log-level` overrides what the file says, and `--config` says
+//! which file - which is also what lets the config tests run in parallel
+//! against files of their own.
 
 use std::path::PathBuf;
 
@@ -59,7 +55,7 @@ mod tests {
     }
 
     #[test]
-    fn the_level_names_are_pythons() {
+    fn the_level_names_map_onto_log_filters() {
         for (text, expected) in [
             ("DEBUG", LevelFilter::Debug),
             ("INFO", LevelFilter::Info),
@@ -73,7 +69,7 @@ mod tests {
         }
     }
 
-    /// argparse exited 2 on an unknown choice, and so does this.
+    /// An unknown level exits 2 rather than being guessed at.
     #[test]
     fn an_unknown_level_is_refused_rather_than_guessed_at() {
         assert!(Args::try_parse_from(["loxmqttrelay", "--log-level", "TRACE"]).is_err());

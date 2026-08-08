@@ -1,41 +1,50 @@
-# Where this corpus came from
+# The configuration file, specified by example
 
-These files are a recording of the **Python** configuration module that this
-relay used to be, made while it was still in the tree. `src/config/tests.rs`
-asserts the Rust module reproduces it.
+This directory is the specification for `src/config`: 40 documents and 41
+control-topic updates, each paired with exactly what the relay does with it.
+`src/config/tests.rs` asserts all of it.
+
+It is written as data rather than as assertions because of what is being pinned.
+The interesting behaviour here is a few hundred error strings, their order, and
+the exact bytes of two output formats - and those are far easier to read, review
+and extend as files than as a wall of `assert_eq!`.
+
+## What is recorded
 
 For each document in `inputs/`:
 
-| file | what it records |
+| file | what it pins |
 |---|---|
-| `<name>.problems` | every reason `validate_config_dict` refused it, one per line, in file order. Empty means the document is usable. |
-| `<name>.warnings` | the warnings the load emitted - unknown sections and fields, which are deliberately not errors |
-| `<name>.saved.toml` | what `Config.save_config()` wrote, byte for byte (usable documents only) |
-| `<name>.safe.json` | `orjson.dumps(get_safe_config())`, byte for byte - the exact payload published to `{base_topic}config/response` (usable documents only) |
+| `<name>.problems` | every reason the document is unusable, one per line, **in file order**. An empty file - or no file - means the document is fine. |
+| `<name>.warnings` | what was ignored but is worth saying out loud. Only unknown sections and fields produce these, so most documents have no such file. |
+| `<name>.saved.toml` | what `ConfigStore::save` writes, byte for byte. Only for usable documents. |
+| `<name>.safe.json` | the exact payload published to `{base_topic}config/response`, byte for byte. Only for usable documents. |
 
-`updates.jsonl` is one MQTT config update per line: the starting document, the
-payload as text, the mode, and either the refusal message or the document that
-resulted.
+`updates.jsonl` is one MQTT config update per line: the document it starts from,
+the payload as text, the mode (`set`, `add` or `remove`), and either the refusal
+message or the document and response that resulted.
 
-## It cannot be regenerated
+Between them they cover every field against every wrong type, both port
+boundaries, the log-level names, blank and unusable regex patterns, unknown
+sections and fields, the fields a remote caller may not touch, list merging with
+order-preserving de-duplication, set semantics on the whitelist, and that a
+refused batch changes nothing.
 
-The generator ran against `loxmqttrelay.config`, which no longer exists. That is
-deliberate rather than an oversight: the corpus is a recording of a program that
-is gone, and its value is precisely that it was taken before the port rather
-than derived from it. Regenerating it from the Rust implementation would make it
-a test of the Rust implementation against itself.
+## Changing it
 
-So treat it as frozen. If a behaviour here turns out to be wrong, change the
-Rust *and* the golden in the same commit, and say in the message why the old
-behaviour was not worth keeping - the way
-`src/config/tests.rs::DIVERGENT` already documents the two places where the port
-deliberately differs.
+The files are the expected behaviour, so a change here is a behaviour change.
+Update the Rust and the file in the same commit, and say in the message why the
+old behaviour was not worth keeping.
 
-## Two cases already diverge
+Two documents are refused although their `.problems` files are empty:
+`regex_lookaround` and `regex_backreference`. Both are named in
+`src/config/tests.rs::EXPECTED_TO_BE_REFUSED` with the reason - filter patterns
+are compiled with the same regex engine that has to run them, so a pattern that
+cannot run is refused when it is read rather than after the restart it triggers.
 
-Both are the same decision, and both are named in `tests::DIVERGENT`:
-`regex_lookaround` and `regex_backreference` have empty `.problems` files
-because Python's `re` accepted those patterns, while the relay compiles filters
-with the `regex` crate that actually has to run them. Under Python such a
-pattern passed validation, was written to the file, restarted the relay, and
-then failed at startup.
+## Adding a case
+
+Write the document into `inputs/`, run the tests, and read the failure: it
+prints what the relay actually produced. Once that is right, write it into the
+matching file. There is no generator - the expectations are meant to be looked
+at and agreed with, not produced by the code they check.

@@ -71,7 +71,7 @@ impl std::error::Error for ConfigError {}
 ///
 /// Note it dedupes the *existing* entries too, not only the incoming ones. A
 /// file that already listed a topic twice comes back with it once, which is what
-/// the Python version did and what the goldens record.
+/// the corpus records.
 fn merge_list(current: &[String], incoming: Vec<String>, mode: ListMode) -> Vec<String> {
     match mode {
         ListMode::Set => incoming,

@@ -1,9 +1,8 @@
 //! Picks the relay build this CPU can actually run, and becomes it.
 //!
-//! The wheel shipped two extensions and chose between them at import time,
-//! because one amd64 image runs on every x86 host and only some of them have
-//! AVX2. A multi-arch manifest picks by architecture, not by instruction set, so
-//! that is still true and the choice still has to be made at runtime.
+//! One amd64 image runs on every x86 host, and only some of them have AVX2 - a
+//! multi-arch manifest picks by architecture, not by instruction set. So the
+//! choice has to be made at runtime, on the machine.
 //!
 //! It cannot be made *inside* the optimized build: a binary compiled for
 //! `x86-64-v3` can fault on an instruction before `main` is reached, which is

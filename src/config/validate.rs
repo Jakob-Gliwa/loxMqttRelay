@@ -1,11 +1,9 @@
 //! Why a configuration value cannot be used.
 //!
-//! Every message in here is transcribed from `config.py`, deliberately down to
-//! the punctuation. They end up in a startup log next to `Refusing to start`,
-//! and an operator who has hit one before should find the same words - so this
-//! is one of the few places where matching the previous wording is the
-//! requirement rather than a nicety. `golden/config/*.problems` is what holds
-//! them to it.
+//! Every message here ends up in a startup log next to `Refusing to start`, so
+//! the wording is the interface: it has to name the field, say what was wrong
+//! with it, and be searchable. `golden/config/*.problems` pins all of it, down
+//! to the punctuation.
 //!
 //! The one difference between checking a file and checking a `config/set`
 //! payload is `allow_bare_item`: a payload may name a single entry where a list
@@ -14,7 +12,7 @@
 
 use crate::config::schema::{Check, ConfigSection, FieldKind, FieldSpec, field};
 use crate::config::value::CfgValue;
-use crate::util::py_strip;
+use crate::util::strip_space;
 
 const LOG_LEVELS: [&str; 5] = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"];
 
@@ -31,7 +29,7 @@ pub(crate) fn type_mismatch(
             other => Some(format!(
                 "'{name}' expects {}, got {}",
                 kind.expected(),
-                other.py_type()
+                other.type_name()
             )),
         },
         FieldKind::StrList | FieldKind::StrSet => {
@@ -43,7 +41,7 @@ pub(crate) fn type_mismatch(
                 other => {
                     return Some(format!(
                         "'{name}' expects a list, got {}",
-                        other.py_type()
+                        other.type_name()
                     ));
                 }
             };
@@ -57,16 +55,16 @@ pub(crate) fn type_mismatch(
             CfgValue::Bool(_) => None,
             other => Some(format!(
                 "'{name}' expects bool, got {}",
-                other.py_type()
+                other.type_name()
             )),
         },
         FieldKind::Int => match value {
             CfgValue::Int(_) => None,
-            other => Some(format!("'{name}' expects int, got {}", other.py_type())),
+            other => Some(format!("'{name}' expects int, got {}", other.type_name())),
         },
         FieldKind::Str => match value {
             CfgValue::Str(_) => None,
-            other => Some(format!("'{name}' expects str, got {}", other.py_type())),
+            other => Some(format!("'{name}' expects str, got {}", other.type_name())),
         },
     }
 }
@@ -97,13 +95,13 @@ pub(crate) fn value_problem(name: &str, checks: &[Check], value: &CfgValue) -> O
                 }),
             Check::NonBlankTopic => value
                 .as_str()
-                .filter(|s| py_strip(s).is_empty())
+                .filter(|s| strip_space(s).is_empty())
                 .map(|_| {
                     "'base_topic' cannot be empty - it prefixes every control topic".to_owned()
                 }),
             Check::NonBlank => value
                 .as_str()
-                .filter(|s| py_strip(s).is_empty())
+                .filter(|s| strip_space(s).is_empty())
                 .map(|_| format!("'{name}' cannot be empty")),
             Check::RegexList => regex_problem(name, value),
         };
@@ -116,16 +114,15 @@ pub(crate) fn value_problem(name: &str, checks: &[Check], value: &CfgValue) -> O
 
 /// The first unusable pattern in a filter list.
 ///
-/// Compiled with `regex`, the engine that actually has to run them, rather than
-/// with something bent towards accepting what Python's `re` accepted. The two
-/// disagree about lookaround and backreferences, and a pattern only `re` accepts
-/// used to pass validation here, get written to the file, restart the relay, and
-/// then fail in `Core::new` - which is a relay that does not come back, reported
-/// as a configuration update that was accepted.
+/// Compiled with the same engine that has to run them, so a pattern some other
+/// regex dialect would accept - a lookaround, a backreference - is refused when
+/// it is read. Validating with anything more permissive would mean writing it
+/// out, restarting into it, and only then failing to compile it: a relay that
+/// does not come back, reported as an update that worked.
 fn regex_problem(name: &str, value: &CfgValue) -> Option<String> {
     let patterns = value.as_strings()?;
     for pattern in patterns {
-        if py_strip(&pattern).is_empty() {
+        if strip_space(&pattern).is_empty() {
             // An empty expression matches every topic, so one stray "" in the
             // list filters away everything instead of the one thing it named.
             return Some(format!(

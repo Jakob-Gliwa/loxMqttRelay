@@ -30,8 +30,8 @@ pub fn init(args: &Args) -> LevelFilter {
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or(level.as_str().to_lowercase()),
     )
-    // The format Python used ('%(asctime)s %(levelname)s [%(name)s] %(message)s'),
-    // so a log from before the port and one from after read the same.
+    // timestamp, level, module, message - the shape every line has had, so an
+    // old log and a new one still read as one file.
     .format(|buf, record| {
         writeln!(
             buf,
@@ -123,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn the_names_are_pythons_including_critical() {
+    fn every_level_name_is_understood_including_critical() {
         assert_eq!(parse_level("warning"), Some(LevelFilter::Warn));
         assert_eq!(parse_level("CRITICAL"), Some(LevelFilter::Error));
         assert_eq!(parse_level("DeBuG"), Some(LevelFilter::Debug));

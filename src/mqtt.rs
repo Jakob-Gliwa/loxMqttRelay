@@ -591,10 +591,9 @@ impl MqttClient {
 
 /// Everything [`connect_with`] needs, copied out of the client.
 ///
-/// A separate struct because the future has to be `'static` for the Python
-/// awaitable, so it cannot borrow the client - and because the alternative,
-/// writing the connect twice, is how the wheel and the binary would drift apart
-/// while both exist.
+/// A separate struct so the connect can be driven from a task that outlives the
+/// call - and so the parameters can be built and inspected without opening a
+/// socket.
 pub(crate) struct ConnectParams {
     shared: Arc<MqttShared>,
     reconnect: StandardReconnectPolicy,

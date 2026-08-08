@@ -1,10 +1,9 @@
 //! The configuration file: what is in it, and what may change it.
 //!
-//! Three things live here that used to be `src/loxmqttrelay/config.py`. The
-//! typed model ([`AppConfig`] and its six sections), the file itself
-//! ([`ConfigStore::load`] and [`ConfigStore::save`]), and the two ways it is
-//! changed at runtime - a `config/set` payload over MQTT ([`update_fields`]) and
-//! the whitelist sync ([`update_section`]).
+//! Three things live here: the typed model ([`AppConfig`] and its six
+//! sections), the file itself ([`ConfigStore::load`] and [`ConfigStore::save`]),
+//! and the two ways it is changed at runtime - a `config/set` payload over MQTT
+//! ([`update_fields`]) and the whitelist sync ([`update_section`]).
 //!
 //! The shape of a field lives next door in [`schema`], not here, because field
 //! names are addressed flat: a payload names `cache_size`, not
@@ -280,8 +279,7 @@ impl AppConfig {
     ///
     /// Exactly what is published to `{base_topic}config/response`, so the key
     /// order is part of the contract and comes from [`schema::FIELDS`] - which
-    /// is the same order the file is written in, and the same order the Python
-    /// dataclasses declared.
+    /// is the same order the file is written in.
     pub(crate) fn safe_json(&self) -> Vec<u8> {
         const REDACTED: [&str; 4] = ["user", "password", "miniserver_user", "miniserver_pass"];
         let mut out = String::from("{");
@@ -308,7 +306,7 @@ impl AppConfig {
     }
 }
 
-/// Compact JSON, the way orjson wrote it.
+/// Compact JSON, with the keys in the order they are declared.
 ///
 /// Hand-rolled rather than derived because the whole point is the key order, and
 /// the shapes involved are four: string, integer, boolean and array-of-string.
@@ -337,9 +335,9 @@ fn write_json_value(out: &mut String, value: &CfgValue) {
 }
 
 fn write_json_string(out: &mut String, text: &str) {
-    // serde_json escapes exactly what orjson does, and neither escapes '/' or
-    // non-ASCII, so handing it one string at a time keeps the bytes identical
-    // without hand-rolling the escaping.
+    // Escaping one string at a time through a real serializer, rather than
+    // hand-rolling it: the payload carries topic names, and getting a quote or a
+    // backslash wrong there produces JSON nobody can read.
     out.push_str(&serde_json::Value::String(text.to_owned()).to_string());
 }
 
@@ -365,10 +363,8 @@ impl std::error::Error for StartupAbort {}
 
 /// The configuration, and the file it came from.
 ///
-/// Shared as an `Arc`. There is no singleton: Python had one because the module
-/// was imported from everywhere, and the tests then had to reach into it to get
-/// a fresh state. Here it is passed in, which is also what lets the config tests
-/// run in parallel against their own files.
+/// Shared as an `Arc` and passed in rather than reached for, which is what lets
+/// the config tests run in parallel against files of their own.
 pub struct ConfigStore {
     path: PathBuf,
     config: RwLock<AppConfig>,
@@ -409,9 +405,9 @@ impl ConfigStore {
         let document = match value::parse_toml(&text) {
             Ok(document) => document,
             Err(e) => {
-                // Python let tomlkit's exception escape here, so a stray bracket
-                // produced a traceback at import time rather than this. Same
-                // outcome, minus the stack trace nobody could act on.
+                // A stray bracket is the commonest way to break this file, so
+                // it gets the same treatment as an unusable value: named, with
+                // the path, and refused before anything connects.
                 error!("Invalid configuration: {} is not valid TOML: {e}", path.display());
                 return Err(refuse(&path, 1));
             }
@@ -563,11 +559,10 @@ fn write_toml_value(out: &mut String, value: &CfgValue) {
 
 /// A TOML *basic* string - always, even where a literal one would be shorter.
 ///
-/// `toml::Value`'s own Display picks a literal string (`'…'`) when that avoids
-/// escaping, so a filter pattern like `(a)\1` comes out as `'(a)\1'` where
-/// tomlkit wrote `"(a)\\1"`. Both parse back to the same value, but the file is
-/// the operator's and a save should not rewrite their quoting - so the escaping
-/// is spelled out here rather than delegated.
+/// `toml::Value`'s own Display switches to a literal string (`'…'`) whenever
+/// that avoids an escape, so a filter pattern would have its quoting rewritten
+/// on the first save. The file is the operator's; a save should change the
+/// values they changed and nothing else.
 fn write_toml_string(out: &mut String, text: &str) {
     out.push('"');
     for c in text.chars() {

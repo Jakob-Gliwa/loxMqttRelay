@@ -5,20 +5,19 @@
 //! rather than parse into a tree, which matters twice over. A 2.5 MB
 //! configuration would become an order of magnitude more memory as a DOM, and -
 //! more importantly - a scanner can stop at the first thing it does not
-//! understand and keep what it already has. lxml read these files with
-//! `recover=True` for exactly that reason: Miniserver configurations turn up
-//! with duplicate attributes and unclosed elements, and a strict parser that
-//! refuses the whole document would leave the relay with no whitelist at all.
+//! understand and keep what it already has. That tolerance is a requirement,
+//! not a nicety: Miniserver configurations turn up with duplicate attributes and
+//! unclosed elements, and a strict parser refusing the whole document would
+//! leave the relay with no whitelist - which, with `sync_with_miniserver` on,
+//! means forwarding nothing at all.
 //!
-//! # Which Python did this replace?
+//! # The rule, exactly
 //!
-//! There were two implementations, and they did not agree. `extract_inputs`
-//! used pygixml and a real XPath; `_extract_inputs_lxml` walked the tree by hand
-//! and, on *nested* `VirtualInCaption` elements, emitted the inner titles twice.
-//! The existing test compared `set(inputs)`, so the difference never showed.
-//! pygixml is what ran in production and in the image, so the XPath node-set
-//! semantics are what is reproduced here: every `C` below any
-//! `VirtualInCaption` contributes its `Title` exactly once, in document order.
+//! Every `C` element below any `VirtualInCaption` contributes its `Title` once,
+//! in document order. Three parts of that are easy to get wrong and each has a
+//! test: a `VirtualInCaption` does not contribute its *own* `Title` (the axis is
+//! a strict descendant one), a nested one does not make its subtree count twice,
+//! and a repeated attribute keeps the first.
 
 use log::warn;
 use quick_xml::Reader;
@@ -35,9 +34,9 @@ struct Frame {
 
 /// Every virtual input name the configuration declares, in document order.
 pub(crate) fn extract_inputs(config_xml: &[u8]) -> Result<Vec<String>, SyncError> {
-    // The declared encoding is deliberately ignored, because the Python path
-    // ignored it: `config_xml.decode("utf-8", errors="replace")` is exactly
-    // this. A leading BOM - which the real configurations carry - arrives as a
+    // The declared encoding is deliberately ignored: every configuration seen
+    // so far is UTF-8, and a lossy decode keeps a stray byte from costing the
+    // whole document. A leading BOM - which the real ones carry - arrives as a
     // text event before the root and is skipped like any other text.
     let text = String::from_utf8_lossy(config_xml);
     let mut reader = Reader::from_str(&text);
@@ -115,9 +114,9 @@ pub(crate) fn extract_inputs(config_xml: &[u8]) -> Result<Vec<String>, SyncError
 
     // A scanner would happily report "no inputs" for a document that is not XML
     // at all - a Miniserver error page, say, or the JSON body it answers some
-    // requests with. Both Python parsers raised there, and the distinction is
-    // worth keeping: no inputs found is a configuration question, not a
-    // document that was never parsed.
+    // requests with. The distinction is worth keeping: no inputs found is a
+    // configuration question, whereas a document that never parsed is a
+    // transport one, and only the second should keep the old whitelist.
     if !saw_element {
         return Err(SyncError::Xml(
             "the configuration has no XML document element".to_owned(),
@@ -130,8 +129,7 @@ fn push_title(titles: &mut Vec<String>, element: &BytesStart<'_>) {
     if let Some(title) = attribute(element, b"Title")
         && !title.is_empty()
     {
-        // Python tested `if title:`, so a title of one space is kept and only an
-        // empty one is dropped.
+        // A title of one space is a title; only an empty one is dropped.
         titles.push(title);
     }
 }
@@ -143,7 +141,8 @@ fn push_title(titles: &mut Vec<String>, element: &BytesStart<'_>) {
 ///
 /// * A repeated attribute is not an error, and the *first* one wins. quick-xml's
 ///   attribute iterator checks for duplicates by default and fails the element;
-///   lxml's `.get()` and pugixml's `.attribute()` both simply take the first.
+///   the conforming behaviour, which every DOM parser implements, is to take
+///   the first.
 /// * A literal tab, newline or carriage return inside an attribute value becomes
 ///   a single space - and a CRLF becomes one space, not two - while the same
 ///   character written as `&#10;` survives. So the normalization happens on the
@@ -226,12 +225,11 @@ mod tests {
         assert_eq!(inputs(xml), ["child"]);
     }
 
-    /// The test that pins which Python implementation this reproduces.
+    /// A nested block does not make its subtree count twice.
     ///
-    /// pygixml - the one that actually ran - yields each title once. The lxml
-    /// fallback walked the tree recursively and emitted the inner ones twice
-    /// (`["A", "B", "B"]`). Both were verified against the real modules before
-    /// this was written.
+    /// This is what an XPath node set does, and what a hand-written recursive
+    /// walk gets wrong - it revisits the inner block once for each enclosing one
+    /// and emits `["A", "B", "B"]`.
     #[test]
     fn a_nested_virtual_in_caption_does_not_repeat_its_titles() {
         let xml = r#"<R>
@@ -277,7 +275,8 @@ mod tests {
         assert_eq!(inputs(xml), ["InputWithBOM"]);
     }
 
-    /// Verified against pygixml and lxml, both of which agree on every row.
+    /// This is the normalization the XML specification requires of every
+    /// parser, and the one quick-xml leaves to the caller.
     #[test]
     fn attribute_values_are_normalized_the_way_the_parsers_normalize_them() {
         let one = |title: &str| {
@@ -295,7 +294,7 @@ mod tests {
         assert_eq!(one("a&lt;b"), "a<b");
     }
 
-    /// Python tested `if title:`, so only a genuinely empty one is dropped.
+    /// Only a genuinely empty title is dropped.
     #[test]
     fn a_title_of_one_space_is_kept_but_an_empty_one_is_not() {
         let xml = r#"<R><C Type="VirtualInCaption"><C Title=""/><C Title=" "/></C></R>"#;
@@ -329,7 +328,7 @@ mod tests {
         assert_eq!(inputs(xml), ["Input1"]);
     }
 
-    /// `errors="replace"` in Python, `from_utf8_lossy` here.
+    /// A stray byte costs one character, not the document.
     #[test]
     fn a_non_utf8_byte_becomes_a_replacement_character() {
         let mut xml = br#"<R><C Type="VirtualInCaption"><C Title="a"#.to_vec();

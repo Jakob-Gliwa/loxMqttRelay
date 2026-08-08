@@ -1,14 +1,14 @@
-//! The config module, checked against what the Python one did.
+//! The config module, checked against `golden/config/`.
 //!
-//! Most of this reads `golden/config/`, which `scripts/gen_golden.py` produced
-//! by running the *actual* Python implementation over 40 documents and 41 MQTT
-//! updates. Comparing against a recording rather than against hand-written
-//! assertions is the whole point: several hundred error strings were involved,
-//! and transcribing them by eye is exactly where a port loses behaviour it was
-//! supposed to keep.
+//! That directory is the specification: 40 documents and 41 control-topic
+//! updates, each paired with exactly what the relay does with it. It is data
+//! rather than assertions because what is being pinned is a few hundred error
+//! strings, their order and the exact bytes of two output formats - all of
+//! which are easier to read and extend as files. See the README there.
 //!
-//! Where Rust deliberately differs, the case is named in [`DIVERGENT`] with the
-//! reason. Nothing diverges silently.
+//! The tests below are the other half: the field table against the model, the
+//! things a corpus cannot express, and the two documents that are deliberately
+//! refused despite having no problems listed ([`EXPECTED_TO_BE_REFUSED`]).
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -20,18 +20,19 @@ use super::value::{CfgValue, parse_json, parse_toml};
 use super::validate::validate_document;
 use super::{AppConfig, ConfigStore};
 
-fn golden_dir() -> PathBuf {
+/// Where the expectations live. See the README there.
+fn spec_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("golden/config")
 }
 
-fn read_golden(name: &str) -> String {
-    let path = golden_dir().join(name);
+fn read_spec(name: &str) -> String {
+    let path = spec_dir().join(name);
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
 /// Every document in the corpus, by name.
 fn documents() -> Vec<String> {
-    let mut names: Vec<String> = fs::read_dir(golden_dir().join("inputs"))
+    let mut names: Vec<String> = fs::read_dir(spec_dir().join("inputs"))
         .expect("golden inputs")
         .map(|entry| {
             entry
@@ -46,29 +47,29 @@ fn documents() -> Vec<String> {
     names
 }
 
-/// Cases where Rust is deliberately not what Python was.
+/// Documents that are refused although nothing is listed against them.
 ///
-/// Both entries are the same decision: config validation now compiles filter
-/// patterns with `regex`, the engine that actually has to run them, instead of
-/// with Python's `re`. The two disagree about lookaround and backreferences, and
-/// under `re` such a pattern passed validation here, was written to the file,
-/// restarted the relay, and *then* failed in `Core::new` - a relay that does not
-/// come back, reported to the operator as an update that was accepted.
+/// Both carry a filter pattern that some regex dialects accept - a lookaround
+/// and a backreference - and that the engine actually running the filters does
+/// not. Refusing them when the file is read is the whole point: accepting one
+/// would mean writing it out, restarting into it, and only then failing to
+/// compile it, which is a relay that does not come back reported as an update
+/// that worked.
 ///
-/// So these two documents have an empty `.problems` golden and are rejected
-/// here. That is the fix, not a regression.
-const DIVERGENT: [&str; 2] = ["regex_lookaround", "regex_backreference"];
+/// Named here rather than given `.problems` files because the message is the
+/// regex engine's own, and pinning somebody else's wording is how a test starts
+/// failing on a dependency bump that changed nothing that matters.
+const EXPECTED_TO_BE_REFUSED: [&str; 2] = ["regex_lookaround", "regex_backreference"];
 
-/// The same decision, on the update corpus.
-const DIVERGENT_UPDATES: [&str; 1] = ["value_regex_lookaround"];
+/// The same, on the update corpus.
+const UPDATES_EXPECTED_TO_BE_REFUSED: [&str; 1] = ["value_regex_lookaround"];
 
 /// Drop the engine-specific tail of an invalid-pattern message.
 ///
 /// The wrapper - `'name' has an invalid pattern 'p':` - is ours and has to
-/// match. What follows is the regex engine's own complaint, and `regex` explains
-/// itself over several lines with a caret where `re` managed one clause. Holding
-/// the port to Python's phrasing there would mean shipping a worse message to
-/// keep a test quiet.
+/// match. What follows is the regex engine's own complaint, spread over several
+/// lines with a caret under the offending character, and pinning that would be
+/// pinning a dependency's prose.
 fn strip_engine_detail(problem: &str) -> String {
     match problem.find("has an invalid pattern '") {
         // Cut after the quote-colon that closes the pattern we echoed back.
@@ -80,12 +81,17 @@ fn strip_engine_detail(problem: &str) -> String {
     }
 }
 
-/// The golden file, one problem per line.
+/// What is listed against a document, or nothing if no file names it.
+fn listed_problems(name: &str) -> String {
+    fs::read_to_string(spec_dir().join(format!("{name}.problems"))).unwrap_or_default()
+}
+
+/// The expectation file, one problem per line.
 ///
-/// Safe to split on newlines because Python's `re.error` fits on one; the Rust
-/// side must *not* be split that way, since `regex` explains itself over four -
-/// which is exactly what [`strip_engine_detail`] removes.
-fn golden_problems(text: &str) -> Vec<String> {
+/// Safe to split on newlines because the expectations are written one per line;
+/// what the relay produces must *not* be split that way, since a regex
+/// complaint spans several - which is what [`strip_engine_detail`] removes.
+fn expected_problems(text: &str) -> Vec<String> {
     text.lines().map(strip_engine_detail).collect()
 }
 
@@ -118,8 +124,8 @@ fn the_field_table_matches_the_model() {
 ///
 /// The whole reason the table exists is that a `config/set` payload names a
 /// field without its section. If two sections ever held the same name, that
-/// lookup would silently pick one of them - Python's `_map_fields_to_sections`
-/// had the same hazard and let the later section win.
+/// lookup would silently pick one of them, and which one would depend on the
+/// order of the table rather than on anything a reader could see.
 #[test]
 fn no_field_name_is_shared_between_sections() {
     let unique: BTreeSet<&str> = FIELDS.iter().map(|spec| spec.name).collect();
@@ -164,29 +170,29 @@ fn every_field_round_trips() {
 /// The defaults are the documented ones.
 #[test]
 fn the_defaults_are_what_the_file_says() {
-    let saved = read_golden("empty.saved.toml");
-    let expected = read_golden("defaults_explicit.saved.toml");
+    let saved = read_spec("empty.saved.toml");
+    let expected = read_spec("defaults_explicit.saved.toml");
     assert_eq!(saved, expected, "an empty file is the explicit defaults");
 
     let store = ConfigStore::new("unused.toml", AppConfig::default());
-    assert_eq!(String::from_utf8(store.safe_json()).unwrap(), read_golden("empty.safe.json").trim_end());
+    assert_eq!(String::from_utf8(store.safe_json()).unwrap(), read_spec("empty.safe.json").trim_end());
 }
 
 // ---------------------------------------------------------------------------
 // Goldens
 // ---------------------------------------------------------------------------
 
-/// Every document is refused, or accepted, for exactly the reasons Python gave.
+/// Every document is refused, or accepted, for exactly the reasons listed.
 #[test]
-fn the_problems_are_the_ones_python_reported() {
+fn every_document_is_refused_for_exactly_the_listed_reasons() {
     for name in documents() {
-        let text = read_golden(&format!("inputs/{name}.toml"));
+        let text = read_spec(&format!("inputs/{name}.toml"));
         let document = parse_toml(&text).expect("the corpus is valid TOML");
         let found = validate_document(&document);
 
-        if DIVERGENT.contains(&name.as_str()) {
+        if EXPECTED_TO_BE_REFUSED.contains(&name.as_str()) {
             assert!(
-                read_golden(&format!("{name}.problems")).is_empty(),
+                listed_problems(&name).is_empty(),
                 "{name}: the golden was expected to be empty"
             );
             assert_eq!(
@@ -208,43 +214,42 @@ fn the_problems_are_the_ones_python_reported() {
                 .iter()
                 .map(|p| strip_engine_detail(p))
                 .collect::<Vec<_>>(),
-            golden_problems(&read_golden(&format!("{name}.problems"))),
-            "{name}: problems differ"
+            expected_problems(&listed_problems(&name)),
+            "{name}: the problems differ from what is expected"
         );
     }
 }
 
 /// Unknown sections and fields are ignored, and said out loud.
 #[test]
-fn the_warnings_are_the_ones_python_reported() {
+fn unknown_sections_and_fields_are_ignored_and_said_out_loud() {
     for name in documents() {
-        let text = read_golden(&format!("inputs/{name}.toml"));
+        let text = read_spec(&format!("inputs/{name}.toml"));
         let document = parse_toml(&text).expect("the corpus is valid TOML");
         let found = validate_document(&document);
         let mut warnings = found.warnings.clone();
         if found.problems.is_empty() {
             warnings.extend(AppConfig::from_document(&document).1);
         }
-        assert_eq!(
-            warnings,
-            read_golden(&format!("{name}.warnings"))
-                .lines()
-                .map(str::to_owned)
-                .collect::<Vec<_>>(),
-            "{name}: warnings differ"
-        );
+        // Most documents warn about nothing and therefore have no file.
+        let expected: Vec<String> = fs::read_to_string(spec_dir().join(format!("{name}.warnings")))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(warnings, expected, "{name}: the warnings differ");
     }
 }
 
-/// A usable document is written back out the way Python wrote it.
+/// A usable document is written back out exactly as specified.
 #[test]
-fn a_saved_file_is_byte_for_byte_what_python_wrote() {
+fn a_saved_file_is_byte_for_byte_what_is_expected() {
     for name in documents() {
-        let path = golden_dir().join(format!("{name}.saved.toml"));
+        let path = spec_dir().join(format!("{name}.saved.toml"));
         if !path.exists() {
             continue; // The document was refused; there is nothing to save.
         }
-        let text = read_golden(&format!("inputs/{name}.toml"));
+        let text = read_spec(&format!("inputs/{name}.toml"));
         let document = parse_toml(&text).expect("the corpus is valid TOML");
         let (config, _) = AppConfig::from_document(&document);
 
@@ -254,39 +259,39 @@ fn a_saved_file_is_byte_for_byte_what_python_wrote() {
 
         assert_eq!(
             fs::read_to_string(&file).expect("written"),
-            fs::read_to_string(&path).expect("golden"),
+            fs::read_to_string(&path).expect("the expectation file"),
             "{name}: saved file differs"
         );
         let _ = fs::remove_dir_all(&dir);
     }
 }
 
-/// The `config/get` response is byte for byte what orjson produced.
+/// The `config/get` response is byte for byte what is expected.
 ///
 /// One assertion covering three things at once: which fields are redacted, the
 /// order the keys come in, and that the whitelist is a sorted array.
 #[test]
-fn the_config_response_is_byte_for_byte_what_python_published() {
+fn the_config_response_is_byte_for_byte_what_is_expected() {
     for name in documents() {
-        let path = golden_dir().join(format!("{name}.safe.json"));
+        let path = spec_dir().join(format!("{name}.safe.json"));
         if !path.exists() {
             continue;
         }
-        let text = read_golden(&format!("inputs/{name}.toml"));
+        let text = read_spec(&format!("inputs/{name}.toml"));
         let document = parse_toml(&text).expect("the corpus is valid TOML");
         let (config, _) = AppConfig::from_document(&document);
         assert_eq!(
             String::from_utf8(config.safe_json()).unwrap(),
-            fs::read_to_string(&path).expect("golden"),
+            fs::read_to_string(&path).expect("the expectation file"),
             "{name}: config/response differs"
         );
     }
 }
 
-/// Every recorded MQTT update is refused, or applied, exactly as Python did.
+/// Every MQTT update in the corpus is applied, or refused, as specified.
 #[test]
-fn the_updates_do_what_python_did() {
-    let corpus = read_golden("updates.jsonl");
+fn every_update_is_applied_or_refused_as_specified() {
+    let corpus = read_spec("updates.jsonl");
     let mut seen = 0;
     for line in corpus.lines() {
         let record: serde_json::Value = serde_json::from_str(line).expect("a corpus record");
@@ -312,11 +317,11 @@ fn the_updates_do_what_python_did() {
         let payload = record["payload"].as_str().expect("payload text");
         let updates = match parse_json(payload).expect("the corpus is valid JSON") {
             CfgValue::Table(entries) => entries,
-            other => panic!("{case}: payload is {}", other.py_type()),
+            other => panic!("{case}: payload is {}", other.type_name()),
         };
         let outcome = store.update_fields(&updates, mode);
 
-        if DIVERGENT_UPDATES.contains(&case) {
+        if UPDATES_EXPECTED_TO_BE_REFUSED.contains(&case) {
             assert!(
                 record.get("error").is_none(),
                 "{case}: the golden was expected to succeed"
@@ -370,8 +375,8 @@ fn a_missing_file_starts_on_the_defaults() {
 
 /// A file that is not TOML at all is reported, not panicked over.
 ///
-/// Python let tomlkit's exception escape at import time, which produced a
-/// traceback instead of the message the operator needed.
+/// This is the first thing an operator does wrong, and the message has to name
+/// the file and the reason rather than being a stack trace.
 #[test]
 fn a_file_that_is_not_toml_is_refused() {
     let dir = tempdir("not-toml");
@@ -438,10 +443,13 @@ fn a_refused_batch_leaves_the_file_alone() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// Python's `str.strip()` counts four separators Rust's `trim()` does not, and a
-/// `base_topic` made of them has to read as empty either way.
+/// "Blank" means the same thing here as it does to the UDP parser.
+///
+/// [`crate::util::is_space`] counts four ASCII separators, U+001C..U+001F,
+/// that Rust's `trim()` does not - and a `base_topic` made of them has to read
+/// as empty either way.
 #[test]
-fn the_blank_check_uses_pythons_idea_of_whitespace() {
+fn the_blank_check_counts_the_separators_the_udp_parser_counts() {
     let spec = field("base_topic").expect("a known field");
     let problem = super::validate::value_problem(
         spec.name,
@@ -484,16 +492,16 @@ fn load_refuses_exactly_the_documents_with_problems() {
     for name in documents() {
         let dir = tempdir(&format!("load-{name}"));
         let file = dir.join("config.toml");
-        fs::write(&file, read_golden(&format!("inputs/{name}.toml"))).expect("seed");
+        fs::write(&file, read_spec(&format!("inputs/{name}.toml"))).expect("seed");
 
-        let refused = !read_golden(&format!("{name}.problems")).is_empty()
-            || DIVERGENT.contains(&name.as_str());
+        let refused = !listed_problems(&name).is_empty()
+            || EXPECTED_TO_BE_REFUSED.contains(&name.as_str());
         match ConfigStore::load(&file) {
             Ok(store) => {
                 assert!(!refused, "{name}: should have been refused");
                 assert_eq!(
                     String::from_utf8(store.safe_json()).unwrap(),
-                    read_golden(&format!("{name}.safe.json")),
+                    read_spec(&format!("{name}.safe.json")),
                     "{name}: loaded to a different configuration"
                 );
             }
@@ -557,25 +565,22 @@ fn a_config_that_cannot_be_written_keeps_its_permissions() {
 /// Not an identity, and deliberately not asserted as one. A `user` that is unset
 /// is `None` in the model, `""` in the file, and therefore `Some("")` once
 /// reloaded - TOML has no null, and spelling an absent broker user as the empty
-/// string is how the file has always looked. Python normalized it in exactly the
-/// same place, so the first save is where the value settles and every save after
-/// it is a no-op. That second property is the one worth holding, because it is
-/// what stops a relay from rewriting its own config file on every restart.
+/// string is how the file has always looked. So the first save is where the
+/// value settles, and every save after it is a no-op - which is the property
+/// worth holding, because it is what stops a relay from rewriting its own
+/// config file on every restart.
 #[test]
 fn saving_a_reloaded_file_changes_nothing() {
     for name in documents() {
-        // A `.saved.toml` golden only means Python accepted the document. The
-        // two divergent ones carry a pattern this build refuses, so writing them
-        // out and reading them back is not a round trip - it is the refusal
-        // working. (Python did not run on them either; it got as far as
-        // `Core::new` and failed there, which is the same outcome reported
-        // worse.)
-        if !golden_dir().join(format!("{name}.saved.toml")).exists()
-            || DIVERGENT.contains(&name.as_str())
+        // The two refused documents carry a pattern this build will not compile,
+        // so writing them out and reading them back is not a round trip - it is
+        // the refusal working.
+        if !spec_dir().join(format!("{name}.saved.toml")).exists()
+            || EXPECTED_TO_BE_REFUSED.contains(&name.as_str())
         {
             continue;
         }
-        let text = read_golden(&format!("inputs/{name}.toml"));
+        let text = read_spec(&format!("inputs/{name}.toml"));
         let (config, _) = AppConfig::from_document(&parse_toml(&text).expect("valid TOML"));
 
         let dir = tempdir(&format!("roundtrip-{name}"));
@@ -643,9 +648,9 @@ fn a_section_update_merges_in_every_mode() {
 /// The store is shared across tasks and threads, so it has to be usable from
 /// several at once without losing an update.
 ///
-/// Python had a singleton behind a lock and a test that hammered it. Here the
-/// store is passed around as an `Arc` instead, and this is the equivalent
-/// question: does concurrent use stay consistent.
+/// The store is reachable from the message path, the control topics and the
+/// resync worker at once, so the question is whether concurrent use stays
+/// consistent - not whether any single update works.
 #[test]
 fn the_store_survives_concurrent_use() {
     use std::sync::Arc;

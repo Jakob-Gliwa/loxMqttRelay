@@ -1,13 +1,13 @@
 //! UDP ingress: a datagram from the Miniserver in, an MQTT publish out.
 //!
-//! Nothing on this path touches Python. The socket, the parser and the source
-//! filter all live here, and the publish goes straight to [`MqttShared`], so a
-//! datagram never needs the GIL.
+//! The socket, the parser and the source filter all live here, and the publish
+//! goes straight to [`MqttShared`] - so a datagram is turned into an MQTT
+//! message without leaving this module and the one next to it.
 //!
-//! Where the wording below says "Python did X", it refers to the asyncio
-//! implementation this replaces: the parser is a faithful port, quirks
-//! included, because the Miniserver's message format is whatever that parser
-//! accepted.
+//! The parser reproduces the accepted message format exactly, quirks included.
+//! That is not conservatism for its own sake: what a Miniserver sends is
+//! whatever the deployed relays have accepted, and every rule below is
+//! load-bearing for somebody's existing configuration.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -25,7 +25,7 @@ use tokio::task::JoinHandle;
 use crate::mqtt::MqttShared;
 use crate::config::AppConfig;
 use crate::error::RelayError;
-use crate::util::{is_py_space, lock_recover, loggable, py_strip};
+use crate::util::{is_space, lock_recover, loggable, strip_space};
 
 /// Upper bound for the "warn once per sender" bookkeeping, so a flood of
 /// spoofed source addresses cannot grow the set (or the log) without limit.
@@ -80,9 +80,9 @@ fn decode_utf8_ignore(data: &[u8]) -> Cow<'_, str> {
     }
 }
 
-/// `str.split()` with no argument: runs of whitespace, no empty tokens.
-fn py_split(s: &str) -> impl Iterator<Item = &str> {
-    s.split(is_py_space).filter(|token| !token.is_empty())
+/// Split on runs of whitespace, dropping empty tokens.
+fn split_space(s: &str) -> impl Iterator<Item = &str> {
+    s.split(is_space).filter(|token| !token.is_empty())
 }
 
 // ---------------------------------------------------------------------------
@@ -103,15 +103,15 @@ struct ParsedMessage<'a> {
 /// command and stripped off. Otherwise the command defaults to publish and the
 /// whole stripped message is the rest. `None` means there is nothing usable.
 fn parse_command(udpmsg: &str) -> Option<(bool, &str)> {
-    let msg = py_strip(udpmsg);
+    let msg = strip_space(udpmsg);
     if msg.is_empty() {
         warn!("Empty UDP message");
         return None;
     }
 
-    // Python's msg.split(None, 1): the separator run belongs to neither side.
-    let (first_token, tail) = match msg.find(is_py_space) {
-        Some(i) => (&msg[..i], Some(py_strip(&msg[i..]))),
+    // The separator run belongs to neither side.
+    let (first_token, tail) = match msg.find(is_space) {
+        Some(i) => (&msg[..i], Some(strip_space(&msg[i..]))),
         None => (msg, None),
     };
 
@@ -153,12 +153,12 @@ fn parse_user_properties(block_content: &str) -> (Option<UserProperties>, usize)
     let mut discarded = 0usize;
     for segment in block_content.split(';') {
         let Some((key, value)) = segment.split_once('=') else {
-            if !py_strip(segment).is_empty() {
+            if !strip_space(segment).is_empty() {
                 discarded += 1;
             }
             continue;
         };
-        let key = py_strip(key);
+        let key = strip_space(key);
         if key.is_empty() {
             discarded += 1;
             continue;
@@ -187,7 +187,7 @@ fn extract_property_block(rest: &str) -> (Option<UserProperties>, &str) {
         return (None, rest);
     };
 
-    let remaining = py_strip(&rest[close_index + 1..]);
+    let remaining = strip_space(&rest[close_index + 1..]);
     if remaining.is_empty() {
         error!("Property block without topic/payload: {}", loggable(rest));
         return (None, rest);
@@ -213,8 +213,8 @@ fn extract_property_block(rest: &str) -> (Option<UserProperties>, &str) {
 /// without quoting.
 fn parse_topic_payload(rest: &str) -> Option<(Cow<'_, str>, Cow<'_, str>)> {
     if let Some(brace_index) = rest.find('{') {
-        let topic_part = rest[..brace_index].trim_end_matches(is_py_space);
-        let payload_part = py_strip(&rest[brace_index..]);
+        let topic_part = rest[..brace_index].trim_end_matches(is_space);
+        let payload_part = strip_space(&rest[brace_index..]);
 
         if topic_part.is_empty() || payload_part.is_empty() {
             error!(
@@ -226,7 +226,7 @@ fn parse_topic_payload(rest: &str) -> Option<(Cow<'_, str>, Cow<'_, str>)> {
         return Some((Cow::Borrowed(topic_part), Cow::Borrowed(payload_part)));
     }
 
-    let tokens: Vec<&str> = py_split(rest).collect();
+    let tokens: Vec<&str> = split_space(rest).collect();
     if tokens.len() < 2 {
         error!(
             "Invalid format - need at least topic + payload: {}",
@@ -282,7 +282,7 @@ fn parse_udp_message(udpmsg: &str) -> Option<ParsedMessage<'_>> {
 
 /// Strip an optional port from a configured address.
 fn host_part(address: &str) -> &str {
-    let address = py_strip(address);
+    let address = strip_space(address);
     if address.starts_with('[') {
         // [::1]:80
         if let Some(closing_bracket) = address.find(']') {
@@ -362,11 +362,11 @@ fn in_prefix(addr: &[u8], net: &[u8], prefix: u32) -> bool {
 /// Deliberately not `Ipv4Addr::is_private`, which is RFC 1918 only: loopback and
 /// link-local have to count too, or a relay talking to a Miniserver on
 /// `127.0.0.1` would be warned about a public address that is nothing of the
-/// sort. The table is Python's `ipaddress.IPv4Address.is_private` (3.13 and
-/// later, including the `192.0.0.9`/`192.0.0.10` exceptions) with one addition:
-/// the CGNAT shared address space `100.64.0.0/10`, for which Python reports
-/// neither `is_private` nor `is_global`. It is not a DynDNS answer either, which
-/// is the mistake the only caller warns about, so it belongs on this side.
+/// sort. The table is the IANA special-purpose address registry, including the
+/// `192.0.0.9`/`192.0.0.10` exceptions, plus one addition: the CGNAT shared
+/// space `100.64.0.0/10`, which the registry marks neither private nor global.
+/// It is not a DynDNS answer either - the mistake the only caller warns about -
+/// so it belongs on this side.
 fn is_non_public_v4(addr: Ipv4Addr) -> bool {
     const NETS: &[(Ipv4Addr, u32)] = &[
         (Ipv4Addr::new(0, 0, 0, 0), 8),
@@ -395,7 +395,7 @@ fn is_non_public_v4(addr: Ipv4Addr) -> bool {
         .any(|(net, prefix)| in_prefix(&octets, &net.octets(), *prefix))
 }
 
-/// [`is_non_public_v4`]'s counterpart: Python's `ipaddress.IPv6Address.is_private`,
+/// [`is_non_public_v4`]'s counterpart, following `ipaddress.IPv6Address.is_private`,
 /// including its delegation for IPv4-mapped addresses.
 fn is_non_public_v6(addr: Ipv6Addr) -> bool {
     const NETS: &[(Ipv6Addr, u32)] = &[
@@ -462,7 +462,7 @@ fn warn_about_public_addresses(addresses: &HashSet<IpAddr>) {
     );
 }
 
-/// Addresses as one comma-separated line, ordered like Python's `sorted()` did:
+/// Addresses as one comma-separated line, ordered by their text form:
 /// by their text form, not numerically.
 fn sorted_listing(addresses: impl Iterator<Item = IpAddr>) -> String {
     let mut sorted: Vec<String> = addresses.map(|addr| addr.to_string()).collect();
@@ -669,7 +669,7 @@ impl SourceFilter {
 // Serving
 // ---------------------------------------------------------------------------
 
-/// Render properties the way the Python logger did, for the debug line only.
+/// Render properties for the debug line only.
 fn format_properties(properties: &Option<UserProperties>) -> String {
     match properties {
         None => "None".to_owned(),
@@ -788,7 +788,7 @@ impl Running {
     }
 }
 
-/// The relay's UDP listener, owned by Python for its lifetime.
+/// The relay's UDP listener.
 ///
 /// Construct it alongside the MQTT client, then [`UdpServer::start`] once the
 /// broker connection is up and [`UdpServer::stop`] on shutdown.
@@ -804,9 +804,9 @@ pub(crate) struct UdpServer {
 
 /// Everything [`start_with`] needs, copied out of the server.
 ///
-/// The future has to be `'static` for the Python awaitable, so it cannot borrow
-/// the server - and writing the bind twice is how the wheel and the binary would
-/// drift apart while both exist.
+/// The future outlives the call that starts it, so it cannot borrow
+/// the server, and so the parameters can be built and inspected without opening
+/// a socket.
 pub(crate) struct StartParams {
     shared: Arc<MqttShared>,
     slot: Arc<Mutex<Option<Running>>>,
@@ -1094,7 +1094,7 @@ mod tests {
     }
 
     #[test]
-    fn the_separators_are_pythons_and_not_rusts() {
+    fn the_separators_include_the_four_rust_leaves_out() {
         // Enumerated rather than derived, because the whole point is that this
         // set is not `char::is_whitespace`: the four ASCII separators below are
         // missing from it, and a Miniserver that sends one would otherwise get
@@ -1106,7 +1106,7 @@ mod tests {
             '\u{200a}', '\u{2028}', '\u{2029}', '\u{202f}', '\u{205f}', '\u{3000}',
         ];
         for c in PY_SPACE {
-            assert!(is_py_space(*c), "U+{:04X} splits in Python", *c as u32);
+            assert!(is_space(*c), "U+{:04X} has to split", *c as u32);
             assert_eq!(
                 parse(&format!("publish{c}topic{c}payload")),
                 expect("publish", "topic", "payload"),
@@ -1114,7 +1114,7 @@ mod tests {
                 *c as u32
             );
         }
-        // Not whitespace to Python either, so it stays inside the payload.
+        // Not a separator, so it stays inside the payload.
         assert_eq!(
             parse("publish topic pay\u{200b}load"),
             expect("publish", "topic", "pay\u{200b}load")

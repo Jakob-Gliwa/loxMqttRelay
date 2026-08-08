@@ -11,7 +11,7 @@
 //! bails out and the DOM path in [`super::flatten`] takes over, so output can
 //! never silently drift.
 //!
-//! Nothing here touches Python. The plans hold plain `Box<str>`, which is what
+//! The plans hold plain `Box<str>`, which is what
 //! lets the whole data path run without the GIL.
 
 use std::borrow::Cow;

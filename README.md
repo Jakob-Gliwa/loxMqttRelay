@@ -320,10 +320,10 @@ An empty pattern counts as unusable, in the file and over the config topics
 alike. An empty expression matches every topic, so a stray `""` next to real
 patterns would not filter one more thing - it would filter everything.
 
-Two habits this puts an end to: `port = "1883"` used to travel all the way to
-the MQTT client before failing, and `udp_source_filter_enabled = "false"` - a
-string, and therefore true - quietly left the source filter switched on.
-Quoting a boolean or a number is now an error rather than a surprise.
+Quoting a boolean or a number is an error rather than a surprise: `port =
+"1883"` is refused here rather than at the point the MQTT client tries to use
+it, and `udp_source_filter_enabled = "false"` - a string, not a boolean - cannot
+leave the source filter switched on while appearing to disable it.
 
 Fields the relay does not know are only warned about, not rejected, so a
 setting that disappears in an upgrade cannot lock you out of your own relay.
@@ -361,11 +361,11 @@ Available log levels: DEBUG, INFO, WARNING, ERROR, CRITICAL
 - CRITICAL: Critical issues that may prevent operation
 
 An invalid level in the config file is refused at startup. On the command line
-or in `LOG_LEVEL` it falls back to INFO with a warning - a typo there used to
-turn on DEBUG, which is the one level that also logs message payloads.
+or in `LOG_LEVEL` it falls back to INFO with a warning rather than to DEBUG,
+which is the one level that also logs message payloads.
 
-The level applies to the Rust half of the relay as well - the MQTT client and
-the UDP listener, which is where the reports about dropped messages come from.
+`RUST_LOG` still overrides all of it, per module, if you want to turn a single
+part of the relay up without the rest.
 Set `RUST_LOG` if you want to override it there on its own (for example
 `RUST_LOG=loxmqttrelay::udp=debug`); it takes precedence over `LOG_LEVEL`.
 
@@ -384,10 +384,10 @@ reconnects and restarts never collide with a stale session on the broker.
 
 #### MQTT Protocol Version
 
-The relay speaks MQTT 5 exclusively. Support for MQTT 3.1.x was removed together
-with the old Python MQTT client; the client is implemented in Rust on top of
-[mqtt-glide](https://crates.io/crates/mqtt-glide). MQTT 5 user properties are
-therefore always available (see [MQTT5 User Properties](#mqtt5-user-properties)).
+The relay speaks MQTT 5 exclusively; there is no MQTT 3.1.x fallback. The client
+is built on [mqtt-glide](https://crates.io/crates/mqtt-glide), and MQTT 5 user
+properties are therefore always available (see
+[MQTT5 User Properties](#mqtt5-user-properties)).
 
 #### Delivery Guarantees
 
@@ -723,23 +723,25 @@ synthetics - lives in `src/process/corpus/`. It is checked in rather than
 generated: it was always fully determined by its seed, so freezing it costs
 nothing.
 
-### What the tests are held against
+### The configuration file, specified by example
 
-This was a Python program until recently, and the port was done against a
-recording of it rather than against a reading of it.
+`golden/config/` is the specification for `src/config`: 40 documents and 41
+control-topic updates, each paired with exactly what the relay does with it -
+every validation message in file order, the file that gets written, and the
+exact bytes of a `config/get` response. `src/config/tests.rs` asserts all of it.
 
-`golden/config/` is that recording: the Python configuration module was run over
-40 documents and 41 MQTT updates, and every validation message in file order,
-every warning, the file it wrote and the exact bytes of a `config/get` response
-were captured. `src/config/tests.rs` asserts the Rust module reproduces all of
-it, and names the two places it deliberately does not. See the README in that
-directory for why it cannot be regenerated.
+It is data rather than assertions because what is being pinned is a few hundred
+error strings, their order and two byte-exact output formats, and those are
+easier to read and extend as files. See the README in that directory for how to
+add a case.
 
-Two tests read a real Miniserver configuration off the machine they run on and
-skip when it is not there - `config/sps0.LoxCC` is gitignored, because it names
-somebody's rooms and devices. Drop any `sps_*.zip` or `*.LoxCC` into `fixtures/`
-and they are picked up too; an older firmware's zip is the only way to get a
-real archive in front of the zip reader.
+### Real Miniserver output
+
+Two tests read an actual Miniserver configuration off the machine they run on
+and skip when it is not there - `config/sps0.LoxCC` is gitignored, because it
+names somebody's rooms and devices. Drop any `sps_*.zip` or `*.LoxCC` into
+`fixtures/` and they are picked up too; an older firmware's zip is the only way
+to get a real archive in front of the zip reader.
 
 ## Releasing
 

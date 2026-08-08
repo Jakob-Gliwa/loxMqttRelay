@@ -7,11 +7,9 @@
 //!
 //! It exists because field names are addressed *flat*. A `config/set` payload
 //! names `cache_size`, not `general.cache_size`, so something has to map a bare
-//! name onto a section - that is what `Config._map_fields_to_sections` did in
-//! Python, by walking the dataclasses at import time. Rust cannot walk its own
-//! structs, so the mapping is written down; [`super::tests`] then asserts the
-//! table and the structs still agree, which is the part that would otherwise
-//! drift.
+//! name onto a section. Rust cannot walk its own structs to build that map, so
+//! it is written down here - and [`super::tests`] asserts the table and the
+//! structs still agree, which is the part that would otherwise drift.
 
 /// The six tables a configuration file has.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
@@ -69,7 +67,7 @@ pub(crate) enum FieldKind {
     Bool,
     Int,
     Str,
-    /// `Optional[str]`, which Python 3.14 renders as `str | None`.
+    /// Optional, and named `str | None` in a mismatch message.
     OptStr,
     /// An ordered list, deduplicated on `add` but never sorted.
     StrList,
@@ -80,8 +78,8 @@ pub(crate) enum FieldKind {
 impl FieldKind {
     /// The name this kind goes by in a mismatch message.
     ///
-    /// These are Python type names because that is what the messages have always
-    /// said, and an operator searching for one of them should still find it.
+    /// Part of the message an operator reads and searches for, so the corpus
+    /// pins every one of them.
     pub(crate) fn expected(self) -> &'static str {
         match self {
             FieldKind::Bool => "bool",

@@ -5,16 +5,14 @@
 //! Rather than write the validation twice, both are converted to [`CfgValue`]
 //! first.
 //!
-//! [`CfgValue::py_type`] is why this type is shaped the way it is: the mismatch
-//! messages name Python types (`got int`, `got dict`, `got NoneType`), because
-//! that is what they have always named and what an operator will have seen
-//! before. Getting those names right is the whole job here.
+//! [`CfgValue::type_name`] is why this type is shaped the way it is: a mismatch
+//! message has to name the type that actually arrived (`got int`, `got dict`,
+//! `got NoneType`), and those names are part of the message an operator reads
+//! and searches for. Getting them right is most of the job here.
 //!
-//! Note what falls out for free. Python needs `_matches_type` to special-case
-//! booleans, because `isinstance(True, int)` holds and `cache_size = true` would
-//! otherwise sail through and only fail once Rust tried to read an integer out
-//! of it. Here [`CfgValue::Bool`] and [`CfgValue::Int`] are simply different
-//! variants, so the confusion the special case defends against cannot arise.
+//! Note that a boolean and an integer are simply different variants, so
+//! `cache_size = true` is a mismatch by construction rather than by a check
+//! somebody has to remember to write.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -36,13 +34,16 @@ pub(crate) enum CfgValue {
     List(Vec<CfgValue>),
     /// Ordered, always: `update_fields` reports its problems in payload order.
     Table(Vec<(String, CfgValue)>),
-    /// A TOML date or time. Carries the name `type(v).__name__` would print.
+    /// A TOML date or time. Carries the name a mismatch message calls it.
     Other(&'static str),
 }
 
 impl CfgValue {
-    /// The name Python's `type(value).__name__` would print for this value.
-    pub(crate) fn py_type(&self) -> &'static str {
+    /// What this value's type is called in a mismatch message.
+    ///
+    /// `NoneType` and `dict` rather than `null` and `table`: these names are
+    /// part of the message an operator reads, and the corpus pins them.
+    pub(crate) fn type_name(&self) -> &'static str {
         match self {
             CfgValue::Null => "NoneType",
             CfgValue::Bool(_) => "bool",
@@ -78,10 +79,10 @@ impl CfgValue {
 
     /// The value read as a collection of strings.
     ///
-    /// A bare string counts as a one-element collection, which is how both
-    /// `_apply_field` and `update_config` treated it. Returns `None` if anything
-    /// in there is not a string - the type check has already reported that, and
-    /// this is only ever reached once it passed.
+    /// A bare string counts as a one-element collection, which is what lets a
+    /// `config/add` name a single topic instead of a list of one. Returns `None`
+    /// if anything in there is not a string - the type check has already
+    /// reported that, and this is only reached once it passed.
     pub(crate) fn as_strings(&self) -> Option<Vec<String>> {
         match self {
             CfgValue::Str(s) => Some(vec![s.clone()]),
@@ -137,8 +138,8 @@ impl From<toml::Value> for CfgValue {
             toml::Value::Integer(i) => CfgValue::Int(i128::from(i)),
             toml::Value::Float(x) => CfgValue::Float(x),
             toml::Value::Boolean(b) => CfgValue::Bool(b),
-            // tomlkit unwraps these to datetime/date/time, and the mismatch
-            // message prints whichever it was.
+            // Reported as whichever of the three it is, so the message names
+            // the thing that was actually written.
             toml::Value::Datetime(dt) => CfgValue::Other(match (dt.date, dt.time) {
                 (Some(_), Some(_)) => "datetime",
                 (Some(_), None) => "date",
@@ -235,9 +236,9 @@ impl<'de> Visitor<'de> for CfgValueVisitor {
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<CfgValue, A::Error> {
         let mut entries = Vec::with_capacity(map.size_hint().unwrap_or(0));
-        // A repeated key is kept rather than merged, the same way a Python dict
-        // literal would keep the last one: the caller walks these in order and
-        // the later assignment wins, which is what json.loads does too.
+        // A repeated key is kept rather than merged: the caller walks these in
+        // order, so the later assignment wins, which is what every JSON reader
+        // does with a duplicate.
         while let Some((key, value)) = map.next_entry::<String, CfgValue>()? {
             entries.push((key, value));
         }

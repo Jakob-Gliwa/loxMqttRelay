@@ -1,9 +1,10 @@
 # Rust
 target/
 
-# Editors
+# Editors and per-tool configuration
 .idea/
 .vscode/
+.claude/
 *.swp
 *.swo
 
@@ -24,6 +25,25 @@ config/sps0.LoxCC
 # them up if they are here and skip if they are not; see
 # `whitelist::tests::the_real_configuration_yields_its_inputs`.
 fixtures/
+
+# Local benchmark harnesses and their captures. Useful, large, and specific to
+# whoever ran them.
+benchmarks/
+benchmark.py
+newbench.py
+
+# Left over from the build this project used to have. None of it is read any
+# more; the whole lot is safe to delete.
+.migration-leftovers/
+build/
+dist/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.coverage
+.pytest_cache/
+.ruff_cache/
+.venv/
 
 # Scratch
 ref/

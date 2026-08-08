@@ -48,9 +48,8 @@ fn read_container(container: &[u8]) -> Result<Vec<u8>, SyncError> {
     let checksum = u32::from_le_bytes(container[12..16].try_into().unwrap());
 
     let payload = &container[16..];
-    // Python read from a stream and compared what it got against what the header
-    // promised; here the bytes are already in hand, so the same check is that
-    // there are enough of them. It is what catches a truncated download.
+    // The bytes are already in hand, so the check is that there are enough of
+    // them. It is what catches a truncated download.
     if payload.len() < compressed_size {
         return Err(SyncError::Container(format!(
             "Payload length mismatch: got {}, expected {compressed_size}",
@@ -78,8 +77,8 @@ fn read_container(container: &[u8]) -> Result<Vec<u8>, SyncError> {
 
 /// Whether these bytes open an LZ4 *frame* rather than a bare block.
 ///
-/// Loxone writes blocks, but the detection was in the Python and costs four
-/// bytes to keep, so a firmware that switches does not need a code change.
+/// Loxone writes blocks, but the detection costs four bytes, so a firmware that
+/// ever switches does not need a code change.
 fn is_lz4_frame(data: &[u8]) -> bool {
     if data.len() < 4 {
         return false;
@@ -108,8 +107,7 @@ fn decompress_lz4(data: &[u8], uncompressed_size: usize) -> Result<Vec<u8>, Sync
 /// size passed is smaller than the real output. A header that understates its
 /// uncompressed size is exactly what a corrupt download looks like, so that
 /// would turn bad input into a dead process. `decompress_into` writes into a
-/// bounded slice instead, which is what `LZ4_decompress_safe` does and what
-/// Python's `lz4.block.decompress(uncompressed_size=N)` called.
+/// bounded slice instead, which is what `LZ4_decompress_safe` does.
 fn decompress_block(data: &[u8], uncompressed_size: usize) -> Result<Vec<u8>, SyncError> {
     let mut out = vec![0u8; uncompressed_size];
     match lz4_flex::block::decompress_into(data, &mut out) {

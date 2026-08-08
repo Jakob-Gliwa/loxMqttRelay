@@ -17,17 +17,17 @@ use super::{Endpoint, SyncError};
 
 /// Per request, not per sync.
 ///
-/// `aiohttp.ClientTimeout(total=30)` was set on the session and therefore
-/// applied to each `session.get(...)` separately, connect through body. Wrapping
-/// the whole sync in one budget instead would silently halve what the download
-/// gets after the listing has used its share.
+/// Connect through body, for each of the two requests separately. One budget
+/// over the whole sync would silently leave the download whatever the listing
+/// did not use, which on a slow link is how a sync starts failing for a reason
+/// that is not the download's fault.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A ceiling on what will be read into memory.
 ///
-/// aiohttp's `resp.read()` had none. A real configuration is well under a
-/// megabyte, and the timeout already bounds this in practice - this is for the
-/// case where something else entirely is on the other end of the socket.
+/// A real configuration is well under a megabyte and the timeout already bounds
+/// this in practice; the cap is for the case where something else entirely is
+/// on the other end of the socket.
 const MAX_BODY: usize = 64 << 20;
 
 /// GET one path, with the standard budget.
@@ -70,9 +70,9 @@ async fn request(
     let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
         .await
         .map_err(|e| transport(e.to_string()))?;
-    // One connection per request, dropped when this task ends. aiohttp reused
-    // the session's; two requests a few minutes apart make that invisible, and
-    // Miniservers are not reliable about keep-alive anyway.
+    // One connection per request, dropped when this task ends. Reusing it would
+    // save nothing across two requests minutes apart, and Miniservers are not
+    // reliable about keep-alive anyway.
     tokio::spawn(async move {
         let _ = connection.await;
     });
@@ -109,10 +109,10 @@ async fn request(
 
 /// The `Authorization` header for HTTP Basic.
 ///
-/// latin-1, and an error above U+00FF rather than a fallback to UTF-8. That is
-/// what `aiohttp.BasicAuth` did, and quietly sending different bytes instead
-/// would show up at the Miniserver as a wrong password - which is a much harder
-/// thing to work out than being told the password cannot be sent.
+/// latin-1, and an error above U+00FF rather than a quiet fallback to UTF-8.
+/// Sending different bytes than the credential the operator configured shows up
+/// at the Miniserver as a wrong password, which is a far harder thing to work
+/// out than being told the password cannot be sent at all.
 pub(super) fn basic_auth(user: &str, password: &str) -> Result<String, SyncError> {
     let mut raw = Vec::with_capacity(user.len() + password.len() + 1);
     for (field, text) in [("username", user), ("password", password)] {
@@ -140,9 +140,8 @@ pub(super) fn basic_auth(user: &str, password: &str) -> Result<String, SyncError
 ///
 /// There is no fixed-name pointer to the active configuration (confirmed with
 /// Loxone), so the newest is picked by `(version, timestamp)`. Matched over the
-/// raw bytes: the listing has no declared charset, aiohttp's `.text()` guessed
-/// one, and the pattern is pure ASCII - so not decoding at all is one fewer
-/// thing that can differ.
+/// raw bytes because the listing declares no charset and the pattern is pure
+/// ASCII: not decoding at all removes the question entirely.
 pub(super) fn select_newest_config(listing: &[u8]) -> Result<String, SyncError> {
     // `[0-9]` and not `\d`, so the question of what counts as a digit in Unicode
     // never arises. `Emergency.LoxCC` and the other files in /prog do not match.
@@ -155,9 +154,8 @@ pub(super) fn select_newest_config(listing: &[u8]) -> Result<String, SyncError> 
             let whole = caps.get(0).expect("group 0").as_bytes();
             let version = caps.get(1).expect("group 1").as_bytes();
             let timestamp = caps.get(2).expect("group 2").as_bytes();
-            // Python compared `(int(v), int(ts), name)` - a whole tuple, so the
-            // filename is a real third key: on an exact tie ".zip" beats
-            // ".LoxCC" because 'z' > 'L'.
+            // The filename is a real third key: on an exact tie ".zip" beats
+            // ".LoxCC", which is what a fresh upload produces.
             (numeric_key(version), numeric_key(timestamp), whole)
         })
         .max();
@@ -170,10 +168,10 @@ pub(super) fn select_newest_config(listing: &[u8]) -> Result<String, SyncError> 
 
 /// A decimal string ordered as a number, without parsing it.
 ///
-/// `int()` is arbitrary precision and `u64::from_str` is not, so a field with
-/// enough digits in it would make the two disagree about which file is newest.
-/// For non-negative decimals, comparing `(length, digits)` after stripping
-/// leading zeros *is* numeric order - and it cannot overflow.
+/// Parsing would put a ceiling on how many digits a field may have, and a
+/// firmware that one day writes more would silently reorder the candidates. For
+/// non-negative decimals, comparing `(length, digits)` after stripping leading
+/// zeros *is* numeric order, and it cannot overflow.
 fn numeric_key(digits: &[u8]) -> (usize, &[u8]) {
     let stripped = match digits.iter().position(|&b| b != b'0') {
         Some(at) => &digits[at..],
@@ -229,9 +227,8 @@ Music.json
 
     /// On an exact tie the filename decides, and ".zip" wins.
     ///
-    /// Python's `max` compared the whole `(version, timestamp, name)` tuple and
-    /// fell through to the name, where 'z' sorts after 'L'. A fresh upload puts
-    /// both files in /prog seconds apart, so this is reachable.
+    /// The filename is a real third sort key, and '.zip' sorts after '.LoxCC'.
+    /// A fresh upload puts both in /prog seconds apart, so this is reachable.
     #[test]
     fn a_dead_tie_is_broken_by_the_filename() {
         let listing = b"sps_1_2.LoxCC\nsps_1_2.zip\n";
@@ -261,7 +258,7 @@ Music.json
     }
 
     #[test]
-    fn credentials_are_encoded_the_way_aiohttp_encoded_them() {
+    fn credentials_are_encoded_as_latin1() {
         assert_eq!(basic_auth("admin", "secret").unwrap(), "Basic YWRtaW46c2VjcmV0");
         // latin-1: 'ü' is one byte, 0xFC.
         let header = basic_auth("u", "ü").unwrap();

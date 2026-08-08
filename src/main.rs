@@ -5,7 +5,6 @@
 //! and never from inside the control-topic handler that asked for it. A
 //! `config/set` arrives on the ingress worker, and replacing the process image
 //! there would do it with the MQTT session and the UDP socket still open.
-//! `main.py` deferred it for exactly that reason, and so does this.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -60,11 +59,10 @@ fn main() {
 
 /// Replace this process with a fresh copy of itself, same arguments.
 ///
-/// What `os.execv(sys.executable, [sys.executable] + sys.argv)` did. Note this
-/// re-execs the binary this process was started from: if it has since been
-/// replaced on disk, the old inode is what comes back. Python had the same
-/// property through `sys.executable`, and a relay that restarts into a
-/// half-written binary would be worse.
+/// Note this re-execs the binary this process was started from: if it has since
+/// been replaced on disk, the old inode is what comes back. That is the safer
+/// half of the trade - a relay that restarts into a half-written binary would
+/// be worse than one running a version that is one release old.
 #[cfg(unix)]
 fn reexec() -> ! {
     use std::os::unix::process::CommandExt as _;

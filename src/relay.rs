@@ -1,12 +1,12 @@
 //! Starting the relay, running it, and stopping it again.
 //!
-//! What `MQTTRelay` in `main.py` did. The startup order is the load-bearing
-//! part and is unchanged, for the reason the Python carried in a comment:
-//! websocket first so writes have somewhere to go, then the whitelist sync, and
-//! only then MQTT. Subscribing with an empty whitelist while
-//! `sync_with_miniserver` is on would drop everything until the sync finished,
-//! and the UDP bind is awaited rather than spawned because a failed bind has to
-//! abort the start instead of vanishing into a discarded task.
+//! The startup order is the load-bearing part. Websocket first, so writes have
+//! somewhere to go; then the whitelist sync; and only then MQTT, because
+//! subscribing with an empty whitelist while `sync_with_miniserver` is on would
+//! drop everything that arrived until the sync finished. The UDP bind is
+//! awaited rather than spawned, because a failed bind has to abort the start
+//! instead of vanishing into a discarded task and leaving a relay that looks
+//! healthy and forwards nothing.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -111,9 +111,8 @@ impl Relay {
         });
 
         if let Err(e) = self.start().await {
-            // Python left the websocket open here and exited. Closing it is the
-            // difference between a clean restart and a Miniserver holding a
-            // token for a process that is gone.
+            // Shut down even though the start failed: the difference is a
+            // Miniserver left holding a token for a process that is gone.
             error!("{e}");
             self.shutdown().await;
             worker.abort();
@@ -206,8 +205,7 @@ impl Relay {
     /// in it. This is the count, at the one moment it can be complete - and it
     /// is what makes the two bounded rings worth keeping: they are a diagnostic,
     /// and a diagnostic nothing ever reads is just a memory leak with good
-    /// intentions. Python offered `take_undelivered()` on both clients for the
-    /// same purpose; nothing calls a method on a binary, so it is reported here.
+    /// intentions.
     fn report_losses(&self) {
         let publishes = self.mqtt.shared().take_undelivered();
         let writes = self.miniserver.shared().take_undelivered();
@@ -227,13 +225,9 @@ impl Relay {
     /// Fetch the whitelist from the Miniserver, if that is switched on.
     ///
     /// Either failure - nothing came back, or nothing could be fetched - keeps
-    /// the configured whitelist and writes nothing. Python's two branches
-    /// disagreed here: the empty one only pushed the list into the processor,
-    /// while the error one also called `update_config`, saving a whitelist that
-    /// had not changed. That write was observable (the file's mtime, and the
-    /// `None` to `""` normalization a first save performs) and it was doing it
-    /// on the one path where the relay had just been told it could not reach the
-    /// Miniserver.
+    /// the configured whitelist and writes nothing. Nothing changed, so there
+    /// is nothing to write - and writing anyway would touch the file on the one
+    /// path where the relay has just been told it cannot reach the Miniserver.
     pub(crate) async fn handle_miniserver_sync(&self) {
         let snapshot = self.config.snapshot();
         if !snapshot.miniserver.sync_with_miniserver {
@@ -307,8 +301,7 @@ impl Relay {
     /// them; a build count that keeps climbing means the payloads carry
     /// something the scanner refuses, and the relay has been paying for the DOM
     /// route the whole time. That is worth knowing and there is nowhere else to
-    /// read it from - Python exposed `get_shape_metrics()` for exactly this, and
-    /// a binary has no methods to call.
+    /// read it from.
     fn report_shape_cache(&self) {
         let m = self.core.shape_metrics();
         if m.hits == 0 && m.learns == 0 {

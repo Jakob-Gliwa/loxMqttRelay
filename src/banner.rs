@@ -6,11 +6,9 @@
 //! when all you have is a bug report - so the values the components baked in at
 //! construction are stated out loud, once, where they can be quoted back.
 //!
-//! Three lines the Python version carried are gone, and none of them by
-//! oversight: the Python version and interpreter path, because there is no
-//! interpreter; the active Rust extension, because there is no extension; and
-//! the active XML parser, because there is one parser now and it cannot fail
-//! to load.
+//! The build line is worth reading twice on x86: the relay ships in two
+//! variants and a launcher picks between them, so `target-cpu` here is how you
+//! tell which one you got.
 
 use log::info;
 

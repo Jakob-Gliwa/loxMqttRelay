@@ -28,9 +28,8 @@ use crate::util::loggable_bytes;
 /// Why a whitelist sync did not finish.
 ///
 /// The `Display` strings are the contract, not an implementation detail: they
-/// are what an operator reads in the log and what they will have searched for
-/// before, so the ones inherited from the Python implementation are reproduced
-/// word for word.
+/// are what an operator reads in the log and searches for, so they are pinned by
+/// the tests rather than left to drift.
 #[derive(Debug)]
 pub(crate) enum SyncError {
     /// The configured address has no host part.
@@ -89,8 +88,8 @@ pub(crate) struct Endpoint {
 }
 
 impl Endpoint {
-    /// `miniserver_ip` may carry a port of its own; only the host part is used,
-    /// exactly as `sync_miniserver_whitelist` did with `.split(':')[0]`.
+    /// `miniserver_ip` may carry a port of its own; only the host part is used
+    /// here, because `miniserver_port` is what decides where to connect.
     pub(crate) fn new(miniserver_ip: &str, port: u16) -> Result<Self, SyncError> {
         let host = miniserver_ip.split(':').next().unwrap_or_default().trim();
         if host.is_empty() {
@@ -104,12 +103,11 @@ impl Endpoint {
 
     /// The port actually dialled: the one that was configured.
     ///
-    /// `_build_base_url` treated 443 as a default alongside 80 and wrote
-    /// `http://{ip}` with no port for both, so a Miniserver configured on 443
-    /// had its filesystem API dialled on **80** - while
-    /// `crate::miniserver::endpoint` correctly maps 443 to https for the
-    /// websocket. The two halves had disagreed since the websocket move, and
-    /// only the websocket side was right.
+    /// Worth stating because it was once not true: 443 was treated as a default
+    /// alongside 80 and elided from the URL, which dialled the filesystem API on
+    /// **80** while [`crate::miniserver`] correctly used https for the websocket
+    /// on the same port. `only_the_http_default_port_is_left_out_of_the_url` is
+    /// the regression test.
     fn dialled_port(&self) -> u16 {
         self.port
     }

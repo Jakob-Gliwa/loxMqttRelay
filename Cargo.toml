@@ -72,9 +72,10 @@ lz4_flex = "0.14.0"
 crc32fast = "1.5.0"
 miniz_oxide = "0.9.1"
 # The configuration XML. Only one fixed query is ever run against it, so this is
-# a streaming scan rather than a DOM - which is both faster on a 2.5 MB document
-# and more tolerant of malformed input, since it can stop and keep what it has.
-# That tolerance is the requirement: lxml read these files in recover mode.
+# a streaming scan rather than a DOM - both faster on a 2.5 MB document and more
+# tolerant of malformed input, since it can stop and keep what it already has.
+# That tolerance is a requirement: these files turn up with duplicate attributes
+# and unclosed elements, and refusing one outright means no whitelist at all.
 quick-xml = "0.41.0"
 # The filesystem API (/dev/fslist, /dev/fsget). Named rather than added: all
 # three already resolve through loxwebsocket -> fastwebsockets, so the graph is

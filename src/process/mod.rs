@@ -86,9 +86,9 @@ impl MqttTopics {
 
     /// What the relay subscribes to besides the configured subscriptions.
     ///
-    /// In the order `main.py` listed them, which is the order the SUBACK
-    /// reasons come back in. `config_response` is not here: the relay publishes
-    /// it, it does not listen for it.
+    /// The order matters: it is the order the SUBACK reasons come back in, and
+    /// `review_suback` reads them against this list. `config_response` is not
+    /// here - the relay publishes it, it does not listen for it.
     pub(crate) fn subscriptions(&self) -> [String; 7] {
         [
             self.config_set.clone(),
@@ -269,7 +269,7 @@ pub(crate) struct Core<E: Egress> {
     topics: MqttTopics,
     // Cached once at construction. Config is immutable between restarts (a
     // config change re-execs the process), so the per-message path needs no
-    // getattr back into Python for these.
+    // rebuilt per message.
     expand_json: bool,
     convert_booleans: bool,
 }

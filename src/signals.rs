@@ -1,15 +1,14 @@
 //! How the relay asks itself to do something.
 //!
-//! Two things used to cross into Python from a tokio thread:
-//! `schedule_miniserver_sync`, from the websocket lifecycle worker and from the
-//! Miniserver startup topic, and `restart_relay`, from a config update. Both
-//! were dispatched with `asyncio.run_coroutine_threadsafe` or
-//! `call_soon_threadsafe`, because the caller was never on the event loop.
+//! Two things need saying from wherever they are noticed: a whitelist resync,
+//! which the websocket lifecycle worker and the Miniserver's startup topic both
+//! ask for, and a shutdown, which a signal and a config update both ask for.
 //!
-//! Natively they are just channels. [`Signals`] is cheap to clone and every
-//! method on it is callable from any task without blocking or failing, which is
-//! what the callers need - a lifecycle hook cannot wait, and a control topic
-//! must not be able to fail because nobody happened to be listening.
+//! [`Signals`] is cheap to clone and every method on it is callable from any
+//! task without blocking or failing. That is the requirement, not a
+//! convenience: a lifecycle hook runs on the websocket's reader task and cannot
+//! wait, and a control topic must not be able to fail because nobody happened
+//! to be listening yet.
 
 use std::sync::Arc;
 
@@ -18,9 +17,9 @@ use tokio::sync::{Notify, watch};
 
 /// Something that can ask for a whitelist resync.
 ///
-/// A trait so [`crate::miniserver::lifecycle_worker`] does not have to know
-/// whether the relay above it is Rust or Python. There are two implementors
-/// while both exist; the Python one goes with `main.py`.
+/// A trait so [`crate::miniserver::lifecycle_worker`] can say "this connection
+/// came back" without knowing that the answer is a whole configuration
+/// download, or who will do it.
 pub(crate) trait ResyncTrigger: Send + Sync {
     fn request_resync(&self);
 }

@@ -11,13 +11,14 @@
 //! thin sequencing layer over the two, and `src/launcher.rs` is the small
 //! program that picks which build of it to run.
 //!
-//! # Where the comments talk about Python
+//! # Two things the comments keep coming back to
 //!
-//! This was a Python program, and the parts facing the Miniserver were ported
-//! rather than rewritten: the UDP message format is whatever the old parser
-//! accepted, and the configuration file is whatever the old loader wrote. Where
-//! a comment says "Python did X", it records why something looks the way it
-//! does - it is not describing code that still exists.
+//! The UDP parser and the configuration loader both implement formats that were
+//! defined by an earlier implementation and are now fixed by what is already
+//! deployed. Where one of them looks odd, the comment says which rule it is
+//! following rather than leaving it as a puzzle - `str.isspace()` semantics for
+//! whitespace, latin-1 for HTTP Basic, and the attribute normalization every
+//! conforming XML parser applies.
 
 pub mod banner;
 pub mod cli;

@@ -34,12 +34,13 @@ pub(crate) trait ControlSink: Send + Sync {
     fn dispatch(&self, kind: ControlTopic, payload: &[u8]) -> Result<(), String>;
 }
 
-/// The control topics, natively.
+/// The four actions a control topic can trigger.
 ///
-/// The same four actions, with the two that used to be Python callbacks now
-/// signals: a resync is a `Notify`, and a restart is the stop channel carrying
-/// `restart: true`. Nothing here can fail in a way the caller could act on, so
-/// unlike the Python-backed implementation it never has anything to report.
+/// Two of them are signals rather than work done here: a resync wakes the
+/// worker that owns it, and a restart is the stop channel carrying
+/// `restart: true`, so the re-exec happens once the runtime has been shut down
+/// rather than from inside the message path. Nothing here can fail in a way the
+/// caller could act on, which is why it never reports anything.
 pub(crate) struct NativeControlSink {
     config: Arc<ConfigStore>,
     mqtt: Arc<MqttShared>,
@@ -97,7 +98,7 @@ impl ControlSink for NativeControlSink {
                     Ok(other) => error!(
                         "Configuration update on '{}' is a {}, not an object",
                         loggable(&text),
-                        other.py_type()
+                        other.type_name()
                     ),
                     Err(e) => error!(
                         "Invalid JSON format in MQTT message '{}': {e}",
@@ -215,7 +216,7 @@ mod tests {
     // -- config/get ---------------------------------------------------------
 
     /// The response goes to the response topic, redacted, and is the same bytes
-    /// `AppConfig::safe_json` produces - which the goldens pin against orjson.
+    /// `AppConfig::safe_json` produces - whose exact bytes the corpus pins.
     #[test]
     fn config_get_publishes_the_safe_config_to_the_response_topic() {
         let mut config = AppConfig::default();
