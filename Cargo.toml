@@ -37,7 +37,13 @@ lru = "0.18.0"          # LRU cache
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 log = "0.4.32"
-env_logger = "0.11.10"     
+env_logger = "0.11.10"
+# loxwebsocket and mqtt-glide log their internal diagnostics (close codes,
+# reconnect timing, session failures) through `tracing`, not `log`. With no
+# `tracing::Subscriber` installed those events go nowhere - the "log" feature
+# makes tracing fall back to the `log` facade whenever no subscriber is
+# listening, so they reach the same env_logger output as everything else.
+tracing = { version = "0.1.44", default-features = false, features = ["std", "log"] }
 tokio = { version = "1.52.3", features = ["full"] }
 base64 = "0.22.1"
 # Pin the rustls crypto provider explicitly: exactly one is required, and `ring`
