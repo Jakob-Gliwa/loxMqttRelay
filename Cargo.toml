@@ -51,7 +51,7 @@ base64 = "0.22.1"
 mqtt-glide = { version = "0.1.1", default-features = false, features = ["tls-rustls-ring"] }
 # The Miniserver websocket. Same rustls/ring provider as mqtt-glide above, so
 # the graph keeps exactly one of each; `cargo tree -d` is what checks that.
-loxwebsocket = "0.2.0"
+loxwebsocket = "0.3.0"
 arc-swap = "1.9"
 # The topic and payload types glide's publish builder takes. Named here so a
 # publish can hand its buffers over instead of being copied into them; the

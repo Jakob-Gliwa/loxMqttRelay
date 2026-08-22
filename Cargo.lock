@@ -1029,9 +1029,9 @@ dependencies = [
 
 [[package]]
 name = "loxwebsocket"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffdebf83615df3f2d8e231e00b645194fcb64c56fee0d9919b3216a0ca89e362"
+checksum = "78ee7291eba20da0f8cc73ecd1ba1a3e6f9a6fb281dfffe5362c227747df1f60"
 dependencies = [
  "aes",
  "base64 0.23.1",
