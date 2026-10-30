@@ -293,10 +293,9 @@ expires, roughly a minute.
 
 There is no MQTT Last Will behind this, so a relay that is killed rather than
 stopped, or one whose network goes away, leaves its last status standing until
-someone overwrites it. A Last Will would have to be set on CONNECT; mqtt-glide
-carries it in its codec but does not expose it on the client or its options
-yet, so the only way to close that gap for now is to watch the status topic's
-age from outside.
+someone overwrites it. mqtt-glide can set a Last Will on CONNECT, but the relay
+does not configure one yet, so the only way to close that gap for now is to
+watch the status topic's age from outside.
 
 Miniserver requests still in flight are cancelled rather than awaited - see
 [Delivery Guarantees](#delivery-guarantees).

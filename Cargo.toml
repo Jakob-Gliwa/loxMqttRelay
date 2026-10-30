@@ -32,27 +32,27 @@ strip = "symbols"
 panic = "unwind"
 
 [dependencies]
-regex = "1.12.3"
-lru = "0.18.0"          # LRU cache
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
-log = "0.4.32"
-env_logger = "0.11.10"
+regex = "1.13.1"
+lru = "0.19.0"          # LRU cache
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+log = "0.4.34"
+env_logger = "0.11.11"
 # loxwebsocket and mqtt-glide log their internal diagnostics (close codes,
 # reconnect timing, session failures) through `tracing`, not `log`. With no
 # `tracing::Subscriber` installed those events go nowhere - the "log" feature
 # makes tracing fall back to the `log` facade whenever no subscriber is
 # listening, so they reach the same env_logger output as everything else.
 tracing = { version = "0.1.44", default-features = false, features = ["std", "log"] }
-tokio = { version = "1.52.3", features = ["full"] }
-base64 = "0.22.1"
+tokio = { version = "1.54.1", features = ["full"] }
+base64 = "0.23.1"
 # Pin the rustls crypto provider explicitly: exactly one is required, and `ring`
 # builds without cmake/NASM on the ARM targets this ships to.
-mqtt-glide = { version = "0.1.1", default-features = false, features = ["tls-rustls-ring"] }
+mqtt-glide = { version = "0.4.0", default-features = false, features = ["tls-rustls-ring"] }
 # The Miniserver websocket. Same rustls/ring provider as mqtt-glide above, so
 # the graph keeps exactly one of each; `cargo tree -d` is what checks that.
-loxwebsocket = "0.3.0"
-arc-swap = "1.9"
+loxwebsocket = "0.3.2"
+arc-swap = "1.9.3"
 # The topic and payload types glide's publish builder takes. Named here so a
 # publish can hand its buffers over instead of being copied into them; the
 # majors are the ones mqtt-glide already resolves, so the graph keeps one of each.
@@ -62,11 +62,11 @@ bytestring = "1.5"
 # every unusable value in the order it appears in the file, and an unordered map
 # would scramble that into something an operator cannot follow back to a line.
 # It resolves to `indexmap`, which the graph already carries.
-toml = { version = "1.1.4", features = ["preserve_order"] }
+toml = { version = "1.1.8", features = ["preserve_order"] }
 # getuid/getgid for the "cannot write the config" hint, and uname for the startup
 # banner. Both need a syscall std does not expose; rustix is the way to make them
 # without putting the crate's first `unsafe` block in a diagnostic message.
-rustix = { version = "1.1.4", features = ["process", "system"] }
+rustix = { version = "1.1.6", features = ["process", "system"] }
 # The Miniserver's configuration download (src/whitelist). A LoxCC container is
 # LZ4 - block mode in practice, frame mode allowed for - wrapped in a CRC32, and
 # sometimes inside a zip. lz4_flex does both modes in pure Rust and, unlike the C
@@ -75,20 +75,20 @@ rustix = { version = "1.1.4", features = ["process", "system"] }
 # aes, bzip2, zstd, lzma and zopfli in by default for one fixed entry we can read
 # out of the central directory ourselves.
 lz4_flex = "0.14.0"
-crc32fast = "1.5.0"
+crc32fast = "1.5.3"
 miniz_oxide = "0.9.1"
 # The configuration XML. Only one fixed query is ever run against it, so this is
 # a streaming scan rather than a DOM - both faster on a 2.5 MB document and more
 # tolerant of malformed input, since it can stop and keep what it already has.
 # That tolerance is a requirement: these files turn up with duplicate attributes
 # and unclosed elements, and refusing one outright means no whitelist at all.
-quick-xml = "0.41.0"
+quick-xml = "0.42.0"
 # The filesystem API (/dev/fslist, /dev/fsget). Named rather than added: all
 # three already resolve through loxwebsocket -> fastwebsockets, so the graph is
 # unchanged. reqwest would have brought hyper-rustls alongside the tokio-rustls
 # already here, and the one-crypto-provider pin above is worth more than the
 # convenience - these two requests are plaintext HTTP and need no TLS at all.
-hyper = { version = "1.11.0", features = ["client", "http1"] }
-hyper-util = { version = "0.1.20", features = ["tokio"] }
-http-body-util = "0.1.4"
-clap = { version = "4.6.6", features = ["derive", "env"] }
+hyper = { version = "1.12.0", features = ["client", "http1"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+http-body-util = "0.1.5"
+clap = { version = "4.6.7", features = ["derive", "env"] }

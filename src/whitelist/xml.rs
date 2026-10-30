@@ -27,7 +27,7 @@ use super::SyncError;
 
 /// An element that is currently open.
 struct Frame {
-    name: Box<[u8]>,
+    name: Box<str>,
     /// Whether this element is itself a `VirtualInCaption`.
     vic: bool,
 }
@@ -59,7 +59,7 @@ pub(crate) fn extract_inputs(config_xml: &[u8]) -> Result<Vec<String>, SyncError
         match reader.read_event() {
             Ok(Event::Start(e)) => {
                 saw_element = true;
-                let is_c = e.name().as_ref() == b"C";
+                let is_c = e.name().as_ref() == "C";
                 // Emit before pushing this element's own flag. That is what
                 // makes `//C[...]//C` a strict descendant axis: a
                 // VirtualInCaption never contributes its own Title, only its
@@ -67,7 +67,7 @@ pub(crate) fn extract_inputs(config_xml: &[u8]) -> Result<Vec<String>, SyncError
                 if is_c && vic_open > 0 {
                     push_title(&mut titles, &e);
                 }
-                let vic = is_c && attribute(&e, b"Type").as_deref() == Some("VirtualInCaption");
+                let vic = is_c && attribute(&e, "Type").as_deref() == Some("VirtualInCaption");
                 if vic {
                     vic_open += 1;
                 }
@@ -80,7 +80,7 @@ pub(crate) fn extract_inputs(config_xml: &[u8]) -> Result<Vec<String>, SyncError
                 saw_element = true;
                 // No descendants, so it never enters the stack - even when it is
                 // itself a VirtualInCaption.
-                if e.name().as_ref() == b"C" && vic_open > 0 {
+                if e.name().as_ref() == "C" && vic_open > 0 {
                     push_title(&mut titles, &e);
                 }
             }
@@ -126,7 +126,7 @@ pub(crate) fn extract_inputs(config_xml: &[u8]) -> Result<Vec<String>, SyncError
 }
 
 fn push_title(titles: &mut Vec<String>, element: &BytesStart<'_>) {
-    if let Some(title) = attribute(element, b"Title")
+    if let Some(title) = attribute(element, "Title")
         && !title.is_empty()
     {
         // A title of one space is a title; only an empty one is dropped.
@@ -147,15 +147,14 @@ fn push_title(titles: &mut Vec<String>, element: &BytesStart<'_>) {
 ///   a single space - and a CRLF becomes one space, not two - while the same
 ///   character written as `&#10;` survives. So the normalization happens on the
 ///   raw text, before unescaping.
-fn attribute(element: &BytesStart<'_>, wanted: &[u8]) -> Option<String> {
+fn attribute(element: &BytesStart<'_>, wanted: &str) -> Option<String> {
     let mut attributes = element.attributes();
     attributes.with_checks(false);
     for attribute in attributes.flatten() {
         if attribute.key.as_ref() != wanted {
             continue;
         }
-        let raw = String::from_utf8_lossy(&attribute.value);
-        let normalized = normalize_whitespace(&raw);
+        let normalized = normalize_whitespace(&attribute.value);
         return Some(match quick_xml::escape::unescape(&normalized) {
             Ok(value) => value.into_owned(),
             // An entity we do not know is not worth losing the input over; the

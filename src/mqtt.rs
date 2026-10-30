@@ -22,8 +22,9 @@ use bytes::Bytes;
 use bytestring::ByteString;
 use log::{debug, error, info, warn};
 use mqtt_glide::{
-    AppError, ClientBuilder, ClientId, LifecycleHook, MqttClient as GlideClient, PublishMessage,
-    QoS, SessionPhase, StandardReconnectPolicy, StaticCredentials, SubscribeAckReason, Subscription,
+    AppError, ClientBuilder, ClientId, InboundMessage, LifecycleHook, MqttClient as GlideClient,
+    PublishError, QoS, SessionPhase, StandardReconnectPolicy, StaticCredentials,
+    SubscribeAckReason, Subscription,
 };
 use tokio::sync::{Notify, mpsc};
 
@@ -113,11 +114,12 @@ impl MqttShared {
 
     /// The client handle, but only while a session is actually up.
     ///
-    /// Glide keeps accepting publishes into its command channel across a
-    /// reconnect and lets them run into the acknowledgement timeout, which
-    /// would report a message lost seconds later and under the wrong reason.
-    /// At QoS 0 with no outbox there is nothing to gain from that wait, so a
-    /// publish without a session is refused here and now.
+    /// Left to itself, glide queues a publish issued without a session and sends
+    /// it on the next connection - a relayed value from before the outage,
+    /// arriving after it. At QoS 0 with no outbox that is not wanted, so a
+    /// publish without a session is refused here and now. The client is also
+    /// built with `fail_fast_when_disconnected`, which closes the window between
+    /// the connection dropping and [`ConnectSignal`] hearing of it.
     fn live_client(&self) -> Option<Arc<GlideClient>> {
         if self.session_live.load(Ordering::Acquire) {
             self.client.load_full()
@@ -213,17 +215,41 @@ impl MqttShared {
         retain: bool,
         qos: QoS,
         user_properties: Vec<(String, String)>,
-    ) -> Result<(), AppError> {
-        let mut publish = client
-            .publish_with()
-            .topic(topic)
-            .payload(payload)
+    ) -> Result<(), PublishError> {
+        client
+            .publish(topic, payload)
             .qos(qos)
-            .retain(retain);
-        for (key, value) in user_properties {
-            publish = publish.user_property(key, value);
+            .retain(retain)
+            .user_properties(user_properties)
+            .send()
+            .await
+            .map(drop)
+    }
+
+    /// Logs and remembers a publish glide refused or could not complete.
+    ///
+    /// A `NotConnected` is the session dropping between [`Self::live_client`]
+    /// and the publish, so it is reported as what it is rather than as a send
+    /// failure.
+    fn record_failure(
+        &self,
+        topic: &str,
+        payload: &[u8],
+        error: &PublishError,
+        source: Option<SocketAddr>,
+    ) -> DropReason {
+        if matches!(error.error, AppError::NotConnected) {
+            self.record_drop(topic, payload, DropReason::Disconnected, None, source);
+            return DropReason::Disconnected;
         }
-        publish.send().await
+        self.record_drop(
+            topic,
+            payload,
+            DropReason::SendFailed,
+            Some(&error.to_string()),
+            source,
+        );
+        DropReason::SendFailed
     }
 
     /// Publish, or report why the message was lost. Never fails silently.
@@ -253,16 +279,7 @@ impl MqttShared {
         .await;
         match result {
             Ok(()) => None,
-            Err(e) => {
-                self.record_drop(
-                    &topic,
-                    &payload,
-                    DropReason::SendFailed,
-                    Some(&e.to_string()),
-                    source,
-                );
-                Some(DropReason::SendFailed)
-            }
+            Err(e) => Some(self.record_failure(&topic, &payload, &e, source)),
         }
     }
 
@@ -336,13 +353,7 @@ impl MqttShared {
             )
             .await;
             if let Err(e) = result {
-                shared.record_drop(
-                    &topic,
-                    &payload,
-                    DropReason::SendFailed,
-                    Some(&e.to_string()),
-                    None,
-                );
+                shared.record_failure(&topic, &payload, &e, None);
             }
         });
     }
@@ -378,7 +389,7 @@ impl LifecycleHook for ConnectSignal {
                      connection"
                 );
             }
-            SessionPhase::NeverConnected => {}
+            _ => {}
         }
     }
 }
@@ -533,7 +544,7 @@ const BATCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// which is the behaviour worth having: the alternative is a growing pile of
 /// detached tasks all writing to the same socket.
 async fn ingress_worker(
-    mut rx: mpsc::Receiver<PublishMessage>,
+    mut rx: mpsc::Receiver<InboundMessage>,
     core: Arc<Core<LoxEgress>>,
     control: Arc<dyn ControlSink>,
 ) {
@@ -620,7 +631,7 @@ pub(crate) async fn connect_with(params: ConnectParams) -> Result<(), RelayError
         control,
     } = params;
 
-    let (tx, rx) = mpsc::channel::<PublishMessage>(INBOUND_CAPACITY);
+    let (tx, rx) = mpsc::channel::<InboundMessage>(INBOUND_CAPACITY);
     let notify = Arc::new(Notify::new());
 
     let receive_maximum = NonZeroU16::new(u16::try_from(INBOUND_CAPACITY).unwrap_or(u16::MAX))
@@ -643,6 +654,7 @@ pub(crate) async fn connect_with(params: ConnectParams) -> Result<(), RelayError
                 .receive_maximum(receive_maximum)
                 .command_channel_capacity(command_capacity)
                 .tcp_nodelay(true)
+                .fail_fast_when_disconnected(true)
         });
 
     if let Some((user, password)) = credentials {
