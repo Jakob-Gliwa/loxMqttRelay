@@ -63,7 +63,7 @@ branches have their own channel, so a merge never reaches anyone running
 | `0.3` | the newest patch release of that minor version |
 | `0.4.0-rc1` | a prerelease; published under its own name only, it moves neither `latest` nor `0.4` |
 | `experimental` | the current state of `main`. Not released, may break |
-| `experimental-bugfix` | the current state of the `bugfix` branch |
+| `experimental-<branch>` | a branch built on request, to try it before it lands on `main` |
 | `experimental-<sha>` | one specific commit, so you can pin an experimental image and go back to it |
 
 Pin a version tag if an update should be a decision rather than a restart -
@@ -747,8 +747,9 @@ to get a real archive in front of the zip reader.
 Two workflows, and only one of them can publish a version:
 
 - `ci.yml` runs on every pull request (build only, nothing is pushed) and on
-  pushes to `main` and `bugfix`, where it publishes the `experimental` channel.
-  It can never move `latest`.
+  pushes to `main`, where it publishes the `experimental` channel. Started by
+  hand on another branch, it publishes `experimental-<branch>`. It can never
+  move `latest`.
 - `release.yml` runs when a GitHub Release is published and is the only source of
   the version tags and `latest`.
 
@@ -771,7 +772,12 @@ cargo metadata --format-version 1 >/dev/null
 
 The release is gated on the same tests as `main`, plus a check that the git tag
 matches `Cargo.toml` - so a tag without the matching bump fails instead of
-shipping an image that misreports itself. Since GitHub publishes the release
+shipping an image that misreports itself.
+
+Both workflows also run `cargo audit` against the advisory database as it is on
+the day, so a new advisory fails the next run even if nothing in the tree
+changed. An advisory that does not apply is accepted in `.cargo/audit.toml`,
+together with the reason it does not. Since GitHub publishes the release
 before any of that runs, a failing gate turns the release back into a draft.
 
 ## Note

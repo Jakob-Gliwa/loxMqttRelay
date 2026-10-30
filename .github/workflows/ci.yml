@@ -3,8 +3,8 @@ name: CI (Build, Test & Experimental)
 # Validation plus the experimental channel:
 #   * pull_request      -> test + multi-arch build ONLY (never pushes)
 #   * push to main      -> test + build + push :experimental
-#   * push to bugfix    -> test + build + push :experimental-bugfix
-#   * workflow_dispatch -> same as a push to the dispatched branch
+#   * workflow_dispatch -> same as a push; on any other branch it pushes
+#                          :experimental-<branch>, to try a branch before it lands
 #
 # Every image from here carries an :experimental prefix. The versioned tags and
 # the moving :latest are published exclusively by release.yml, so a merge to main
@@ -15,7 +15,6 @@ on:
   push:
     branches:
       - main
-      - bugfix
   pull_request:
 
 # Cancel superseded runs on the same ref to save runner minutes.
@@ -46,8 +45,16 @@ jobs:
       - name: Cache the cargo registry and target directory
         uses: Swatinem/rust-cache@v2
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+      - name: Install cargo-nextest and cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest,cargo-audit
+
+      # Against the advisory database as it is today, not as it was when the
+      # lockfile last changed - so an advisory published against an unchanged
+      # tree fails the next run. Accepted advisories live in .cargo/audit.toml.
+      - name: Audit dependencies
+        run: cargo audit
 
       # Formatting is checked but not enforced yet: the tree predates a rustfmt
       # that reflows several files, and reformatting them wholesale would bury
@@ -232,7 +239,7 @@ jobs:
           flavor: |
             latest=false
           # A moving tag per branch (:experimental for main,
-          # :experimental-bugfix for the bugfix branch) plus an immutable
+          # :experimental-<branch> for a dispatched branch) plus an immutable
           # :experimental-<short-sha> you can pin and roll back to.
           tags: |
             type=raw,value=experimental,enable={{is_default_branch}}

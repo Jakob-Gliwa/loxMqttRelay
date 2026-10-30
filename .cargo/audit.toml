@@ -1,0 +1,11 @@
+# Advisories `cargo audit` is told to accept. Each needs a reason that still
+# holds, and goes once a fixed release is in the lockfile.
+
+[advisories]
+ignore = [
+    # rsa 0.9 (via loxwebsocket): Marvin, a timing side channel in RSA
+    # *decryption*. The relay only ever encrypts, with the Miniserver's public
+    # key during the key exchange, and holds no private key to leak. No fixed
+    # rsa release exists.
+    "RUSTSEC-2023-0071",
+]

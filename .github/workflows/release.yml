@@ -41,8 +41,13 @@ jobs:
       - name: Cache the cargo registry and target directory
         uses: Swatinem/rust-cache@v2
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+      - name: Install cargo-nextest and cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest,cargo-audit
+
+      - name: Audit dependencies
+        run: cargo audit
 
       - name: Lint
         run: cargo clippy --all-targets -- -D warnings
