@@ -1098,9 +1098,9 @@ dependencies = [
 
 [[package]]
 name = "mqtt-glide"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9cf9d4c656add0c8b66f9159774da77ddb85e706fe1ef168b53f6a0ac98624da"
+checksum = "6654d2b9fb712b80153dbe7aa1cadbba6733ae193cfd2f129262d48d789bea8e"
 dependencies = [
  "arc-swap",
  "bitflags 2.13.2",

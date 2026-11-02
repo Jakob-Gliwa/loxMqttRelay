@@ -48,7 +48,7 @@ tokio = { version = "1.54.1", features = ["full"] }
 base64 = "0.23.1"
 # Pin the rustls crypto provider explicitly: exactly one is required, and `ring`
 # builds without cmake/NASM on the ARM targets this ships to.
-mqtt-glide = { version = "0.4.0", default-features = false, features = ["tls-rustls-ring"] }
+mqtt-glide = { version = "0.5.0", default-features = false, features = ["tls-rustls-ring"] }
 # The Miniserver websocket. Same rustls/ring provider as mqtt-glide above, so
 # the graph keeps exactly one of each; `cargo tree -d` is what checks that.
 loxwebsocket = "0.3.2"

@@ -9,7 +9,7 @@ port = { k = "v" }
 user = { k = "v" }
 password = { k = "v" }
 client_id = { k = "v" }
-force_qos1 = { k = "v" }
+ack_timeout = { k = "v" }
 
 [miniserver]
 miniserver_ip = { k = "v" }

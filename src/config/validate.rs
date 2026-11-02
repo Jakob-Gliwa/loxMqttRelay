@@ -16,6 +16,10 @@ use crate::util::strip_space;
 
 const LOG_LEVELS: [&str; 5] = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"];
 
+/// Zero would fail every SUBSCRIBE on the spot; past five minutes the relay
+/// would sit on a broker that is not answering instead of saying so.
+const ACK_TIMEOUT_SECS: std::ops::RangeInclusive<i128> = 1..=300;
+
 /// Why `value` does not fit `kind`, or `None` if it does.
 pub(crate) fn type_mismatch(
     name: &str,
@@ -84,6 +88,16 @@ pub(crate) fn value_problem(name: &str, checks: &[Check], value: &CfgValue) -> O
                 .as_int()
                 .filter(|n| *n < 0)
                 .map(|n| format!("'{name}' cannot be negative, got {n}")),
+            Check::AckTimeout => value
+                .as_int()
+                .filter(|n| !ACK_TIMEOUT_SECS.contains(n))
+                .map(|n| {
+                    format!(
+                        "'{name}' must be between {} and {} seconds, got {n}",
+                        ACK_TIMEOUT_SECS.start(),
+                        ACK_TIMEOUT_SECS.end()
+                    )
+                }),
             Check::LogLevel => value
                 .as_str()
                 .filter(|s| !LOG_LEVELS.contains(&s.to_uppercase().as_str()))

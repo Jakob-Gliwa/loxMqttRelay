@@ -9,7 +9,7 @@ port = 1979-05-27T07:32:00Z
 user = 1979-05-27T07:32:00Z
 password = 1979-05-27T07:32:00Z
 client_id = 1979-05-27T07:32:00Z
-force_qos1 = 1979-05-27T07:32:00Z
+ack_timeout = 1979-05-27T07:32:00Z
 
 [miniserver]
 miniserver_ip = 1979-05-27T07:32:00Z

@@ -9,7 +9,7 @@ port = [1, 2]
 user = [1, 2]
 password = [1, 2]
 client_id = [1, 2]
-force_qos1 = [1, 2]
+ack_timeout = [1, 2]
 
 [miniserver]
 miniserver_ip = [1, 2]

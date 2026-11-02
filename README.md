@@ -376,21 +376,19 @@ port = 1884
 user = ""  # null becomes empty string in TOML
 password = ""  # null becomes empty string in TOML
 client_id = "loxmqttrelay"
-force_qos1 = false
+ack_timeout = 5
 ```
 
 `client_id` is used as a prefix; the relay appends a random suffix so that
 reconnects and restarts never collide with a stale session on the broker.
 
-`force_qos1` subscribes to every topic at QoS 1 instead of QoS 0. Leave it
-off unless your broker needs it. It exists for brokers that forward a resent
-QoS 1 message to a QoS 0 subscriber with its DUP flag still set - which MQTT
-forbids, and which makes the relay drop the connection with `MQTT disconnected:
-... Malformed packet: PUBLISH QoS 0 with DUP`, followed by a reconnect. NanoMQ does this (seen with
-0.25.7) whenever a publisher repeats a message it did not get an acknowledgement
-for. At QoS 1 the flag is legal and the message is processed normally. It does
-not add an outbox or a guarantee: the broker may now redeliver a message the
-relay has already processed, and what the relay publishes stays at QoS 0.
+`ack_timeout` is how many seconds (1-300) the relay waits for the broker to
+acknowledge a `SUBSCRIBE` or the QoS 1 status publish. Leave it at 5 unless the
+log shows `Subscribe failed: subscribe acknowledgement timed out after 5s`. Some
+brokers, NanoMQ among them, answer slowly right after a connect. Messages then
+already flow while the acknowledgement is still missing, and the relay keeps
+retrying the subscription. A larger value, e.g. `30`, gives such a broker the
+time it needs.
 
 #### MQTT Protocol Version
 
@@ -401,10 +399,9 @@ properties are therefore always available (see
 
 #### Delivery Guarantees
 
-**There are none while the broker is unreachable.** The relay subscribes (unless
-`force_qos1` is set) and publishes at QoS 0 and keeps no outbox: a message that
-cannot be handed to the broker at that moment is dropped, not queued and not
-retried. This applies to
+**There are none while the broker is unreachable.** The relay subscribes and
+publishes at QoS 0 and keeps no outbox: a message that cannot be handed to the
+broker at that moment is dropped, not queued and not retried. This applies to
 everything the relay relays - UDP messages coming from the Miniserver and the
 `config/response` payload alike.
 

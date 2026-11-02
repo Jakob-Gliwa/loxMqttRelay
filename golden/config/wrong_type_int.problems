@@ -4,7 +4,6 @@
 [broker] 'user' expects str | None, got int
 [broker] 'password' expects str | None, got int
 [broker] 'client_id' expects str, got int
-[broker] 'force_qos1' expects bool, got int
 [miniserver] 'miniserver_ip' expects str, got int
 [miniserver] 'miniserver_user' expects str, got int
 [miniserver] 'miniserver_pass' expects str, got int

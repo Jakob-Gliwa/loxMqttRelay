@@ -9,7 +9,7 @@ port = true
 user = true
 password = true
 client_id = true
-force_qos1 = true
+ack_timeout = true
 
 [miniserver]
 miniserver_ip = true

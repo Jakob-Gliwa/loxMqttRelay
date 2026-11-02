@@ -9,7 +9,7 @@ port = 1883
 user = ""
 password = ""
 client_id = "loxmqttrelay"
-force_qos1 = false
+ack_timeout = 5
 
 [miniserver]
 miniserver_ip = "127.0.0.1"

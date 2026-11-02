@@ -98,6 +98,8 @@ pub(crate) enum Check {
     Port,
     /// `cache_size`, which may be zero but not negative.
     NonNegative,
+    /// `ack_timeout`, in seconds: 1..=300.
+    AckTimeout,
     /// One of the five level names, in any case.
     LogLevel,
     /// Not empty once stripped.
@@ -184,10 +186,10 @@ pub(crate) static FIELDS: &[FieldSpec] = &[
         protected: false,
     },
     FieldSpec {
-        name: "force_qos1",
+        name: "ack_timeout",
         section: ConfigSection::Broker,
-        kind: FieldKind::Bool,
-        checks: &[],
+        kind: FieldKind::Int,
+        checks: &[Check::AckTimeout],
         protected: false,
     },
     // -- miniserver ---------------------------------------------------------

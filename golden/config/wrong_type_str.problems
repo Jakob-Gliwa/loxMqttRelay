@@ -1,7 +1,7 @@
 [general] 'log_level' must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL, got 'x'
 [general] 'cache_size' expects int, got str
 [broker] 'port' expects int, got str
-[broker] 'force_qos1' expects bool, got str
+[broker] 'ack_timeout' expects int, got str
 [miniserver] 'miniserver_port' expects int, got str
 [miniserver] 'sync_with_miniserver' expects bool, got str
 [topics] 'subscriptions' expects a list, got str

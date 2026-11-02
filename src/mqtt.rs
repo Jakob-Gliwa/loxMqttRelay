@@ -394,14 +394,6 @@ impl LifecycleHook for ConnectSignal {
     }
 }
 
-fn qos_number(qos: QoS) -> u8 {
-    match qos {
-        QoS::AtMostOnce => 0,
-        QoS::AtLeastOnce => 1,
-        QoS::ExactlyOnce => 2,
-    }
-}
-
 fn is_granted(reason: SubscribeAckReason) -> bool {
     matches!(
         reason,
@@ -484,7 +476,6 @@ fn review_suback(
 async fn resubscribe_loop(
     shared: Arc<MqttShared>,
     topics: Vec<String>,
-    qos: QoS,
     status_topic: String,
     notify: Arc<Notify>,
     reconnect: StandardReconnectPolicy,
@@ -501,14 +492,10 @@ async fn resubscribe_loop(
 
             let filters: Vec<Subscription> = topics
                 .iter()
-                .map(|topic| Subscription::new(topic.clone(), qos))
+                .map(|topic| Subscription::new(topic.clone(), QoS::AtMostOnce))
                 .collect();
 
-            info!(
-                "Subscribing to {} topic(s) at QoS {}",
-                filters.len(),
-                qos_number(qos)
-            );
+            info!("Subscribing to {} topic(s)", filters.len());
             match client.subscribe(filters).await {
                 Ok(reasons) => {
                     let state = review_suback(&topics, &reasons, &reconnect);
@@ -605,7 +592,7 @@ pub struct MqttClient {
     client_id_prefix: String,
     status_topic: String,
     credentials: Option<(String, String)>,
-    subscribe_qos: QoS,
+    ack_timeout: Duration,
 }
 
 impl MqttClient {
@@ -626,8 +613,8 @@ pub(crate) struct ConnectParams {
     status_topic: String,
     client_id: ClientId,
     credentials: Option<(String, String)>,
+    ack_timeout: Duration,
     topics: Vec<String>,
-    subscribe_qos: QoS,
     core: Arc<Core<LoxEgress>>,
     control: Arc<dyn ControlSink>,
 }
@@ -641,8 +628,8 @@ pub(crate) async fn connect_with(params: ConnectParams) -> Result<(), RelayError
         status_topic,
         client_id,
         credentials,
+        ack_timeout,
         topics,
-        subscribe_qos,
         core,
         control,
     } = params;
@@ -667,6 +654,7 @@ pub(crate) async fn connect_with(params: ConnectParams) -> Result<(), RelayError
             options
                 .client_id(client_id)
                 .keep_alive(KEEP_ALIVE)
+                .ack_timeout(ack_timeout)
                 .receive_maximum(receive_maximum)
                 .command_channel_capacity(command_capacity)
                 .tcp_nodelay(true)
@@ -688,7 +676,6 @@ pub(crate) async fn connect_with(params: ConnectParams) -> Result<(), RelayError
     tokio::spawn(resubscribe_loop(
         Arc::clone(&shared),
         topics,
-        subscribe_qos,
         status_topic,
         notify,
         reconnect,
@@ -732,8 +719,8 @@ impl MqttClient {
             status_topic: self.status_topic.clone(),
             client_id: ClientId::from_prefix(&self.client_id_prefix),
             credentials: self.credentials.clone(),
+            ack_timeout: self.ack_timeout,
             topics,
-            subscribe_qos: self.subscribe_qos,
             core,
             control,
         }
@@ -761,11 +748,7 @@ impl MqttClient {
             client_id_prefix: broker.client_id.clone(),
             status_topic: format!("{}status", config.general.base_topic),
             credentials,
-            subscribe_qos: if broker.force_qos1 {
-                QoS::AtLeastOnce
-            } else {
-                QoS::AtMostOnce
-            },
+            ack_timeout: Duration::from_secs(broker.ack_timeout.clamp(1, 300).unsigned_abs()),
         }
     }
 }
@@ -972,13 +955,19 @@ mod tests {
         );
     }
 
-    /// Subscriptions stay at QoS 0 unless QoS 1 is asked for explicitly.
+    /// The default is glide's own, so leaving the field out changes nothing.
     #[test]
-    fn subscriptions_are_qos0_unless_configured() {
+    fn the_ack_timeout_defaults_to_glides_and_follows_the_config() {
         let mut config = crate::config::AppConfig::default();
-        assert_eq!(MqttClient::build(&config).subscribe_qos, QoS::AtMostOnce);
+        assert_eq!(
+            MqttClient::build(&config).ack_timeout,
+            mqtt_glide::DEFAULT_ACK_TIMEOUT
+        );
 
-        config.broker.force_qos1 = true;
-        assert_eq!(MqttClient::build(&config).subscribe_qos, QoS::AtLeastOnce);
+        config.broker.ack_timeout = 30;
+        assert_eq!(
+            MqttClient::build(&config).ack_timeout,
+            Duration::from_secs(30)
+        );
     }
 }

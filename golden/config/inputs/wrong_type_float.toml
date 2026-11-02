@@ -9,7 +9,7 @@ port = 1.5
 user = 1.5
 password = 1.5
 client_id = 1.5
-force_qos1 = 1.5
+ack_timeout = 1.5
 
 [miniserver]
 miniserver_ip = 1.5

@@ -1,0 +1,1 @@
+[broker] 'ack_timeout' must be between 1 and 300 seconds, got 301
