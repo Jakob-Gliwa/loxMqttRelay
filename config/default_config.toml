@@ -9,6 +9,7 @@ port = 1884
 user = ""  # null becomes empty string in TOML
 password = ""  # null becomes empty string in TOML
 client_id = "loxmqttrelay"
+force_qos1 = false
 
 [miniserver]
 miniserver_ip = "127.0.0.1"

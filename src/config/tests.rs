@@ -106,7 +106,7 @@ fn expected_problems(text: &str) -> Vec<String> {
 /// is what catches a field added to one and not the other.
 #[test]
 fn the_field_table_matches_the_model() {
-    assert_eq!(FIELDS.len(), 22, "22 fields across six sections");
+    assert_eq!(FIELDS.len(), 23, "23 fields across six sections");
 
     // Every section is represented, and the table is grouped by section in the
     // order the file is written.
@@ -134,7 +134,7 @@ fn no_field_name_is_shared_between_sections() {
 
 /// Every field can be read and written by name.
 ///
-/// `get_field` and `set_field` are two hand-written matches over the same 22
+/// `get_field` and `set_field` are two hand-written matches over the same 23
 /// names, and a field missing from either would otherwise fail silently: a
 /// `config/set` that appears to work and changes nothing.
 #[test]

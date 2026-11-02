@@ -183,6 +183,13 @@ pub(crate) static FIELDS: &[FieldSpec] = &[
         checks: &[],
         protected: false,
     },
+    FieldSpec {
+        name: "force_qos1",
+        section: ConfigSection::Broker,
+        kind: FieldKind::Bool,
+        checks: &[],
+        protected: false,
+    },
     // -- miniserver ---------------------------------------------------------
     FieldSpec {
         name: "miniserver_ip",

@@ -6,6 +6,7 @@
 [broker] 'user' expects str | None, got dict
 [broker] 'password' expects str | None, got dict
 [broker] 'client_id' expects str, got dict
+[broker] 'force_qos1' expects bool, got dict
 [miniserver] 'miniserver_ip' expects str, got dict
 [miniserver] 'miniserver_port' expects int, got dict
 [miniserver] 'miniserver_user' expects str, got dict

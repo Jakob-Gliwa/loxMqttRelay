@@ -6,6 +6,7 @@
 [broker] 'user' expects str | None, got datetime
 [broker] 'password' expects str | None, got datetime
 [broker] 'client_id' expects str, got datetime
+[broker] 'force_qos1' expects bool, got datetime
 [miniserver] 'miniserver_ip' expects str, got datetime
 [miniserver] 'miniserver_port' expects int, got datetime
 [miniserver] 'miniserver_user' expects str, got datetime

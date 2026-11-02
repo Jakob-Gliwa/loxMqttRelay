@@ -9,6 +9,7 @@ port = 42
 user = 42
 password = 42
 client_id = 42
+force_qos1 = 42
 
 [miniserver]
 miniserver_ip = 42

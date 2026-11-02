@@ -9,6 +9,7 @@ port = "x"
 user = "x"
 password = "x"
 client_id = "x"
+force_qos1 = "x"
 
 [miniserver]
 miniserver_ip = "x"

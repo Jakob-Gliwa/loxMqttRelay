@@ -9,6 +9,7 @@ port = 1
 user = ""
 password = ""
 client_id = "loxmqttrelay"
+force_qos1 = false
 
 [miniserver]
 miniserver_ip = "127.0.0.1"

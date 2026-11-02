@@ -394,6 +394,14 @@ impl LifecycleHook for ConnectSignal {
     }
 }
 
+fn qos_number(qos: QoS) -> u8 {
+    match qos {
+        QoS::AtMostOnce => 0,
+        QoS::AtLeastOnce => 1,
+        QoS::ExactlyOnce => 2,
+    }
+}
+
 fn is_granted(reason: SubscribeAckReason) -> bool {
     matches!(
         reason,
@@ -476,6 +484,7 @@ fn review_suback(
 async fn resubscribe_loop(
     shared: Arc<MqttShared>,
     topics: Vec<String>,
+    qos: QoS,
     status_topic: String,
     notify: Arc<Notify>,
     reconnect: StandardReconnectPolicy,
@@ -492,10 +501,14 @@ async fn resubscribe_loop(
 
             let filters: Vec<Subscription> = topics
                 .iter()
-                .map(|topic| Subscription::new(topic.clone(), QoS::AtMostOnce))
+                .map(|topic| Subscription::new(topic.clone(), qos))
                 .collect();
 
-            info!("Subscribing to {} topic(s)", filters.len());
+            info!(
+                "Subscribing to {} topic(s) at QoS {}",
+                filters.len(),
+                qos_number(qos)
+            );
             match client.subscribe(filters).await {
                 Ok(reasons) => {
                     let state = review_suback(&topics, &reasons, &reconnect);
@@ -592,6 +605,7 @@ pub struct MqttClient {
     client_id_prefix: String,
     status_topic: String,
     credentials: Option<(String, String)>,
+    subscribe_qos: QoS,
 }
 
 impl MqttClient {
@@ -613,6 +627,7 @@ pub(crate) struct ConnectParams {
     client_id: ClientId,
     credentials: Option<(String, String)>,
     topics: Vec<String>,
+    subscribe_qos: QoS,
     core: Arc<Core<LoxEgress>>,
     control: Arc<dyn ControlSink>,
 }
@@ -627,6 +642,7 @@ pub(crate) async fn connect_with(params: ConnectParams) -> Result<(), RelayError
         client_id,
         credentials,
         topics,
+        subscribe_qos,
         core,
         control,
     } = params;
@@ -672,6 +688,7 @@ pub(crate) async fn connect_with(params: ConnectParams) -> Result<(), RelayError
     tokio::spawn(resubscribe_loop(
         Arc::clone(&shared),
         topics,
+        subscribe_qos,
         status_topic,
         notify,
         reconnect,
@@ -716,6 +733,7 @@ impl MqttClient {
             client_id: ClientId::from_prefix(&self.client_id_prefix),
             credentials: self.credentials.clone(),
             topics,
+            subscribe_qos: self.subscribe_qos,
             core,
             control,
         }
@@ -743,6 +761,11 @@ impl MqttClient {
             client_id_prefix: broker.client_id.clone(),
             status_topic: format!("{}status", config.general.base_topic),
             credentials,
+            subscribe_qos: if broker.force_qos1 {
+                QoS::AtLeastOnce
+            } else {
+                QoS::AtMostOnce
+            },
         }
     }
 }
@@ -947,5 +970,15 @@ mod tests {
             with.credentials,
             Some(("someone".to_owned(), "ignored".to_owned()))
         );
+    }
+
+    /// Subscriptions stay at QoS 0 unless QoS 1 is asked for explicitly.
+    #[test]
+    fn subscriptions_are_qos0_unless_configured() {
+        let mut config = crate::config::AppConfig::default();
+        assert_eq!(MqttClient::build(&config).subscribe_qos, QoS::AtMostOnce);
+
+        config.broker.force_qos1 = true;
+        assert_eq!(MqttClient::build(&config).subscribe_qos, QoS::AtLeastOnce);
     }
 }

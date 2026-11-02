@@ -9,6 +9,7 @@ port = ["a", "b"]
 user = ["a", "b"]
 password = ["a", "b"]
 client_id = ["a", "b"]
+force_qos1 = ["a", "b"]
 
 [miniserver]
 miniserver_ip = ["a", "b"]

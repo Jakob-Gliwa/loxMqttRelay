@@ -1,6 +1,6 @@
 # The configuration file, specified by example
 
-This directory is the specification for `src/config`: 40 documents and 41
+This directory is the specification for `src/config`: 40 documents and 42
 control-topic updates, each paired with exactly what the relay does with it.
 `src/config/tests.rs` asserts all of it.
 

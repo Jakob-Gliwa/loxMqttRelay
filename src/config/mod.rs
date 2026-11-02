@@ -60,6 +60,13 @@ pub(crate) struct BrokerConfig {
     pub(crate) user: Option<String>,
     pub(crate) password: Option<String>,
     pub(crate) client_id: String,
+    /// Subscribe at QoS 1 instead of QoS 0.
+    ///
+    /// A workaround, not a delivery guarantee: some brokers (NanoMQ, at least up
+    /// to 0.25.7) forward a resent QoS 1 message to a QoS 0 subscriber with its
+    /// DUP flag still set, which MQTT forbids, and the client drops the
+    /// connection over it. At QoS 1 the flag is legal.
+    pub(crate) force_qos1: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -120,6 +127,7 @@ impl Default for AppConfig {
                 user: None,
                 password: None,
                 client_id: "loxmqttrelay".to_owned(),
+                force_qos1: false,
             },
             miniserver: MiniserverConfig {
                 miniserver_ip: "127.0.0.1".to_owned(),
@@ -168,6 +176,7 @@ impl AppConfig {
             "user" => opt_str(&self.broker.user),
             "password" => opt_str(&self.broker.password),
             "client_id" => CfgValue::Str(self.broker.client_id.clone()),
+            "force_qos1" => CfgValue::Bool(self.broker.force_qos1),
             "miniserver_ip" => CfgValue::Str(self.miniserver.miniserver_ip.clone()),
             "miniserver_port" => CfgValue::Int(i128::from(self.miniserver.miniserver_port)),
             "miniserver_user" => CfgValue::Str(self.miniserver.miniserver_user.clone()),
@@ -207,6 +216,7 @@ impl AppConfig {
             "user" => self.broker.user = value.as_str().map(str::to_owned),
             "password" => self.broker.password = value.as_str().map(str::to_owned),
             "client_id" => self.broker.client_id = text(&value),
+            "force_qos1" => self.broker.force_qos1 = flag(&value),
             "miniserver_ip" => self.miniserver.miniserver_ip = text(&value),
             "miniserver_port" => self.miniserver.miniserver_port = int(&value),
             "miniserver_user" => self.miniserver.miniserver_user = text(&value),
